@@ -469,3 +469,131 @@ impl App {
         self.panel_tab = PanelTab::Problems;
     }
 }
+
+/// What a dialog's buttons, or Enter and Escape, asked for.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Answer {
+    Waiting,
+    Confirm,
+    Cancel,
+}
+
+/// How a dialog's main button looks: the accent, or red for what can't be undone.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Tone {
+    Normal,
+    Danger,
+}
+
+/// A dialog, the same for every question ride asks: the window behind it dims, the box sits
+/// in the middle with its title, what it holds, and its buttons at the bottom right.
+/// Escape or a click outside cancels. `body` returns true when what is in it confirms (Enter
+/// in its text box); `can` is whether the main button may be used.
+pub(super) fn modal(
+    ctx: &Context,
+    id: &str,
+    title: &str,
+    confirm: &str,
+    tone: Tone,
+    can: bool,
+    width: f32,
+    body: impl FnOnce(&mut Ui) -> bool,
+) -> Answer {
+    let mut answer = Answer::Waiting;
+    let frame = Frame::NONE
+        .fill(theme::PANEL_BG())
+        .stroke((1.0, theme::LINE()))
+        .corner_radius(12)
+        .inner_margin(Margin::same(20))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 12],
+            blur: 40,
+            spread: 0,
+            color: Color32::from_black_alpha(140),
+        });
+    let shown = egui::Modal::new(egui::Id::new(("modal", id)))
+        .frame(frame)
+        .backdrop_color(Color32::from_black_alpha(110))
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(
+                RichText::new(title)
+                    .size(16.0)
+                    .strong()
+                    .color(theme::STRONG()),
+            );
+            ui.add_space(4.0);
+            if body(ui) && can {
+                answer = Answer::Confirm;
+            }
+            ui.add_space(12.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let fill = match tone {
+                    Tone::Normal => theme::ACCENT(),
+                    Tone::Danger => theme::ANSI()[1],
+                };
+                let main = egui::Button::new(RichText::new(confirm).color(Color32::WHITE))
+                    .fill(fill.gamma_multiply(if can { 0.9 } else { 0.35 }))
+                    .corner_radius(6)
+                    .min_size(vec2(88.0, 30.0));
+                if ui.add_enabled(can, main).clicked() {
+                    answer = Answer::Confirm;
+                }
+                let cancel = egui::Button::new(RichText::new("Cancel").color(theme::TEXT()))
+                    .fill(theme::tint(12))
+                    .corner_radius(6)
+                    .min_size(vec2(80.0, 30.0));
+                if ui.add(cancel).clicked() {
+                    answer = Answer::Cancel;
+                }
+            });
+        });
+    if answer == Answer::Waiting && shown.should_close() {
+        answer = Answer::Cancel;
+    }
+    answer
+}
+
+/// A text box as dialogs have it: a quiet box whose border lights up while it is typed in.
+/// More than one row makes it multi-line.
+pub(super) fn field(
+    ui: &mut Ui,
+    id: &str,
+    value: &mut String,
+    hint: &str,
+    rows: usize,
+) -> egui::Response {
+    let id = ui.make_persistent_id(("field", id));
+    let focused = ui.memory(|m| m.has_focus(id));
+    let stroke = if focused {
+        theme::ACCENT().gamma_multiply(0.85)
+    } else {
+        theme::LINE()
+    };
+    Frame::NONE
+        .fill(theme::tint(6))
+        .stroke((1.0, stroke))
+        .corner_radius(6)
+        .inner_margin(Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            let edit = if rows > 1 {
+                TextEdit::multiline(value).desired_rows(rows)
+            } else {
+                TextEdit::singleline(value)
+            };
+            ui.add(
+                edit.id(id)
+                    .frame(Frame::NONE)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(hint),
+            )
+        })
+        .inner
+}
+
+/// A dialog's explanation: the text, in the body's colour, wrapped.
+pub(super) fn note(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT())).wrap());
+}

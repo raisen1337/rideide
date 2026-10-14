@@ -49,6 +49,8 @@ pub struct Terminal {
     pub name: Option<String>,
     /// A colour picked for it, as an index into the theme's terminal colours.
     pub color: Option<usize>,
+    /// The pane of the terminal grid it is in.
+    pub pane: u32,
     pub request_focus: bool,
     term: Term<Listener>,
     parser: Processor,
@@ -210,6 +212,7 @@ impl Terminal {
             title: String::new(),
             name: None,
             color: None,
+            pane: 0,
             request_focus: true,
             term: Term::new(
                 Config {

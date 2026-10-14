@@ -142,13 +142,22 @@ const TERM_COLORS: [(usize, &str); 6] = [
     (6, "Cyan"),
 ];
 
+/// The colour a terminal is marked with, or the accent.
+fn term_color(term: &Terminal) -> Color32 {
+    term.color.map_or(theme::ACCENT(), |c| theme::ANSI()[c])
+}
+
 /// A terminal's name: the one given by hand, else the title the programs in it set (Claude
 /// Code names it after what it is working on), else its number.
 fn term_title(term: &Terminal, index: usize) -> String {
     match &term.name {
         Some(name) => name.clone(),
         None if term.title.trim().is_empty() => format!("Terminal {}", index + 1),
-        None => term.title.chars().take(40).collect(),
+        None => {
+            let title = term.title.trim();
+            let title = title.rsplit(['\\', '/']).next().unwrap_or(title);
+            title.chars().take(28).collect()
+        }
     }
 }
 
@@ -226,6 +235,8 @@ fn search_chip(ui: &mut Ui, on: &mut bool, text: &str, hint: &str) -> bool {
     clicked
 }
 
+/// The codicon for splitting.
+const SPLIT_ICON: char = '\u{eb56}';
 /// The codicon for replacing every match.
 const REPLACE_ALL_ICON: char = '\u{eb3c}';
 
@@ -713,6 +724,8 @@ struct App {
     focus_find: bool,
     terms: Vec<Terminal>,
     active_term: usize,
+    /// The terminals laid out side by side and one above another, as the editor's panes are.
+    term_panes: panes::Panes,
     show_term: bool,
     term_dock: TermDock,
     /// The editor area of the last frame: where a dragged terminal can be dropped.
@@ -1404,8 +1417,46 @@ fn icon_button(ui: &mut Ui, icon: char, hint: &str) -> bool {
         .clicked()
 }
 
+/// A row of a menu: its icon in a column of its own, the text, and the whole row lit up
+/// under the mouse.
 fn menu_item(ui: &mut Ui, icon: char, text: &str) -> bool {
-    let clicked = ui.button(format!("{icon}   {text}")).clicked();
+    let font = egui::FontId::proportional(13.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font, theme::TEXT());
+    let width = (galley.size().x + 56.0).max(210.0);
+    let (rect, resp) = ui.allocate_at_least(vec2(width, 28.0), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, 5.0, theme::ACCENT().gamma_multiply(0.22));
+    }
+    let painter = ui.painter();
+    painter.text(
+        rect.left_center() + vec2(16.0, 0.0),
+        Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(14.0),
+        if hovered {
+            theme::STRONG()
+        } else {
+            theme::COMMENT()
+        },
+    );
+    let color = if hovered {
+        theme::STRONG()
+    } else {
+        theme::TEXT()
+    };
+    painter.galley(
+        rect.left_center() + vec2(34.0, -galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let clicked = resp.clicked();
     if clicked {
         ui.close();
     }
@@ -1462,6 +1513,7 @@ impl App {
             focus_find: false,
             terms: Vec::new(),
             active_term: 0,
+            term_panes: panes::Panes::default(),
             show_term: true,
             term_dock: TermDock::from_name(&term_dock),
             work_area: egui::Rect::NOTHING,
@@ -2117,6 +2169,22 @@ impl App {
                     self.side = Side::Search;
                     self.run_search();
                 }
+                // RIDE_DIALOG=delete|rename opens that dialog, to look at it.
+                match std::env::var("RIDE_DIALOG").as_deref() {
+                    Ok("delete") => {
+                        self.dialog = Some(Dialog::ConfirmDelete {
+                            path: join(&self.root, "tsconfig.json"),
+                        })
+                    }
+                    Ok("rename") => {
+                        self.dialog = Some(Dialog::Prompt {
+                            title: "Rename terminal".into(),
+                            value: "logs".into(),
+                            action: PromptAction::RenameTerminal(0),
+                        })
+                    }
+                    _ => {}
+                }
                 if let Ok(text) = std::env::var("RIDE_CHAT_SEND") {
                     self.show_chat = true;
                     self.chat_send(text);
@@ -2487,7 +2555,10 @@ impl App {
             rows,
             cwd: self.root.clone(),
         });
-        self.terms.push(Terminal::new(id, cols, rows));
+        let pane = self.terms.get(self.active_term).map_or(0, |t| t.pane);
+        let mut term = Terminal::new(id, cols, rows);
+        term.pane = pane;
+        self.terms.push(term);
         self.active_term = self.terms.len() - 1;
         self.show_term = true;
     }
@@ -3876,6 +3947,7 @@ impl App {
     fn term_panel(&mut self, ui: &mut Ui) {
         let mut close = None;
         let mut term_act = None;
+        let (mut dragged_term, mut dropped_term) = (None, false);
         if self.guest() {
             self.panel_tab = chrome::PanelTab::Problems;
         }
@@ -3890,12 +3962,34 @@ impl App {
             .show(ui, |ui| {
                 // The bar is the handle for moving the panel. It is claimed before the tabs
                 // and buttons on it, so a click on those goes to them and not to the handle.
+                const BAR_H: f32 = 28.0;
                 let bar = egui::Rect::from_min_size(
                     ui.max_rect().min,
-                    vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    vec2(ui.available_width(), BAR_H),
                 );
                 let drag = ui.interact(bar, ui.id().with("terminal_drag"), Sense::drag());
-                ui.horizontal(|ui| {
+                // The row is cut at the panel's edge: tabs that don't fit mustn't widen the
+                // panel, and the terminals under it with it.
+                // The panel's own buttons keep a place at the right, whatever the tabs take.
+                let whole = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    vec2(ui.available_width(), BAR_H),
+                );
+                let (row, buttons) = whole.split_left_right_at_x(whole.right() - 64.0);
+                let mut row_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(row)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
+                let mut buttons_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(buttons)
+                        .layout(Layout::right_to_left(Align::Center)),
+                );
+                ui.advance_cursor_after_rect(whole);
+                let ui = &mut row_ui;
+                {
                     self.panel_tabs(ui);
                     ui.add_space(8.0);
                     for (index, term) in self.terms.iter().enumerate().filter(|_| terminal) {
@@ -3908,9 +4002,18 @@ impl App {
                             ),
                             (&title, color.unwrap_or(theme::TEXT())),
                         ]);
-                        let resp = ui
-                            .selectable_label(index == self.active_term, label)
-                            .on_hover_text("Double-click to rename; right-click for more");
+                        let tab = egui::Button::selectable(index == self.active_term, label)
+                            .sense(Sense::click_and_drag());
+                        let resp = ui.add(tab).on_hover_text(
+                            "Double-click to rename; right-click for more; drag onto a terminal to put them side by side",
+                        );
+                        if resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            dragged_term = Some(term.id);
+                        }
+                        if resp.drag_stopped() {
+                            dropped_term = true;
+                        }
                         if let Some(color) = color {
                             let r = resp.rect;
                             ui.painter().line_segment(
@@ -3968,7 +4071,14 @@ impl App {
                     if terminal && icon_button(ui, icons::ADD, "New terminal") {
                         self.new_term();
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if terminal
+                        && !self.terms.is_empty()
+                        && icon_button(ui, SPLIT_ICON, "Split: a new terminal beside this one")
+                    {
+                        self.split_term();
+                    }
+                    {
+                        let ui = &mut buttons_ui;
                         if icon_button(ui, icons::CLOSE, "Hide the panel") {
                             self.show_term = false;
                         }
@@ -3983,8 +4093,8 @@ impl App {
                         })
                         .response
                         .on_hover_text("Move the panel (or drag this bar to an edge)");
-                    });
-                });
+                    }
+                }
                 // The bar itself is the handle: drag it toward an edge of the editor area.
                 // It counts as a move only once the pointer has gone some way, so a click
                 // on a tab that slips a little doesn't move the panel.
@@ -4026,6 +4136,12 @@ impl App {
                     }
                 }
             });
+        if dragged_term.is_some() {
+            self.term_panes.drag = dragged_term;
+        }
+        if dropped_term {
+            self.term_panes.dropped = true;
+        }
         match term_act {
             Some((index, TermAct::Rename)) => {
                 let term = &self.terms[index];
@@ -4046,43 +4162,44 @@ impl App {
         }
         if !terminal {
             self.term_focused = false;
-            Frame::NONE
-                .inner_margin(Margin::symmetric(12, 4))
-                .show(ui, |ui| self.problems_panel(ui));
-            // The panel keeps the size of what is in it: the problems fill it, so it stays as
-            // tall as the terminal had it.
-            ui.allocate_space(ui.available_size());
+            // Exactly the room the panel has: the panel takes the size of what is in it, so
+            // anything else would make it grow or shrink by itself.
+            let area = ui.available_rect_before_wrap();
+            let inner =
+                egui::Rect::from_min_max(area.min + vec2(12.0, 4.0), area.max - vec2(12.0, 4.0));
+            let mut list = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+            list.set_clip_rect(inner.intersect(ui.clip_rect()));
+            self.problems_panel(&mut list);
+            ui.advance_cursor_after_rect(area);
             return;
         }
         if self.terms.is_empty() {
             self.new_term();
+            // RIDE_TERM_SPLIT starts with three terminals in a grid, to look at it.
+            if std::env::var_os("RIDE_TERM_SPLIT").is_some() {
+                self.split_term();
+                let right = self.active_term;
+                self.new_term();
+                let below = self.terms.len() - 1;
+                let pane = self
+                    .term_panes
+                    .split(self.terms[right].pane, panes::Zone::Below);
+                self.terms[below].pane = pane;
+                self.terms[below].name = Some("logs".into());
+                self.terms[below].color = Some(2);
+            }
         }
-        let Some(term) = self.terms.get_mut(self.active_term) else {
-            return;
-        };
-        let id = term.id;
-        let out = Frame::NONE
-            .inner_margin(Margin {
-                left: 6,
-                right: 6,
-                top: 0,
-                bottom: 6,
-            })
-            .show(ui, |ui| term.show(ui))
-            .inner;
-        self.term_focused = out.focused;
-        if let Some((cols, rows)) = out.resize {
-            self.request(Request::TermResize {
-                term: id,
-                cols,
-                rows,
-            });
-        }
-        if !out.input.is_empty() {
-            self.request(Request::TermInput {
-                term: id,
-                data: out.input,
-            });
+        self.term_grid(ui);
+    }
+
+    /// A new terminal in a pane of its own, to the right of the one at hand.
+    fn split_term(&mut self) {
+        let from = self.terms.get(self.active_term).map(|t| t.pane);
+        self.new_term();
+        if let (Some(from), Some(term)) = (from, self.terms.last_mut()) {
+            let pane = self.term_panes.split(from, panes::Zone::Right);
+            term.pane = pane;
+            self.term_panes.shown.insert(pane, term.id);
         }
     }
 
@@ -4438,41 +4555,69 @@ impl App {
         let Some(mut dialog) = self.dialog.take() else {
             return;
         };
-        let title = match &dialog {
-            Dialog::Prompt { title, .. } => title.clone(),
-            Dialog::ConfirmDelete { .. } => "Delete".into(),
-            Dialog::ConfirmClose(_) => "Unsaved changes".into(),
-            Dialog::ConfirmReplace { .. } => "Replace in files".into(),
-            Dialog::Text { title, .. } => title.clone(),
-            Dialog::Schedule { .. } => "Scheduled task".into(),
+        use chrome::{field, note, Answer, Tone};
+        let (title, confirm_label, tone, width) = match &dialog {
+            Dialog::Prompt { title, .. } => (title.clone(), "OK", Tone::Normal, 380.0),
+            Dialog::ConfirmDelete { path } => (
+                format!("Delete {}?", file_name(path)),
+                "Delete",
+                Tone::Danger,
+                400.0,
+            ),
+            Dialog::ConfirmClose(_) => (
+                "Unsaved changes".into(),
+                "Close without saving",
+                Tone::Danger,
+                380.0,
+            ),
+            Dialog::ConfirmReplace { .. } => {
+                ("Replace in files".into(), "Replace", Tone::Normal, 440.0)
+            }
+            Dialog::Text { title, .. } => (title.clone(), "Copy", Tone::Normal, 500.0),
+            Dialog::Schedule { .. } => ("Scheduled task".into(), "Schedule", Tone::Normal, 460.0),
         };
-        let (mut confirm, mut cancel) = (false, false);
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let (query, with) = (self.search.query.clone(), self.search.replace.clone());
+        let tab_name = match &dialog {
+            Dialog::ConfirmClose(index) => self
+                .tabs
+                .get(*index)
+                .map_or(String::new(), |t| file_name(&t.path).to_string()),
+            _ => String::new(),
+        };
+        let answer = chrome::modal(
+            ctx,
+            "dialog",
+            &title,
+            confirm_label,
+            tone,
+            true,
+            width,
+            |ui| {
                 let enter = ui.input(|i| i.key_pressed(Key::Enter));
-                cancel = ui.input(|i| i.key_pressed(Key::Escape));
-                let confirm_label = match &mut dialog {
+                match &mut dialog {
                     Dialog::Prompt { value, .. } => {
-                        let edit = ui.add(TextEdit::singleline(value).desired_width(320.0));
+                        let edit = field(ui, "prompt", value, "", 1);
                         if !edit.has_focus() && !edit.lost_focus() {
                             edit.request_focus();
                         }
-                        confirm = edit.lost_focus() && enter;
-                        "OK"
+                        edit.lost_focus() && enter
                     }
                     Dialog::ConfirmDelete { path } => {
-                        ui.label(format!(
-                            "Delete {path} from the server?\nThis cannot be undone."
-                        ));
-                        "Delete"
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(path.as_str()).small().color(theme::COMMENT()),
+                            )
+                            .wrap(),
+                        );
+                        note(
+                            ui,
+                            "It's removed from the server, and that can't be undone.",
+                        );
+                        enter
                     }
-                    Dialog::ConfirmClose(index) => {
-                        let name = self.tabs.get(*index).map_or("", |t| file_name(&t.path));
-                        ui.label(format!("{name} has unsaved changes."));
-                        "Close without saving"
+                    Dialog::ConfirmClose(_) => {
+                        note(ui, &format!("{tab_name} has changes that aren't saved."));
+                        enter
                     }
                     Dialog::ConfirmReplace { paths, lines } => {
                         let files = if paths.len() == 1 {
@@ -4480,46 +4625,45 @@ impl App {
                         } else {
                             format!("{} files", paths.len())
                         };
-                        ui.label(format!(
-                            "Replace every match of \"{}\" with \"{}\" in {files} ({lines} lines)?\nFiles that aren't open are changed on the server right away; an open file's change can be undone in it.",
-                            self.search.query, self.search.replace
-                        ));
-                        "Replace"
+                        note(
+                        ui,
+                        &format!("Replace every match of \"{query}\" with \"{with}\" in {files} ({lines} lines)?"),
+                    );
+                        ui.label(
+                        RichText::new(
+                            "Files that aren't open are changed on the server right away; an open file's change can be undone in it.",
+                        )
+                        .small()
+                        .color(theme::COMMENT()),
+                    );
+                        enter
                     }
                     Dialog::Text { text, .. } => {
                         ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                            ui.add(TextEdit::multiline(text).desired_width(480.0));
+                            field(ui, "text", text, "", 12);
                         });
-                        "Copy"
+                        false
                     }
                     Dialog::Schedule { prompt, minutes } => {
-                        ui.label("What should Claude do each time?");
-                        ui.add(
-                            TextEdit::multiline(prompt)
-                                .desired_width(440.0)
-                                .desired_rows(3),
-                        );
+                        note(ui, "What should Claude do each time?");
+                        field(ui, "schedule", prompt, "A task for Claude", 3);
                         ui.horizontal(|ui| {
                             ui.label("Every");
-                            ui.add(TextEdit::singleline(minutes).desired_width(48.0));
+                            ui.add_sized([56.0, 24.0], TextEdit::singleline(minutes));
                             ui.label("minutes, in read-only (Ask) mode");
                         });
-                        "Schedule"
+                        false
                     }
-                };
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    confirm |= ui.button(confirm_label).clicked();
-                    cancel |= ui.button("Cancel").clicked();
-                });
-            });
-
-        if cancel && !confirm {
-            return;
-        }
-        if !confirm {
-            self.dialog = Some(dialog);
-            return;
+                }
+            },
+        );
+        match answer {
+            Answer::Cancel => return,
+            Answer::Waiting => {
+                self.dialog = Some(dialog);
+                return;
+            }
+            Answer::Confirm => {}
         }
         match dialog {
             Dialog::Prompt { value, action, .. } => {

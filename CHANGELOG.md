@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.4
+
+- **Terminals side by side.** Drag a terminal's tab onto the edge of a terminal to put it beside or under it, as with the editor's tabs, or use the split button next to +. The line between two columns can be dragged. With several, the one you're typing in is marked with its colour.
+- **A modern look for dialogs and menus.** Every question ride asks now comes the same way: the window dims, the box sits in the middle with its title and the main button at the bottom right (red where something can't be undone); Enter confirms, Escape cancels. Right-click menus have their icons in a column of their own and light up the row under the mouse.
+- The Problems tab no longer grows taller as problems are found; it keeps the size you gave the panel and scrolls.
+- Terminal tabs show the program's name instead of its whole path, and the panel's own buttons stay visible however many terminals there are.
+
 ## 0.7.3
 
 - **A cleaner search.** The search and replace boxes are the same width and line up, with their buttons inside at the right; the box you're typing in is outlined and shows its cursor. The side bar no longer grows wider by itself while the search is open.

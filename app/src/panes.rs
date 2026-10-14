@@ -69,7 +69,7 @@ impl Panes {
         self.columns.iter().flat_map(|c| c.panes.iter().copied())
     }
 
-    fn first(&self) -> u32 {
+    pub(super) fn first(&self) -> u32 {
         self.ids().next().unwrap_or(0)
     }
 
@@ -78,7 +78,7 @@ impl Panes {
     }
 
     /// Opens a new pane beside `target` and returns its id.
-    fn split(&mut self, target: u32, zone: Zone) -> u32 {
+    pub(super) fn split(&mut self, target: u32, zone: Zone) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         let Some(col) = self.columns.iter().position(|c| c.panes.contains(&target)) else {
@@ -140,7 +140,176 @@ impl Panes {
     }
 }
 
+/// The lines between columns can be dragged to resize them.
+fn drag_column_lines(panes: &mut Panes, ui: &mut Ui, area: Rect, salt: &str) {
+    let total: f32 = panes.columns.iter().map(|c| c.weight).sum();
+    let mut x = area.left();
+    for col in 1..panes.columns.len() {
+        x += area.width() * panes.columns[col - 1].weight / total;
+        let handle =
+            Rect::from_center_size(Pos2::new(x, area.center().y), vec2(7.0, area.height()));
+        let resp = ui.interact(handle, ui.id().with((salt, col)), Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if resp.dragged() {
+            let delta = resp.drag_delta().x / area.width() * total;
+            let least = total * 0.12;
+            let (left, right) = (panes.columns[col - 1].weight, panes.columns[col].weight);
+            let delta = delta.clamp(least - left, right - least);
+            if least - left <= right - least {
+                panes.columns[col - 1].weight = left + delta;
+                panes.columns[col].weight = right - delta;
+            }
+        }
+    }
+}
+
+/// Paints where a dragged tab would land.
+fn paint_drop(ui: &Ui, shape: Rect) {
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pane_drop"));
+    ui.ctx().layer_painter(layer).rect(
+        shape.shrink(4.0),
+        8,
+        theme::ACCENT().gamma_multiply(0.18),
+        (1.5, theme::ACCENT()),
+        egui::StrokeKind::Inside,
+    );
+}
+
 impl App {
+    /// The terminals, laid out as the editor's panes are: each pane shows one terminal, and
+    /// a terminal's tab dragged to the edge of one puts it there, beside or under it.
+    pub(super) fn term_grid(&mut self, ui: &mut Ui) {
+        let first = self.term_panes.first();
+        let known: HashSet<u32> = self.term_panes.ids().collect();
+        for term in &mut self.terms {
+            if !known.contains(&term.pane) {
+                term.pane = first;
+            }
+        }
+        let used: HashSet<u32> = self.terms.iter().map(|t| t.pane).collect();
+        self.term_panes.prune(&used);
+        if let Some(term) = self.terms.get(self.active_term) {
+            self.term_panes.shown.insert(term.pane, term.id);
+        }
+
+        let area = ui.available_rect_before_wrap();
+        let rects = self.term_panes.layout(area);
+        let pressed = ui.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
+        let several = rects.len() > 1;
+        let mut focused = false;
+        let mut outputs = Vec::new();
+        for (pane, rect) in &rects {
+            let shown = self.term_panes.shown.get(pane).copied();
+            let here = |t: &Terminal| t.pane == *pane;
+            let index = self
+                .terms
+                .iter()
+                .position(|t| here(t) && Some(t.id) == shown)
+                .or_else(|| self.terms.iter().position(here));
+            let Some(index) = index else {
+                continue;
+            };
+            let inner = Rect::from_min_max(
+                rect.min + vec2(6.0, if several { 4.0 } else { 0.0 }),
+                rect.max - vec2(6.0, 6.0),
+            );
+            let term = &mut self.terms[index];
+            let builder = egui::UiBuilder::new()
+                .id_salt(("term_pane", *pane))
+                .max_rect(inner);
+            let out = ui
+                .scope_builder(builder, |ui| {
+                    ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+                    term.show(ui)
+                })
+                .inner;
+            if out.focused {
+                focused = true;
+                self.active_term = index;
+            }
+            outputs.push((term.id, out.resize, out.input));
+            if rect.left() > area.left() + 1.0 {
+                ui.painter()
+                    .vline(rect.left(), rect.y_range(), (1.0, theme::LINE()));
+            }
+            if rect.top() > area.top() + 1.0 {
+                ui.painter()
+                    .hline(rect.x_range(), rect.top(), (1.0, theme::LINE()));
+            }
+            // With several, the one at hand is marked; a click in another makes it that one.
+            if several && index == self.active_term {
+                let color = term_color(&self.terms[index]);
+                ui.painter()
+                    .hline(rect.x_range().shrink(6.0), rect.top() + 1.0, (2.0, color));
+            }
+            if pressed.is_some_and(|p| rect.contains(p)) {
+                self.active_term = index;
+            }
+        }
+        ui.advance_cursor_after_rect(area);
+        drag_column_lines(&mut self.term_panes, ui, area, "term_resize");
+
+        // A terminal's tab dragged over the grid shows where it would go, and goes there.
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        if let (Some(id), Some(pointer)) = (self.term_panes.drag, pointer) {
+            if let Some((pane, rect)) = rects.iter().find(|(_, rect)| rect.contains(pointer)) {
+                let (zone, shape) = zone_at(*rect, pointer);
+                let from = self.terms.iter().position(|t| t.id == id);
+                let alone = from.is_some_and(|index| {
+                    self.terms
+                        .iter()
+                        .filter(|t| t.pane == self.terms[index].pane)
+                        .count()
+                        == 1
+                });
+                // A terminal alone in its pane can't be split off its own pane.
+                let moves = from.is_some_and(|index| {
+                    let own = self.terms[index].pane == *pane;
+                    if zone == Zone::Into {
+                        !own
+                    } else {
+                        !(own && alone)
+                    }
+                });
+                if moves {
+                    paint_drop(ui, shape);
+                }
+                if let (true, true, Some(index)) = (self.term_panes.dropped, moves, from) {
+                    let target = if zone == Zone::Into {
+                        *pane
+                    } else {
+                        self.term_panes.split(*pane, zone)
+                    };
+                    self.terms[index].pane = target;
+                    self.term_panes.shown.insert(target, id);
+                    self.active_term = index;
+                    self.terms[index].request_focus = true;
+                }
+            }
+        }
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.term_panes.drag = None;
+        }
+        self.term_panes.dropped = false;
+
+        self.term_focused = focused;
+        for (term, resize, input) in outputs {
+            if let Some((cols, rows)) = resize {
+                self.request(Request::TermResize { term, cols, rows });
+            }
+            if !input.is_empty() {
+                self.request(Request::TermInput { term, data: input });
+            }
+        }
+    }
+
     /// The pane keyboard shortcuts act on, and where newly opened files go.
     pub(super) fn focus_pane(&self) -> u32 {
         self.docked_active()
@@ -229,31 +398,7 @@ impl App {
         }
         ui.advance_cursor_after_rect(area);
 
-        // The line between two columns can be dragged to resize them.
-        let total: f32 = self.panes.columns.iter().map(|c| c.weight).sum();
-        let mut x = area.left();
-        for col in 1..self.panes.columns.len() {
-            x += area.width() * self.panes.columns[col - 1].weight / total;
-            let handle =
-                Rect::from_center_size(Pos2::new(x, area.center().y), vec2(7.0, area.height()));
-            let resp = ui.interact(handle, ui.id().with(("pane_resize", col)), Sense::drag());
-            if resp.hovered() || resp.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            }
-            if resp.dragged() {
-                let delta = resp.drag_delta().x / area.width() * total;
-                let least = total * 0.12;
-                let (left, right) = (
-                    self.panes.columns[col - 1].weight,
-                    self.panes.columns[col].weight,
-                );
-                let delta = delta.clamp(least - left, right - least);
-                if least - left <= right - least {
-                    self.panes.columns[col - 1].weight = left + delta;
-                    self.panes.columns[col].weight = right - delta;
-                }
-            }
-        }
+        drag_column_lines(&mut self.panes, ui, area, "pane_resize");
 
         // A tab dragged over a pane shows where it would land, and lands there when let go.
         let pointer = ui.input(|i| i.pointer.interact_pos());

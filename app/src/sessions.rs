@@ -21,6 +21,7 @@ pub(super) struct Session {
     active: usize,
     panes: panes::Panes,
     terms: Vec<Terminal>,
+    term_panes: panes::Panes,
     active_term: usize,
     search: Search,
     find: Option<String>,
@@ -52,6 +53,7 @@ impl Session {
             tabs: Vec::new(),
             active: 0,
             panes: panes::Panes::default(),
+            term_panes: panes::Panes::default(),
             terms: Vec::new(),
             active_term: 0,
             search: Search::default(),
@@ -148,6 +150,7 @@ impl App {
         swap(&mut self.active, &mut other.active);
         swap(&mut self.panes, &mut other.panes);
         swap(&mut self.terms, &mut other.terms);
+        swap(&mut self.term_panes, &mut other.term_panes);
         swap(&mut self.active_term, &mut other.active_term);
         swap(&mut self.search, &mut other.search);
         swap(&mut self.find, &mut other.find);

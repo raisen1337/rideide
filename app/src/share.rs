@@ -458,44 +458,37 @@ impl App {
         let Some((text, _)) = &mut self.nickname_ask else {
             return;
         };
-        let (mut go, mut close) = (false, false);
-        egui::Window::new("Choose a nickname")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_TOP, [0.0, 120.0])
-            .show(ctx, |ui| {
-                ui.set_width(380.0);
-                ui.label(
-                    RichText::new(
-                        "The name the others in the session see on your cursor. You can sign in with GitHub instead, in Settings → Account.",
-                    )
-                    .small()
-                    .color(theme::COMMENT()),
+        let ok = !text.trim().is_empty();
+        let answer = chrome::modal(
+            ctx,
+            "nickname",
+            "Choose a nickname",
+            "Continue",
+            chrome::Tone::Normal,
+            ok,
+            380.0,
+            |ui| {
+                chrome::note(
+                    ui,
+                    "The name the others in the session see on your cursor. You can sign in with GitHub instead, in Settings → Account.",
                 );
-                ui.add_space(4.0);
-                let edit = ui.add(
-                    TextEdit::singleline(text)
-                        .desired_width(f32::INFINITY)
-                        .char_limit(32)
-                        .hint_text("Nickname"),
-                );
-                edit.request_focus();
-                let ok = !text.trim().is_empty();
-                go = ok && edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(ok, egui::Button::new("Continue")).clicked() {
-                        go = true;
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                        close = true;
-                    }
-                });
-            });
-        if close {
-            self.nickname_ask = None;
-        }
-        if !go {
-            return;
+                if text.chars().count() > 32 {
+                    *text = text.chars().take(32).collect();
+                }
+                let edit = chrome::field(ui, "nickname", text, "Nickname", 1);
+                if !edit.has_focus() && !edit.lost_focus() {
+                    edit.request_focus();
+                }
+                edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+            },
+        );
+        match answer {
+            chrome::Answer::Cancel => {
+                self.nickname_ask = None;
+                return;
+            }
+            chrome::Answer::Waiting => return,
+            chrome::Answer::Confirm => {}
         }
         let Some((text, after)) = self.nickname_ask.take() else {
             return;
@@ -1048,43 +1041,36 @@ impl App {
         let Some(text) = &mut self.join_input else {
             return;
         };
-        let (mut join, mut close) = (false, false);
-        egui::Window::new("Join a live session")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_TOP, [0.0, 120.0])
-            .show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.label(
-                    RichText::new("Paste the ID the host sent you.")
-                        .small()
-                        .color(theme::COMMENT()),
-                );
-                let edit = ui.add(
-                    TextEdit::singleline(text)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Session ID")
-                        .font(egui::TextStyle::Monospace),
-                );
-                edit.request_focus();
-                let valid = is_session_id(text);
-                join = valid && edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(valid, egui::Button::new("Join")).clicked() {
-                        join = true;
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
-                        close = true;
-                    }
-                    if !valid && !text.trim().is_empty() {
-                        ui.label(
-                            RichText::new("That doesn't look like a session ID")
-                                .small()
-                                .color(theme::COMMENT()),
-                        );
-                    }
-                });
-            });
+        let valid = is_session_id(text);
+        let typed = !text.trim().is_empty();
+        let answer = chrome::modal(
+            ctx,
+            "join",
+            "Join a live session",
+            "Join",
+            chrome::Tone::Normal,
+            valid,
+            420.0,
+            |ui| {
+                chrome::note(ui, "Paste the ID the host sent you.");
+                let edit = chrome::field(ui, "join", text, "Session ID", 1);
+                if !edit.has_focus() && !edit.lost_focus() {
+                    edit.request_focus();
+                }
+                if !valid && typed {
+                    ui.label(
+                        RichText::new("That doesn't look like a session ID")
+                            .small()
+                            .color(theme::ANSI()[1]),
+                    );
+                }
+                edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+            },
+        );
+        let (join, close) = (
+            answer == chrome::Answer::Confirm,
+            answer == chrome::Answer::Cancel,
+        );
         if join {
             let id: String = self
                 .join_input

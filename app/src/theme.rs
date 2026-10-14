@@ -376,7 +376,7 @@ pub fn apply(ctx: &Context) {
         .into();
         style.spacing.item_spacing = vec2(8.0, 6.0);
         style.spacing.button_padding = vec2(8.0, 4.0);
-        style.spacing.menu_margin = Margin::same(6);
+        style.spacing.menu_margin = Margin::same(5);
         style.spacing.scroll.bar_width = 8.0;
         style.spacing.scroll.floating = true;
 
@@ -387,8 +387,21 @@ pub fn apply(ctx: &Context) {
         v.panel_fill = Color32::TRANSPARENT;
         v.window_fill = mix(p.panel_bg, p.text, 0.05);
         v.window_stroke = Stroke::new(1.0, p.line);
-        v.window_corner_radius = CornerRadius::same(10);
-        v.menu_corner_radius = CornerRadius::same(8);
+        v.window_corner_radius = CornerRadius::same(12);
+        v.menu_corner_radius = CornerRadius::same(10);
+        // Menus and popups float clearly above what is under them.
+        v.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(if p.dark { 120 } else { 50 }),
+        };
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 12],
+            blur: 36,
+            spread: 0,
+            color: Color32::from_black_alpha(if p.dark { 140 } else { 60 }),
+        };
         v.extreme_bg_color = mix(
             p.panel_bg,
             if p.dark {
