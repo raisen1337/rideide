@@ -40,6 +40,8 @@ enum Command {
     GoToLine(usize),
     /// Picks a second file to compare the open one with.
     CompareWith,
+    /// Turns the palette into a search of the Marketplace.
+    SearchMarketplace,
     Compare(String),
 }
 
@@ -83,6 +85,8 @@ pub(super) struct Palette {
     want_row: Option<usize>,
     /// Picking the file to compare this one with, rather than one to open.
     compare: Option<String>,
+    /// Searching the Marketplace, rather than picking a command.
+    market_mode: bool,
 }
 
 impl App {
@@ -108,7 +112,14 @@ impl App {
             return;
         };
         self.open_palette(false);
-        self.palette.query = text;
+        // `market:TEXT` searches the Marketplace for TEXT.
+        match text.strip_prefix("market:") {
+            Some(query) => {
+                self.palette.market_mode = true;
+                self.palette.query = query.to_string();
+            }
+            None => self.palette.query = text,
+        }
         self.palette.typed_at = f64::NEG_INFINITY;
         self.palette.want_row = std::env::var("RIDE_PALETTE_ROW")
             .ok()
@@ -286,7 +297,13 @@ impl App {
         );
         add(
             icons::PALETTE,
-            "Themes: Browse the Marketplace",
+            "Marketplace: Search colour themes and file icons…",
+            "",
+            Command::SearchMarketplace,
+        );
+        add(
+            icons::PALETTE,
+            "Themes: Open the Themes page",
             "",
             Command::Themes,
         );
@@ -396,6 +413,11 @@ impl App {
                 }
             }
             Command::GoToSymbol => return self.open_palette_with("@"),
+            Command::SearchMarketplace => {
+                self.open_palette(false);
+                self.palette.market_mode = true;
+                return;
+            }
             Command::GoToLine(line) => {
                 if let Some(index) = self.docked_active() {
                     nav::jump(&mut self.tabs[index], line);
@@ -600,8 +622,10 @@ impl App {
                     }
                 })
                 .collect()
-        } else {
+        } else if self.palette.market_mode {
             self.palette_market(ctx);
+            self.market_entries()
+        } else {
             let words: Vec<String> = self
                 .palette
                 .query
@@ -609,7 +633,7 @@ impl App {
                 .split_whitespace()
                 .map(str::to_string)
                 .collect();
-            let mut entries: Vec<Entry> = self
+            let entries: Vec<Entry> = self
                 .commands()
                 .into_iter()
                 .filter(|entry| {
@@ -617,7 +641,6 @@ impl App {
                     words.iter().all(|w| label.contains(w))
                 })
                 .collect();
-            entries.extend(self.market_entries());
             entries
         };
         let mut entries = entries;
@@ -750,6 +773,8 @@ impl App {
                         "Compare with: type part of a file's name"
                     } else if self.palette.files_mode {
                         "Go to file: type part of its name"
+                    } else if self.palette.market_mode {
+                        "Search the Marketplace: colour themes and file icons"
                     } else {
                         "Type a command"
                     };
@@ -866,6 +891,14 @@ impl App {
             if entries.is_empty() {
                 let text = if self.palette.files_mode {
                     "No files match"
+                } else if self.palette.market_mode {
+                    if self.palette.query.trim().chars().count() < 2 {
+                        "Type at least two letters"
+                    } else if self.palette.market_rx.is_some() {
+                        "Searching…"
+                    } else {
+                        "Nothing found in the Marketplace"
+                    }
                 } else {
                     "No commands match"
                 };
@@ -883,7 +916,7 @@ impl App {
                     .small()
                     .color(theme::COMMENT()),
             );
-            if !self.palette.files_mode {
+            if self.palette.market_mode {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(6.0);
                     if self.palette.market_rx.is_some() {

@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.5.1
+
+- **Chats from the terminal in History.** The chat's History now also lists the conversations you had with Claude Code in a terminal, in the open folder. Open one to read it, and send a message to carry on with it.
+- The History, New chat and pop-out buttons at the top of the chat can be clicked anywhere, not only at their bottom edge.
+- Your GitHub picture and name show at the right of the bottom bar while you're signed in. A click opens Settings → Account.
+- The Marketplace is no longer searched for everything typed in Ctrl+Shift+P. Pick "Marketplace: Search colour themes and file icons…" to search it.
+
 ## 0.5.0
 
 - **Live editing.** When someone else opens the same file on the same server through ride, you edit it together: their changes appear as they type, and you see their cursor and selection with their name. Their GitHub picture shows above the code while they're in the file.

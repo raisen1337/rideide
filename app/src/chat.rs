@@ -128,6 +128,8 @@ pub enum Action {
     FindFiles(String),
     /// Start the process if it isn't running: something is waiting to be sent to it.
     Wake,
+    /// The history was opened: list the conversations Claude Code had in a terminal.
+    LoadHistory,
 }
 
 pub struct Chat {
@@ -166,6 +168,9 @@ pub struct Chat {
     /// Earlier conversations, newest first.
     history: Vec<Saved>,
     show_history: bool,
+    /// Conversations Claude Code had in this folder outside ride (in a terminal), newest
+    /// first, with when each was last written; `None` until the host has listed them.
+    cli: Option<Vec<(Saved, u64)>>,
     /// File edits Claude made here that succeeded, oldest first.
     pub changes: Vec<Change>,
     /// Edits Claude asked for whose outcome isn't known yet, by tool-use id.
@@ -312,6 +317,7 @@ impl Default for Chat {
             last_result: None,
             history: Vec::new(),
             show_history: false,
+            cli: None,
             changes: Vec::new(),
             pending_changes: Vec::new(),
             past_cost: 0.0,
@@ -860,8 +866,52 @@ impl Chat {
             .collect();
     }
 
+    /// Shows the history, as its button does; the caller asks the host for the terminal's.
+    pub fn open_history(&mut self) {
+        self.show_history = true;
+        self.cli = None;
+    }
+
+    /// The conversations Claude Code had in this folder, as the host lists them.
+    pub fn set_cli_history(&mut self, sessions: Vec<ride_proto::ClaudeSession>) {
+        use ride_proto::ClaudeMessage;
+        let list = sessions
+            .into_iter()
+            .map(|session| {
+                let items = session
+                    .messages
+                    .into_iter()
+                    .map(|message| match message {
+                        ClaudeMessage::User(text) => Item::User(text),
+                        ClaudeMessage::Claude(text) => Item::Text(text),
+                        ClaudeMessage::Tool { name, detail } => Item::Tool { name, detail },
+                    })
+                    .collect();
+                let saved = Saved {
+                    session: Some(session.id),
+                    title: session.title,
+                    items,
+                };
+                (saved, session.modified)
+            })
+            .collect();
+        self.cli = Some(list);
+    }
+
+    fn open_cli(&mut self, index: usize) {
+        let Some(list) = &mut self.cli else {
+            return;
+        };
+        let (saved, _) = list.remove(index);
+        self.archive();
+        self.session = saved.session;
+        self.items = saved.items;
+        self.needs_login = false;
+        self.streaming = false;
+    }
+
     fn history_view(&mut self, ui: &mut Ui) -> Option<Action> {
-        let (mut open, mut delete) = (None, None);
+        let (mut open, mut delete, mut open_cli) = (None, None, None);
         ui.horizontal(|ui| {
             if icon_button(ui, icons::ARROW_LEFT, "Back to the chat") {
                 self.show_history = false;
@@ -869,9 +919,27 @@ impl Chat {
             ui.label(RichText::new("History").strong().size(15.0));
         });
         ui.add_space(4.0);
-        if self.history.is_empty() {
+        // Conversations already here (this one, or one in the list) aren't listed twice.
+        let known: Vec<String> = self
+            .history
+            .iter()
+            .filter_map(|s| s.session.clone())
+            .chain(self.session.clone())
+            .collect();
+        let terminal: Vec<usize> = self
+            .cli
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, (saved, _))| saved.session.as_ref().is_none_or(|id| !known.contains(id)))
+            .map(|(index, _)| index)
+            .collect();
+        if self.history.is_empty() && terminal.is_empty() && self.cli.is_some() {
             ui.label(RichText::new("No earlier chats yet").color(theme::COMMENT()));
         }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (index, saved) in self.history.iter().enumerate() {
                 let row = Frame::NONE
@@ -912,7 +980,73 @@ impl Chat {
                     open = Some(index);
                 }
             }
+            match &self.cli {
+                None => {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Looking for chats from the terminal…")
+                                .small()
+                                .color(theme::COMMENT()),
+                        );
+                    });
+                }
+                Some(list) if !terminal.is_empty() => {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("IN THE TERMINAL")
+                            .small()
+                            .strong()
+                            .color(theme::COMMENT()),
+                    );
+                    ui.add_space(2.0);
+                    for &index in &terminal {
+                        let (saved, modified) = &list[index];
+                        let row = Frame::NONE
+                            .fill(theme::tint(7))
+                            .corner_radius(10)
+                            .inner_margin(Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(icons::TERMINAL).color(theme::COMMENT()),
+                                        )
+                                        .selectable(false),
+                                    );
+                                    ui.add(egui::Label::new(&saved.title).selectable(false));
+                                });
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "{} messages · {}",
+                                            saved.items.len(),
+                                            ago(now.saturating_sub(*modified))
+                                        ))
+                                        .small()
+                                        .color(theme::COMMENT()),
+                                    )
+                                    .selectable(false),
+                                );
+                            })
+                            .response;
+                        glow(ui, &row, 10);
+                        if row.contains_pointer() && ui.input(|i| i.pointer.primary_clicked()) {
+                            open_cli = Some(index);
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
         });
+        if let Some(index) = open_cli {
+            self.open_cli(index);
+            self.show_history = false;
+            return Some(Action::Switched);
+        }
         if let Some(index) = delete {
             self.history.remove(index);
         } else if let Some(index) = open {
@@ -1140,55 +1274,63 @@ impl Chat {
         }
         let mut action = None;
 
-        let header = ui
-            .horizontal(|ui| {
-                let plain =
-                    |ui: &mut Ui, text: RichText| ui.add(egui::Label::new(text).selectable(false));
-                // A detached chat already has its name in the window's title bar.
-                // An agent's name is in the header above its chat; a detached chat's, in the title bar.
-                if !detached && !self.team_member {
-                    let icon = if self.team_member {
-                        icons::AGENTS
+        // The header drags the chat out of the window. Its handle goes in first, so the
+        // buttons drawn over it afterwards get their clicks.
+        let drag = (!detached && !self.team_member).then(|| {
+            let rect = egui::Rect::from_min_size(
+                ui.cursor().min,
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            );
+            ui.interact(rect, ui.id().with("chat_drag"), Sense::drag())
+        });
+        ui.horizontal(|ui| {
+            let plain =
+                |ui: &mut Ui, text: RichText| ui.add(egui::Label::new(text).selectable(false));
+            // A detached chat already has its name in the window's title bar.
+            // An agent's name is in the header above its chat; a detached chat's, in the title bar.
+            if !detached && !self.team_member {
+                let icon = if self.team_member {
+                    icons::AGENTS
+                } else {
+                    icons::SPARKLE
+                };
+                plain(ui, RichText::new(icon).color(theme::CLAUDE()).size(16.0));
+                plain(ui, RichText::new(&self.title).strong().size(15.0));
+            }
+            if !self.model.is_empty() {
+                let model = self.model.trim_start_matches("claude-");
+                plain(ui, RichText::new(model).small().color(theme::COMMENT()));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if detached {
+                    let pin = if self.pinned {
+                        icons::PINNED
                     } else {
-                        icons::SPARKLE
+                        icons::PIN
                     };
-                    plain(ui, RichText::new(icon).color(theme::CLAUDE()).size(16.0));
-                    plain(ui, RichText::new(&self.title).strong().size(15.0));
+                    if icon_button(ui, pin, "Keep on top of other windows") {
+                        self.pinned = !self.pinned;
+                    }
+                } else if !self.team_member
+                    && icon_button(
+                        ui,
+                        icons::POP_OUT,
+                        "Open in its own window (or drag this header out of the window)",
+                    )
+                {
+                    action = Some(Action::Detach(None));
                 }
-                if !self.model.is_empty() {
-                    let model = self.model.trim_start_matches("claude-");
-                    plain(ui, RichText::new(model).small().color(theme::COMMENT()));
+                if icon_button(ui, icons::ADD, "New chat") {
+                    action = Some(Action::NewChat);
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if detached {
-                        let pin = if self.pinned {
-                            icons::PINNED
-                        } else {
-                            icons::PIN
-                        };
-                        if icon_button(ui, pin, "Keep on top of other windows") {
-                            self.pinned = !self.pinned;
-                        }
-                    } else if !self.team_member
-                        && icon_button(
-                            ui,
-                            icons::POP_OUT,
-                            "Open in its own window (or drag this header out of the window)",
-                        )
-                    {
-                        action = Some(Action::Detach(None));
-                    }
-                    if icon_button(ui, icons::ADD, "New chat") {
-                        action = Some(Action::NewChat);
-                    }
-                    if !self.team_member && icon_button(ui, icons::HISTORY, "Earlier chats") {
-                        self.show_history = true;
-                    }
-                });
-            })
-            .response;
-        if !detached && !self.team_member {
-            let drag = ui.interact(header.rect, ui.id().with("chat_drag"), Sense::drag());
+                if !self.team_member && icon_button(ui, icons::HISTORY, "Earlier chats") {
+                    self.show_history = true;
+                    self.cli = None;
+                    action = Some(Action::LoadHistory);
+                }
+            });
+        });
+        if let Some(drag) = drag {
             if drag.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 // Nothing reaches the window once the cursor is outside it, so keep polling.
@@ -2076,5 +2218,15 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+}
+
+/// How long ago, in a word or two.
+fn ago(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} h ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86_400),
     }
 }

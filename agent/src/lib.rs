@@ -2,6 +2,7 @@
 //! frames. On a remote host it runs as its own program over stdin/stdout; for a folder on
 //! this computer the app runs the same code in-process over a pair of pipes.
 
+mod claude_history;
 #[cfg(unix)]
 pub mod collab;
 #[cfg(unix)]
@@ -102,6 +103,11 @@ pub fn serve(mut input: impl Read, mut out: impl Write + Send + 'static) {
                     fs::remove_file(&path)?;
                 }
                 Ok(Response::Ok)
+            }),
+            Request::ClaudeSessions { cwd } => reply(&tx, id, move || {
+                Ok(Response::ClaudeSessions {
+                    sessions: claude_history::sessions(&cwd),
+                })
             }),
             Request::FindFiles { root, query } => {
                 reply(&tx, id, move || Ok(find_files(&root, &query)))

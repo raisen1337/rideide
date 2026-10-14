@@ -29,6 +29,27 @@ pub struct SearchHit {
     pub text: String,
 }
 
+/// A conversation Claude Code had, read from its own records on the host.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClaudeSession {
+    pub id: String,
+    pub title: String,
+    /// Last written, in seconds since 1970.
+    pub modified: u64,
+    pub messages: Vec<ClaudeMessage>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ClaudeMessage {
+    User(String),
+    Claude(String),
+    /// A tool Claude used, and what it was used on.
+    Tool {
+        name: String,
+        detail: String,
+    },
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Request {
     Hello,
@@ -113,6 +134,10 @@ pub enum Request {
         token: u64,
         text: String,
     },
+    /// The conversations Claude Code had in a folder (in a terminal, say), newest first.
+    ClaudeSessions {
+        cwd: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -162,6 +187,9 @@ pub enum Response {
     HostAsk {
         token: u64,
         text: String,
+    },
+    ClaudeSessions {
+        sessions: Vec<ClaudeSession>,
     },
 }
 

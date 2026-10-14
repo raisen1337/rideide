@@ -116,6 +116,8 @@ enum Pending {
         dest: String,
     },
     Hello,
+    /// The conversations Claude Code had in the open folder, for the chat's history.
+    ClaudeSessions,
     /// The open folder's .env, read to fill in a database connection.
     DbEnv,
     /// The second file of a comparison; the first one's text is already in hand.
@@ -1815,6 +1817,10 @@ impl App {
             return;
         };
         match (pending, resp) {
+            (Pending::ClaudeSessions, Response::ClaudeSessions { sessions }) => {
+                self.chat.set_cli_history(sessions);
+            }
+            (Pending::ClaudeSessions, _) => self.chat.set_cli_history(Vec::new()),
             (Pending::Hello, Response::Hello { home }) => {
                 let root = match self.saved.take() {
                     Some((host, root)) if host == self.host.trim() => root,
@@ -1847,6 +1853,13 @@ impl App {
                 // RIDE_NO_TERM starts with the terminal hidden, for screenshots.
                 if std::env::var_os("RIDE_NO_TERM").is_some() {
                     self.show_term = false;
+                }
+                // RIDE_CHAT_HISTORY opens the chat's history, to look at it.
+                if std::env::var_os("RIDE_CHAT_HISTORY").is_some() {
+                    self.show_chat = true;
+                    self.chat.open_history();
+                    let cwd = self.root.clone();
+                    self.request_then(Request::ClaudeSessions { cwd }, Pending::ClaudeSessions);
                 }
                 if let Ok(text) = std::env::var("RIDE_CHAT_SEND") {
                     self.show_chat = true;
@@ -2308,6 +2321,14 @@ impl App {
             chat::Action::Stop | chat::Action::Switched => self.chat_stop(),
             chat::Action::FindFiles(query) => self.find_files(query, None),
             chat::Action::Wake => self.chat_wake(),
+            chat::Action::LoadHistory => {
+                if self.online() {
+                    let cwd = self.root.clone();
+                    self.request_then(Request::ClaudeSessions { cwd }, Pending::ClaudeSessions);
+                } else {
+                    self.chat.set_cli_history(Vec::new());
+                }
+            }
             chat::Action::NewChat => {
                 self.chat_stop();
                 self.chat.reset();
@@ -2789,7 +2810,8 @@ impl App {
                     );
                 }
             }
-            Some(chat::Action::Detach(_) | chat::Action::Switched) | None => {}
+            Some(chat::Action::Detach(_) | chat::Action::Switched | chat::Action::LoadHistory)
+            | None => {}
         }
     }
 
@@ -3063,6 +3085,57 @@ impl App {
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Who you're signed in to GitHub as; a click opens Settings → Account.
+                if let Some(me) = self.github.me.clone() {
+                    let avatar = self.github.avatar(&ui.ctx().clone(), &me.avatar_url);
+                    let pill = Frame::NONE
+                        .fill(theme::tint(12))
+                        .corner_radius(10)
+                        .inner_margin(Margin {
+                            left: 3,
+                            right: 8,
+                            top: 1,
+                            bottom: 1,
+                        })
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            // Right to left: the name goes in first, the picture before it.
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(me.shown_name()).small().color(theme::TEXT()),
+                                )
+                                .selectable(false),
+                            );
+                            match avatar {
+                                Some(texture) => {
+                                    ui.add(
+                                        egui::Image::new(egui::load::SizedTexture::new(
+                                            texture,
+                                            vec2(16.0, 16.0),
+                                        ))
+                                        .corner_radius(8),
+                                    );
+                                }
+                                None => {
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                                    ui.painter()
+                                        .circle_filled(rect.center(), 8.0, theme::tint(30));
+                                }
+                            }
+                        })
+                        .response
+                        .interact(Sense::click())
+                        .on_hover_text(format!("Signed in to GitHub as @{}", me.login));
+                    if pill.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if pill.clicked() {
+                        self.view = View::Settings;
+                        self.settings_section = 7;
+                    }
+                    ui.add_space(8.0);
+                }
                 if let Some(version) = self.updater.ready().map(str::to_string) {
                     let text = format!("{}  Restart to update to {version}", icons::REFRESH);
                     let label = RichText::new(text).small().color(theme::ACCENT());
