@@ -65,6 +65,8 @@ pub(super) struct Themes {
     /// Extensions installed during this run, for the "Installed" mark on their cards.
     added: HashSet<String>,
     message: String,
+    /// Packages fetched for previews in the command palette, by extension id.
+    packs: HashMap<String, PackState>,
 }
 
 impl Default for Themes {
@@ -93,6 +95,7 @@ impl Default for Themes {
             icons_mode: false,
             added: HashSet::new(),
             message: String::new(),
+            packs: HashMap::new(),
         }
     }
 }
@@ -314,6 +317,69 @@ fn search(query: &str, sort: u32, icons: bool) -> SearchResult {
     Ok((extensions, total))
 }
 
+/// A Marketplace result as the command palette lists it.
+pub(super) struct MarketHit {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) publisher: String,
+    pub(super) installs: f64,
+    /// A file icon theme rather than a colour theme.
+    pub(super) icons: bool,
+}
+
+/// The palette's Marketplace search: the most installed colour themes and file icon
+/// themes matching `query`, a few of each.
+pub(super) fn palette_search(query: &str) -> Result<Vec<MarketHit>, String> {
+    const EACH: usize = 6;
+    let mut hits = Vec::new();
+    for icons in [false, true] {
+        let (extensions, _) = search(query, SORTS[0].1, icons)?;
+        hits.extend(extensions.into_iter().take(EACH).map(|e| MarketHit {
+            id: e.id,
+            name: e.name,
+            publisher: e.publisher,
+            installs: e.installs,
+            icons,
+        }));
+    }
+    Ok(hits)
+}
+
+/// A Marketplace package fetched for a preview: kept, so installing it needs no second download.
+pub(super) struct Pack {
+    bytes: Vec<u8>,
+    /// Its colour themes, ready to show.
+    palettes: Vec<theme::Palette>,
+    /// Its first file icon theme, unpacked in a scratch folder.
+    icon_dir: Option<PathBuf>,
+}
+
+pub(super) enum PackState {
+    Loading(Receiver<Result<Pack, String>>),
+    Ready(Pack),
+    Failed,
+}
+
+fn fetch_pack(id: &str) -> Result<Pack, String> {
+    let (publisher, name) = marketplace_id(id).ok_or("not a Marketplace id")?;
+    let url = format!(
+        "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/vsextensions/{name}/latest/vspackage"
+    );
+    let bytes = download(&url, 120 * 1024 * 1024)?;
+    let palettes = themes_in_vsix(bytes.clone())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|(_, text)| theme::parse_jsonc(text).ok())
+        .map(|value| theme::from_vscode(&value))
+        .collect();
+    let icon_dir = iconsets::unpack_for_preview(&bytes, id).ok().flatten();
+    Ok(Pack {
+        bytes,
+        palettes,
+        icon_dir,
+    })
+}
+
 /// Downloads the cards' icons in the background, a few at a time.
 fn fetch_icons(generation: u64, wanted: Vec<(String, String)>, tx: Sender<Icon>, ctx: Context) {
     const WORKERS: usize = 6;
@@ -340,7 +406,7 @@ fn fetch_icons(generation: u64, wanted: Vec<(String, String)>, tx: Sender<Icon>,
     }
 }
 
-fn short_count(n: f64) -> String {
+pub(super) fn short_count(n: f64) -> String {
     match n {
         n if n >= 1e6 => format!("{:.1}M", n / 1e6),
         n if n >= 1e3 => format!("{:.0}K", n / 1e3),
@@ -489,7 +555,101 @@ impl App {
         }
     }
 
-    fn install_extension(&mut self, ctx: &Context, id: &str) {
+    /// Previews a Marketplace extension from the palette: its first colour theme on the
+    /// whole window, or its file icons in the tree. The package is fetched first; the
+    /// answer says how far that is, for the palette row.
+    pub(super) fn market_preview(&mut self, ctx: &Context, id: &str, icons: bool) -> String {
+        let arrived = match self.themes.packs.get(id) {
+            Some(PackState::Loading(rx)) => rx.try_recv().ok(),
+            _ => None,
+        };
+        if let Some(result) = arrived {
+            let state = match result {
+                Ok(pack) => PackState::Ready(pack),
+                Err(_) => PackState::Failed,
+            };
+            self.themes.packs.insert(id.to_string(), state);
+        }
+        let ready = match self.themes.packs.get(id) {
+            None => {
+                // Each package is several megabytes; only the most recent few are kept.
+                if self.themes.packs.len() >= 10 {
+                    self.themes
+                        .packs
+                        .retain(|_, state| matches!(state, PackState::Loading(_)));
+                }
+                let (tx, rx) = channel();
+                let (owned, ctx) = (id.to_string(), ctx.clone());
+                thread::spawn(move || {
+                    let _ = tx.send(fetch_pack(&owned));
+                    ctx.request_repaint();
+                });
+                self.themes
+                    .packs
+                    .insert(id.to_string(), PackState::Loading(rx));
+                return "Loading previewâ€¦".into();
+            }
+            Some(PackState::Loading(_)) => return "Loading previewâ€¦".into(),
+            Some(PackState::Failed) => return "No preview".into(),
+            Some(PackState::Ready(pack)) => {
+                if icons {
+                    pack.icon_dir.clone().map(Err)
+                } else {
+                    pack.palettes.first().copied().map(Ok)
+                }
+            }
+        };
+        match ready {
+            Some(Ok(palette)) => {
+                let key = format!("marketplace:{id}");
+                if self.themes.shown != key {
+                    theme::set(ctx, palette);
+                    self.themes.shown = key;
+                }
+                "Previewing".into()
+            }
+            Some(Err(dir)) => {
+                self.preview_icon_set(id, &dir);
+                "Previewing in the file tree".into()
+            }
+            None => "No preview".into(),
+        }
+    }
+
+    /// Installs a Marketplace extension, from the package a preview already fetched when
+    /// there is one.
+    pub(super) fn install_market(&mut self, ctx: &Context, id: &str) {
+        if self.themes.installing.is_some() {
+            return;
+        }
+        let Some(PackState::Ready(pack)) = self.themes.packs.get(id) else {
+            return self.install_extension(ctx, id);
+        };
+        let (tx, rx) = channel();
+        let (bytes, ctx) = (pack.bytes.clone(), ctx.clone());
+        thread::spawn(move || {
+            let _ = tx.send(install_package(bytes));
+            ctx.request_repaint();
+        });
+        self.themes.installing = Some((id.to_string(), rx));
+        self.themes.message.clear();
+    }
+
+    /// Whether an extension was installed during this run, and which one is being installed.
+    pub(super) fn extension_state(&self, id: &str) -> (bool, bool) {
+        let installing = self
+            .themes
+            .installing
+            .as_ref()
+            .is_some_and(|(busy, _)| busy == id);
+        (self.themes.added.contains(id), installing)
+    }
+
+    pub(super) fn install_extension(&mut self, ctx: &Context, id: &str) {
+        // One install at a time keeps the result unambiguous.
+        if self.themes.installing.is_some() {
+            return;
+        }
         let Some((publisher, name)) = marketplace_id(id) else {
             return;
         };
@@ -517,7 +677,8 @@ impl App {
     }
 
     /// Collects what the background threads finished: searches, icons, installs.
-    fn poll_themes(&mut self, ctx: &Context) {
+    /// Runs every frame, as an install started from the palette finishes outside this view.
+    pub(super) fn poll_themes(&mut self, ctx: &Context) {
         if let Some(result) = self
             .themes
             .searching
@@ -565,6 +726,7 @@ impl App {
                 self.themes.added.insert(id);
             }
             self.themes_added(ctx, result);
+            self.status = self.themes.message.clone();
         }
     }
 
@@ -640,7 +802,7 @@ impl App {
                 ui.separator();
                 ui.add_space(4.0);
                 if ui
-                    .button(format!("{}  Import a theme file…", icons::ADD))
+                    .button(format!("{}  Import a theme fileâ€¦", icons::ADD))
                     .clicked()
                 {
                     self.import_theme_file(&ctx);
@@ -1017,7 +1179,7 @@ mod tests {
         assert!(total > 0 && !extensions.is_empty());
         let first = &extensions[0];
         println!(
-            "{} by {} — {} installs, icon: {:?}",
+            "{} by {} â€” {} installs, icon: {:?}",
             first.name, first.publisher, first.installs, first.icon_url
         );
         assert!(marketplace_id(&first.id).is_some());

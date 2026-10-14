@@ -236,6 +236,26 @@ impl IconTheme {
 /// Unpacks the file icon themes of an extension package and returns their names.
 /// An extension without any gives an empty list.
 pub(super) fn install_icon_sets(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let root = icon_sets_dir().ok_or("no folder to keep icon themes in")?;
+    unpack_icon_sets(bytes, &root)
+}
+
+/// Unpacks an extension's first file icon theme into a scratch folder of its own, for a
+/// preview before installing. Returns the theme's folder, or `None` if it has none.
+pub(super) fn unpack_for_preview(bytes: &[u8], id: &str) -> Result<Option<PathBuf>, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("TEMP"))
+        .ok_or("no folder for previews")?;
+    let root = PathBuf::from(base)
+        .join("ride")
+        .join("icon-preview")
+        .join(file_safe(id));
+    let _ = std::fs::remove_dir_all(&root);
+    let names = unpack_icon_sets(bytes, &root)?;
+    Ok(names.first().map(|name| root.join(name)))
+}
+
+fn unpack_icon_sets(bytes: &[u8], root: &Path) -> Result<Vec<String>, String> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut read = |path: &str| -> Result<Vec<u8>, String> {
@@ -246,7 +266,6 @@ pub(super) fn install_icon_sets(bytes: &[u8]) -> Result<Vec<String>, String> {
         Ok(data)
     };
     let manifest = theme::parse_jsonc(&String::from_utf8_lossy(&read("extension/package.json")?))?;
-    let root = icon_sets_dir().ok_or("no folder to keep icon themes in")?;
 
     let mut installed = Vec::new();
     for entry in manifest["contributes"]["iconThemes"]
@@ -305,6 +324,8 @@ pub(super) struct IconSets {
     pub(super) current: String,
     installed: Vec<String>,
     theme: Option<IconTheme>,
+    /// While a Marketplace icon theme is previewed: its id, and the theme it stands in for.
+    preview: Option<(String, Option<IconTheme>)>,
 }
 
 impl App {
@@ -323,6 +344,8 @@ impl App {
 
     /// Switches the file icons; an empty name goes back to the built-in ones.
     pub(super) fn select_icon_set(&mut self, name: &str) {
+        // A choice ends any preview; it mustn't be undone when the preview ends.
+        self.icon_sets.preview = None;
         let loaded = match (name.is_empty(), icon_sets_dir()) {
             (true, _) | (_, None) => Ok(None),
             (false, Some(dir)) => IconTheme::load(&dir.join(name)).map(Some),
@@ -333,6 +356,34 @@ impl App {
                 self.icon_sets.current = name.to_string();
             }
             Err(error) => self.status = format!("Couldn't load the {name} icons: {error}"),
+        }
+    }
+
+    /// Shows the file icons unpacked in `dir` until `end_icon_preview`, without choosing them.
+    pub(super) fn preview_icon_set(&mut self, id: &str, dir: &Path) {
+        if self
+            .icon_sets
+            .preview
+            .as_ref()
+            .is_some_and(|(shown, _)| shown == id)
+        {
+            return;
+        }
+        let Ok(theme) = IconTheme::load(dir) else {
+            return;
+        };
+        let replaced = std::mem::replace(&mut self.icon_sets.theme, Some(theme));
+        let chosen = match self.icon_sets.preview.take() {
+            Some((_, chosen)) => chosen,
+            None => replaced,
+        };
+        self.icon_sets.preview = Some((id.to_string(), chosen));
+    }
+
+    /// Puts the chosen file icons back after a preview.
+    pub(super) fn end_icon_preview(&mut self) {
+        if let Some((_, chosen)) = self.icon_sets.preview.take() {
+            self.icon_sets.theme = chosen;
         }
     }
 

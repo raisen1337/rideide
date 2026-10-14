@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.2.3
+
+- **Marketplace in the command palette.** Type in Ctrl+Shift+P and colour themes and file icons from the VS Code Marketplace show under the commands. Rest on one and it previews: a colour theme on the whole window, file icons in the file tree. Enter installs it.
+
 ## 0.2.2
 
 - **What's new.** After an update, ride shows this list once before anything else, so you know what changed.

@@ -25,6 +25,8 @@ enum Command {
     Themes,
     Settings,
     Theme(String),
+    /// A Marketplace extension: its id, and whether it is a file icon theme.
+    InstallExtension(String, bool),
     ToggleGlass,
     Disconnect,
 }
@@ -36,8 +38,13 @@ struct Entry {
     /// "Group: what it does"; the group is shown dimmed.
     label: String,
     keys: &'static str,
+    /// A dim note at the right, for Marketplace results.
+    detail: String,
     command: Command,
 }
+
+/// Results from the Marketplace, or why there are none.
+type MarketResult = Result<Vec<themes::MarketHit>, String>;
 
 #[derive(Default)]
 pub(super) struct Palette {
@@ -50,6 +57,18 @@ pub(super) struct Palette {
     /// Files found for `asked`.
     files: Vec<String>,
     asked: Option<String>,
+    /// The Marketplace search: the text the results are for, the results, and the search
+    /// under way with its text.
+    market_for: String,
+    market: Vec<themes::MarketHit>,
+    market_error: String,
+    market_rx: Option<(String, Receiver<MarketResult>)>,
+    /// When the text last changed; the Marketplace is asked once typing pauses.
+    typed_at: f64,
+    /// The highlighted row and since when; a Marketplace row is previewed once it rests.
+    resting: (usize, f64),
+    /// A row to highlight once the list is that long (RIDE_PALETTE_ROW).
+    want_row: Option<usize>,
 }
 
 impl App {
@@ -60,6 +79,20 @@ impl App {
             focus: true,
             ..Palette::default()
         };
+    }
+
+    /// RIDE_PALETTE=TEXT opens the command palette with that text typed, and
+    /// RIDE_PALETTE_ROW=N highlights row N, to look at the palette without typing.
+    pub(super) fn palette_from_env(&mut self) {
+        let Ok(text) = std::env::var("RIDE_PALETTE") else {
+            return;
+        };
+        self.open_palette(false);
+        self.palette.query = text;
+        self.palette.typed_at = f64::NEG_INFINITY;
+        self.palette.want_row = std::env::var("RIDE_PALETTE_ROW")
+            .ok()
+            .and_then(|row| row.parse().ok());
     }
 
     pub(super) fn palette_files_found(&mut self, query: &str, paths: Vec<String>) {
@@ -82,6 +115,7 @@ impl App {
                 icon_color,
                 label: label.to_string(),
                 keys,
+                detail: String::new(),
                 command,
             });
         };
@@ -260,10 +294,104 @@ impl App {
             Command::Themes => self.view = View::Themes,
             Command::Settings => self.view = View::Settings,
             Command::Theme(name) => self.select_theme(ctx, &name),
+            Command::InstallExtension(id, _) => {
+                self.install_market(ctx, &id);
+                self.status = format!("Installing {id}…");
+            }
             Command::ToggleGlass => self.themes.glass = !self.themes.glass,
             Command::Disconnect => self.disconnect(),
         }
         self.palette.open = false;
+        // A preview ends with the palette; a chosen theme is already the current one.
+        self.end_icon_preview();
+        self.preview_theme(ctx, None);
+    }
+
+    /// Asks the Marketplace about the palette's text once typing has paused, and takes in
+    /// the answer. Two letters at least: anything shorter matches half the Marketplace.
+    fn palette_market(&mut self, ctx: &Context) {
+        if let Some((query, rx)) = &self.palette.market_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.palette.market_for = query.clone();
+                self.palette.market_rx = None;
+                match result {
+                    Ok(hits) => {
+                        self.palette.market = hits;
+                        self.palette.market_error.clear();
+                    }
+                    Err(error) => {
+                        self.palette.market.clear();
+                        self.palette.market_error = error;
+                    }
+                }
+            }
+        }
+        let wanted = self.palette.query.trim().to_string();
+        let asked = match &self.palette.market_rx {
+            Some((query, _)) => query,
+            None => &self.palette.market_for,
+        };
+        if wanted.chars().count() < 2 || *asked == wanted {
+            return;
+        }
+        let wait = 0.35 - (ctx.input(|i| i.time) - self.palette.typed_at);
+        if wait > 0.0 {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            return;
+        }
+        let (tx, rx) = channel();
+        let (query, ctx) = (wanted.clone(), ctx.clone());
+        thread::spawn(move || {
+            let _ = tx.send(themes::palette_search(&query));
+            ctx.request_repaint();
+        });
+        self.palette.market_rx = Some((wanted, rx));
+    }
+
+    /// The Marketplace results for the text as it is now, as palette rows.
+    fn market_entries(&self) -> Vec<Entry> {
+        let wanted = self.palette.query.trim();
+        if wanted.chars().count() < 2 || self.palette.market_for != wanted {
+            return Vec::new();
+        }
+        // Asking for icons puts the icon themes first.
+        let icons_first = wanted.to_lowercase().contains("icon");
+        let mut hits: Vec<&themes::MarketHit> = self.palette.market.iter().collect();
+        hits.sort_by_key(|hit| hit.icons != icons_first);
+        hits.into_iter()
+            .map(|hit| {
+                let (installed, installing) = self.extension_state(&hit.id);
+                let kind = if hit.icons {
+                    "file icons"
+                } else {
+                    "colour theme"
+                };
+                let detail = if installing {
+                    "Installing…".to_string()
+                } else if installed {
+                    "Installed".to_string()
+                } else {
+                    format!(
+                        "{} · {} · {}",
+                        hit.publisher,
+                        kind,
+                        themes::short_count(hit.installs)
+                    )
+                };
+                Entry {
+                    icon: if hit.icons {
+                        icons::FILES
+                    } else {
+                        icons::PALETTE
+                    },
+                    icon_color: theme::COMMENT(),
+                    label: format!("Marketplace: {}", hit.name),
+                    keys: "",
+                    detail,
+                    command: Command::InstallExtension(hit.id.clone(), hit.icons),
+                }
+            })
+            .collect()
     }
 
     pub(super) fn palette_window(&mut self, ctx: &Context) {
@@ -295,11 +423,13 @@ impl App {
                         icon_color,
                         label: file.clone(),
                         keys: "",
+                        detail: String::new(),
                         command: Command::OpenFile(join(&root, file)),
                     }
                 })
                 .collect()
         } else {
+            self.palette_market(ctx);
             let words: Vec<String> = self
                 .palette
                 .query
@@ -307,14 +437,18 @@ impl App {
                 .split_whitespace()
                 .map(str::to_string)
                 .collect();
-            self.commands()
+            let mut entries: Vec<Entry> = self
+                .commands()
                 .into_iter()
                 .filter(|entry| {
                     let label = entry.label.to_lowercase();
                     words.iter().all(|w| label.contains(w))
                 })
-                .collect()
+                .collect();
+            entries.extend(self.market_entries());
+            entries
         };
+        let mut entries = entries;
 
         // The arrow keys move the highlight, so they are taken before the text box sees them.
         let (up, down, enter, escape) = ctx.input_mut(|i| {
@@ -325,6 +459,10 @@ impl App {
                 i.consume_key(Modifiers::NONE, Key::Escape),
             )
         });
+        if let Some(row) = self.palette.want_row.filter(|row| *row < entries.len()) {
+            self.palette.selected = row;
+            self.palette.want_row = None;
+        }
         if down {
             self.palette.selected += 1;
         }
@@ -334,22 +472,45 @@ impl App {
         self.palette.selected = self.palette.selected.min(entries.len().saturating_sub(1));
 
         // A theme under the highlight is shown right away, as a preview; moving off it,
-        // or closing the palette without choosing, puts the chosen theme back.
-        let previewed = match entries
-            .get(self.palette.selected)
-            .map(|entry| &entry.command)
-        {
+        // or closing the palette without choosing, puts the chosen theme back. A
+        // Marketplace one is fetched once the highlight rests on it: its colours then
+        // show on the whole window, or its file icons in the tree.
+        let now = ctx.input(|i| i.time);
+        let selected = self.palette.selected;
+        if self.palette.resting.0 != selected {
+            self.palette.resting = (selected, now);
+        }
+        let highlighted = entries.get(selected).map(|entry| entry.command.clone());
+        let (mut market_colours, mut market_icons) = (false, false);
+        if let Some(Command::InstallExtension(id, icons)) = &highlighted {
+            let rest = 0.3 - (now - self.palette.resting.1);
+            if rest <= 0.0 {
+                let note = self.market_preview(ctx, id, *icons);
+                market_colours = !icons && note == "Previewing";
+                market_icons = *icons && note.starts_with("Previewing");
+                entries[selected].detail = note;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(rest));
+            }
+        }
+        if !market_icons {
+            self.end_icon_preview();
+        }
+        let previewed = match &highlighted {
             Some(Command::Theme(name)) => Some(name.clone()),
             _ => None,
         };
-        self.preview_theme(ctx, previewed.as_deref());
+        if !market_colours {
+            self.preview_theme(ctx, previewed.as_deref());
+        }
+        let previewing = previewed.is_some() || market_colours || market_icons;
 
         // Everything behind the palette dims, so it reads as the one thing to deal with.
         let backdrop = egui::LayerId::new(egui::Order::Middle, egui::Id::new("palette_backdrop"));
         ctx.layer_painter(backdrop).rect_filled(
             ctx.content_rect(),
             0.0,
-            Color32::from_black_alpha(if previewed.is_some() { 24 } else { 110 }),
+            Color32::from_black_alpha(if previewing { 24 } else { 110 }),
         );
 
         let mut run = None;
@@ -389,6 +550,7 @@ impl App {
             self.run_command(ctx, command);
         } else if escape || clicked_away {
             self.palette.open = false;
+            self.end_icon_preview();
             self.preview_theme(ctx, None);
         }
     }
@@ -429,6 +591,7 @@ impl App {
                     }
                     if edit.changed() {
                         self.palette.selected = 0;
+                        self.palette.typed_at = ui.input(|i| i.time);
                     }
                 });
             });
@@ -470,6 +633,16 @@ impl App {
                                                 .selectable(false),
                                             );
                                         });
+                                }
+                                if !entry.detail.is_empty() {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&entry.detail)
+                                                .small()
+                                                .color(theme::COMMENT()),
+                                        )
+                                        .selectable(false),
+                                    );
                                 }
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -536,6 +709,24 @@ impl App {
                     .small()
                     .color(theme::COMMENT()),
             );
+            if !self.palette.files_mode {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    if self.palette.market_rx.is_some() {
+                        ui.label(
+                            RichText::new("Searching the Marketplace…")
+                                .small()
+                                .color(theme::COMMENT()),
+                        );
+                        ui.spinner();
+                    } else if !self.palette.market_error.is_empty() {
+                        let error = RichText::new("Marketplace unreachable")
+                            .small()
+                            .color(theme::COMMENT());
+                        ui.label(error).on_hover_text(&self.palette.market_error);
+                    }
+                });
+            }
         });
     }
 }

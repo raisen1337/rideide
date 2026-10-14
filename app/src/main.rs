@@ -80,6 +80,10 @@ fn main() -> eframe::Result {
             .with_decorations(true)
             .with_transparent(true),
         wgpu_options,
+        // Where eframe would keep it anyway, but found through APPDATA like the rest of
+        // ride's data, so a copy started with another APPDATA has its own.
+        persistence_path: std::env::var_os("APPDATA")
+            .map(|dir| PathBuf::from(dir).join("ride").join("data").join("app.ron")),
         ..Default::default()
     };
     eframe::run_native("ride", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -1404,6 +1408,7 @@ impl App {
         if let Some(opacity) = glass_opacity {
             app.themes.opacity = opacity.clamp(0.3, 0.97);
         }
+        app.palette_from_env();
         if let Some(error) = update::Updater::take_last_error() {
             app.status = format!("The last update didn't install: {error}");
         }
@@ -4116,6 +4121,8 @@ impl eframe::App for App {
         if let Some(line) = self.updater.tick(&ctx) {
             self.status = line;
         }
+        // Installs started from the command palette finish outside the Themes view.
+        self.poll_themes(&ctx);
         // An update found as ride opened: restart into it now. The tabs and chats are
         // saved on the way out and come back.
         if std::mem::take(&mut self.updater.apply_now) && self.updater.install(true) {
