@@ -36,7 +36,13 @@ struct Doc {
     others: HashMap<u64, Other>,
     revision_seen: u64,
     cursor_sent: (usize, usize),
+    /// When the cursor was last sent; it goes at most every `CURSOR_EVERY`.
+    cursor_time: Option<std::time::Instant>,
 }
+
+/// Cursor moves are sent this often at most: smooth enough to watch, without a message
+/// for every frame of a held arrow key.
+const CURSOR_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
 
 #[derive(Default)]
 pub(super) struct Live {
@@ -146,6 +152,7 @@ impl App {
                     others: HashMap::new(),
                     revision_seen: revision,
                     cursor_sent: (usize::MAX, usize::MAX),
+                    cursor_time: None,
                 },
             );
             self.live_send(&ToBroker::Join {
@@ -169,8 +176,21 @@ impl App {
                 buf.insert(&text);
             }
         }
+        // A file open in two tabs is shared through the first: two cursors taking turns
+        // would make it jump about for the others.
+        let mut seen = HashSet::new();
         for index in 0..self.tabs.len() {
-            self.live_flush(index);
+            if seen.insert(self.tabs[index].path.clone()) {
+                self.live_flush(index);
+            }
+        }
+        if self
+            .live
+            .docs
+            .values()
+            .any(|d| d.joined && d.cursor_time.is_some())
+        {
+            ctx.request_repaint_after(CURSOR_EVERY);
         }
         self.live_marks(ctx);
     }
@@ -189,6 +209,14 @@ impl App {
             if text != doc.shadow {
                 let op = TextOp::diff(&doc.shadow, &text);
                 doc.shadow = text;
+                // The others' cursors move with what was typed here, as they would on
+                // their own screens, rather than waiting for them to say where they are.
+                for other in doc.others.values_mut() {
+                    if let Some((at, anchor)) = &mut other.at {
+                        *at = op.map(*at, false);
+                        *anchor = op.map(*anchor, false);
+                    }
+                }
                 match doc.client.local(op) {
                     Ok(Some((rev, op))) => out.push(ToBroker::Op {
                         doc: tab.path.clone(),
@@ -209,8 +237,16 @@ impl App {
                 tab.buf.offset_of(tab.buf.cursor),
                 tab.buf.offset_of(tab.buf.anchor),
             );
-            if cursor != doc.cursor_sent {
+            // A place in text the others don't have yet would put the cursor somewhere
+            // else on their screens until the edit arrives, so it waits for the edits to
+            // be taken in; and it goes at most every CURSOR_EVERY.
+            let in_step = doc.client.outstanding.is_none() && doc.client.buffer.is_none();
+            let due = doc.cursor_time.is_none_or(|t| t.elapsed() >= CURSOR_EVERY);
+            if cursor == doc.cursor_sent {
+                doc.cursor_time = None;
+            } else if in_step && due {
                 doc.cursor_sent = cursor;
+                doc.cursor_time = Some(std::time::Instant::now());
                 out.push(ToBroker::Cursor {
                     doc: tab.path.clone(),
                     at: cursor.0,

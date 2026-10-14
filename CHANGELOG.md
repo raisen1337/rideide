@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.2
+
+- **Steadier cursors in live editing.** Someone else's cursor no longer jumps back and forth while they type or move around: a cursor is sent only once the text it points into has reached the others, the others' cursors move with what you type, and cursor moves go out at most 25 times a second. A file open in two tabs no longer makes your cursor flicker between them for the others.
+- **ride doesn't close on an error any more.** If something goes wrong while drawing, ride carries on and writes what happened to `%LOCALAPPDATA%\ride\error.txt`. If ride does close, the next start says so and points to the file. Sending that file along helps fix the cause.
+
 ## 0.6.1
 
 - **No GitHub needed.** Live editing and live sessions work without signing in: ride asks you for a nickname the first time, and you can change it in Settings → Account. Signing in with GitHub still gives you your picture and account name.

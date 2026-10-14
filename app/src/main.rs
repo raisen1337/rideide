@@ -47,7 +47,28 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use term::Terminal;
 
+/// Where a crash leaves its reason, for the next start to point at.
+fn crash_file() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(base).join("ride").join("crash.txt"))
+}
+
 fn main() -> eframe::Result {
+    // A panic on the interface's thread closes ride; what it was is written down first.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            if let Some(path) = crash_file() {
+                let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+                let backtrace = std::backtrace::Backtrace::force_capture();
+                let _ = std::fs::write(
+                    &path,
+                    format!("ride {}\n{info}\n\n{backtrace}", update::VERSION),
+                );
+            }
+        }
+        default_hook(info);
+    }));
     // A DirectComposition swapchain is what lets the window be see-through on Windows,
     // which the optional glass backdrop needs.
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
@@ -1457,6 +1478,15 @@ impl App {
         app.db_grid_from_env();
         if let Some(error) = update::Updater::take_last_error() {
             app.status = format!("The last update didn't install: {error}");
+        }
+        // ride closed because of an error last time: say so, once, and where it's written.
+        if let Some(path) = crash_file().filter(|p| p.exists()) {
+            let seen = path.with_file_name("crash-seen.txt");
+            let _ = std::fs::rename(&path, &seen);
+            app.status = format!(
+                "ride closed because of an error last time. What happened is in {}",
+                seen.display()
+            );
         }
         app
     }
@@ -4324,8 +4354,12 @@ fn dir_menu(ui: &mut Ui, dir: &str, action: &mut Option<TreeAction>) {
     }
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+impl App {
+    fn draw(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // RIDE_PANIC_TEST fails one frame on purpose, to see ride carry on after it.
+        if std::env::var_os("RIDE_PANIC_TEST").is_some() && ui.ctx().cumulative_pass_nr() == 40 {
+            panic!("a test of what happens when a frame fails");
+        }
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
         self.poll(&ctx);
@@ -4535,6 +4569,30 @@ impl eframe::App for App {
         resize_edges(&ctx);
     }
 
+    /// A frame failed to draw: what happened was written down by the panic hook; it is
+    /// moved aside (it didn't close ride) and pointed at.
+    fn after_panic(&mut self) {
+        if let Some(path) = crash_file().filter(|p| p.exists()) {
+            let kept = path.with_file_name("error.txt");
+            let _ = std::fs::rename(&path, &kept);
+            self.status = format!(
+                "Something went wrong and ride carried on. What happened is in {}",
+                kept.display()
+            );
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // A mistake while drawing one frame shouldn't close ride and lose unsaved work.
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.draw(ui, frame)));
+        if drawn.is_err() {
+            self.after_panic();
+            // Whatever that frame meant to ask for is lost: the next one is drawn anyway.
+            ui.ctx().request_repaint();
+        }
+    }
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // Fully clear under glass, so the backdrop shows through the see-through panes.
         if theme::glass_opacity().is_some() {
