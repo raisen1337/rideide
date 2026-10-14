@@ -39,6 +39,10 @@ fn main() -> eframe::Result {
     // `--preview` runs the whole interface without touching the computer: no files,
     // shortcuts or registry entries are written, and nothing is launched or removed.
     let preview = args.iter().any(|arg| arg == "--preview");
+    // `--update` is what ride runs to update itself; see `update`.
+    if !preview && args.iter().any(|arg| arg == "--update") {
+        std::process::exit(if update(&args) { 0 } else { 1 });
+    }
     if !preview && args.iter().any(|arg| arg == "--silent") {
         std::process::exit(if silent(&args, uninstall) { 0 } else { 1 });
     }
@@ -284,6 +288,116 @@ fn silent(args: &[String], uninstalling: bool) -> bool {
     }
     rx.try_iter()
         .any(|message| matches!(message, Progress::Done))
+}
+
+/// Updates an existing install in place, without a window:
+///   ride-setup --update --dir=PATH [--wait=PID] [--launch]
+/// Waits for that ride (PID) to exit, swaps in the new ride.exe so that a failure at any
+/// point leaves the old one working, refreshes the uninstaller and the version Windows
+/// shows, and starts ride again with `--launch`. Shortcuts and menu entries the user has
+/// kept or removed are left as they are. What went wrong is written to `last-error.txt`
+/// in ride's update folder, for ride to show.
+fn update(args: &[String]) -> bool {
+    let value = |name: &str| args.iter().find_map(|arg| arg.strip_prefix(name));
+    let dir = value("--dir=").map_or_else(default_dir, PathBuf::from);
+    let log_dir = local_app_data().join("ride").join("updates");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = std::fs::remove_file(log_dir.join("last-error.txt"));
+
+    if let Some(pid) = value("--wait=").and_then(|pid| pid.parse::<u32>().ok()) {
+        wait_for_exit(pid);
+    }
+    let result = replace_app(&dir);
+    if let Err(error) = &result {
+        let _ = std::fs::write(log_dir.join("last-error.txt"), error);
+    }
+    if args.iter().any(|arg| arg == "--launch") {
+        let mut command = Command::new(dir.join("ride.exe"));
+        command.current_dir(&dir);
+        let _ = command.spawn();
+    }
+    result.is_ok()
+}
+
+/// Waits up to 20 seconds for a process to end, then ends it.
+fn wait_for_exit(pid: u32) {
+    let running = || {
+        quiet("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+    };
+    let started = Instant::now();
+    while running() {
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = quiet("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
+            std::thread::sleep(Duration::from_millis(800));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn replace_app(dir: &Path) -> Result<(), String> {
+    let mut app = Vec::new();
+    flate2::read::GzDecoder::new(PAYLOAD)
+        .read_to_end(&mut app)
+        .map_err(|e| format!("The update is damaged: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
+    let (target, fresh, old) = (
+        dir.join("ride.exe"),
+        dir.join("ride.exe.new"),
+        dir.join("ride.old.exe"),
+    );
+    std::fs::write(&fresh, &app).map_err(|e| format!("Can't write the new ride.exe: {e}"))?;
+    let _ = std::fs::remove_file(&old);
+    // Windows can rename a program file that is still open, but not overwrite it, so the
+    // old one is moved aside first. Some antivirus scanners hold it a moment longer.
+    let mut moved = !target.exists();
+    for _ in 0..20 {
+        if moved || std::fs::rename(&target, &old).is_ok() {
+            moved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !moved {
+        let _ = std::fs::remove_file(&fresh);
+        return Err("ride.exe stayed in use, so the update was left for later.".into());
+    }
+    if let Err(error) = std::fs::rename(&fresh, &target) {
+        let _ = std::fs::rename(&old, &target);
+        let _ = std::fs::remove_file(&fresh);
+        return Err(format!("Can't put the new ride.exe in place: {error}"));
+    }
+    if let Ok(me) = std::env::current_exe() {
+        let uninstaller = dir.join("uninstall.exe");
+        if me != uninstaller && uninstaller.exists() {
+            let _ = std::fs::copy(me, uninstaller);
+        }
+    }
+    let registered = quiet("reg")
+        .args(["query", UNINSTALL_KEY])
+        .status()
+        .is_ok_and(|status| status.success());
+    if registered {
+        let _ = quiet("reg")
+            .args([
+                "add",
+                UNINSTALL_KEY,
+                "/v",
+                "DisplayVersion",
+                "/t",
+                "REG_SZ",
+                "/d",
+                VERSION,
+                "/f",
+            ])
+            .status();
+    }
+    Ok(())
 }
 
 /// Writes a file that may be in use: if the first try fails, ride is asked to close

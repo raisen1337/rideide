@@ -61,6 +61,9 @@ pub struct Settings {
     pub reconnect: bool,
     /// Set Claude Code on a host up to show previews through ride.
     pub claude_previews: bool,
+    // Updates
+    /// Check for a new version once a day, download it, and install it when ride closes.
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -92,6 +95,7 @@ impl Default for Settings {
             notifications: true,
             reconnect: true,
             claude_previews: true,
+            auto_update: true,
         }
     }
 }
@@ -162,13 +166,14 @@ pub fn chat_mode() -> chat::Mode {
     })
 }
 
-const SECTIONS: [&str; 6] = [
+const SECTIONS: [&str; 7] = [
     "Appearance",
     "Editor",
     "Files",
     "Terminal",
     "Claude",
     "Connection",
+    "Updates",
 ];
 const MODELS: [(&str, &str); 4] = [
     ("haiku", "Haiku"),
@@ -554,8 +559,8 @@ impl App {
                             "chat_mode",
                             &mut s.chat_mode,
                             &[
-                                ("default", "Ask: read only"),
-                                ("acceptEdits", "Edit: may change files"),
+                                ("default", "Ask: asks before changes"),
+                                ("acceptEdits", "Edit: asks for commands"),
                                 ("auto", "Auto: edits and safe commands"),
                             ],
                         );
@@ -599,6 +604,43 @@ impl App {
                     },
                 );
                 row(ui, "Notifications", "A Windows notification when Claude or an agent finishes while ride is in the background.", |ui| toggle(ui, &mut s.notifications));
+            }
+            6 => {
+                row(ui, "Version", "The ride you are running.", |ui| {
+                    ui.label(RichText::new(update::VERSION).color(theme::STRONG()));
+                });
+                row(
+                    ui,
+                    "Update automatically",
+                    "Checks GitHub once a day. A new version downloads in the background and installs when you close ride; nothing is lost.",
+                    |ui| toggle(ui, &mut s.auto_update),
+                );
+                let state = match &self.updater.state {
+                    update::State::Idle => String::new(),
+                    update::State::Checking => "Checking…".into(),
+                    update::State::UpToDate => "You have the newest version.".into(),
+                    update::State::Downloading(version) => format!("Downloading {version}…"),
+                    update::State::Ready { version, .. } => format!("{version} is ready."),
+                    update::State::Failed(error) => error.clone(),
+                };
+                let ready = self.updater.ready().is_some();
+                row(ui, "Check now", &state, |ui| {
+                    if ready {
+                        if ui.button("Restart and update").clicked() && self.updater.install(true) {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    } else if ui.button("Check for updates").clicked() {
+                        self.updater.check_now(ui.ctx());
+                    }
+                });
+                row(
+                    ui,
+                    "Releases",
+                    "What changed in each version, and the setup program for another computer.",
+                    |ui| {
+                        ui.hyperlink_to("GitHub", update::RELEASES_URL);
+                    },
+                );
             }
             _ => {
                 row(

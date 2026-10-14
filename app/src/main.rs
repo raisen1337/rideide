@@ -20,6 +20,7 @@ mod term;
 mod theme;
 mod themes;
 mod tools;
+mod update;
 
 use buffer::{Buffer, Pos};
 use chat::Chat;
@@ -544,6 +545,7 @@ struct App {
     /// Ports of the host made reachable on this computer.
     forwards: Vec<tools::Forward>,
     panes: panes::Panes,
+    updater: update::Updater,
     /// The other connections that are open, besides the one shown.
     sessions: Vec<sessions::Session>,
     /// Which connection the one shown is.
@@ -1279,6 +1281,7 @@ impl App {
             monitor: tools::Monitor::default(),
             forwards: Vec::new(),
             panes: panes::Panes::default(),
+            updater: update::Updater::new(),
             sessions: Vec::new(),
             session_uid: 0,
             background: false,
@@ -1388,6 +1391,9 @@ impl App {
         }
         if let Some(opacity) = glass_opacity {
             app.themes.opacity = opacity.clamp(0.3, 0.97);
+        }
+        if let Some(error) = update::Updater::take_last_error() {
+            app.status = format!("The last update didn't install: {error}");
         }
         app
     }
@@ -2960,6 +2966,17 @@ impl App {
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(version) = self.updater.ready().map(str::to_string) {
+                    let text = format!("{}  Restart to update to {version}", icons::REFRESH);
+                    let label = RichText::new(text).small().color(theme::ACCENT());
+                    let label = egui::Label::new(label).sense(Sense::click());
+                    let hint =
+                        "Otherwise it installs when you close ride. Open tabs and chats come back.";
+                    if ui.add(label).on_hover_text(hint).clicked() && self.updater.install(true) {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    ui.add_space(8.0);
+                }
                 if let Some(index) = self.docked_active() {
                     let c = self.tabs[index].buf.cursor;
                     ui.label(
@@ -4084,6 +4101,9 @@ impl eframe::App for App {
             self.end_splash(&ctx);
         }
         self.remember_window(&ctx);
+        if let Some(line) = self.updater.tick(&ctx) {
+            self.status = line;
+        }
         // The catch-up screen covers everything until it is read or skipped.
         if self.catching_up() {
             self.catchup_screen(ui);
@@ -4254,6 +4274,13 @@ impl eframe::App for App {
             .as_ref()
             .map(|d| d.to_string_lossy().into_owned());
         storage.set_string("download_dir", dir.unwrap_or_default());
+    }
+
+    fn on_exit(&mut self) {
+        // A downloaded update goes in as ride closes; the setup waits for it to be gone.
+        if settings::with(|s| s.auto_update) {
+            self.updater.install(false);
+        }
     }
 }
 

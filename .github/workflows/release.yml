@@ -1,0 +1,75 @@
+# Builds ride and publishes a release whenever the version in Cargo.toml changes on main
+# (or when run by hand from the Actions tab). Installed copies of ride find the new
+# release through its latest.json and update themselves.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          gh release view "v$version" --repo $env:GITHUB_REPOSITORY *> $null
+          $exists = if ($LASTEXITCODE -eq 0) { 'true' } else { 'false' }
+          "exists=$exists" >> $env:GITHUB_OUTPUT
+          if ($exists -eq 'true') { Write-Host "v$version is already released; nothing to do." }
+          exit 0
+
+      - name: Set up Rust
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.exists == 'false'
+
+      - name: Test
+        if: steps.version.outputs.exists == 'false'
+        run: cargo test --workspace --release
+
+      - name: Build the setup program
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: ./build-installer.ps1
+
+      - name: Publish
+        if: steps.version.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $setup = Get-Item dist/ride-setup.exe
+          $manifest = [ordered]@{
+            version = $version
+            url     = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$version/ride-setup.exe"
+            sha256  = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+            size    = $setup.Length
+          }
+          $manifest | ConvertTo-Json | Set-Content -Encoding utf8NoBOM dist/latest.json
+          Get-Content dist/latest.json
+          gh release create "v$version" dist/ride-setup.exe dist/latest.json `
+            --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+            --title "ride $version" --generate-notes --latest

@@ -30,6 +30,10 @@ It runs on your own computer as well.
 Get **`ride-setup.exe`** from the [latest release](https://github.com/raisen1337/rideide/releases/latest)
 and run it. The installer puts ride in your user folder, so it doesn't ask for admin rights.
 
+After that ride keeps itself current: once a day it checks the latest release here, downloads a
+newer version in the background, verifies its SHA-256, and installs it when you close ride.
+You can turn that off or check by hand in Settings → Updates.
+
 You need:
 
 - Windows 10 or 11 (the OpenSSH client that comes with Windows is enough)
@@ -72,6 +76,10 @@ rustup target add x86_64-unknown-linux-musl   # for the server agent
 ```
 
 `cargo run -p ride` starts the editor without installing it.
+
+To release, raise `version` in the root `Cargo.toml` and push to `main`. The
+[Release workflow](.github/workflows/release.yml) tests and builds on GitHub's Windows runners,
+then publishes `ride-setup.exe` with a `latest.json` that installed copies read to update.
 
 | Folder | What it is |
 | --- | --- |
