@@ -73,7 +73,7 @@ impl App {
 
     fn live_wanted(&self) -> bool {
         settings::with(|s| s.live_editing)
-            && self.github.me.is_some()
+            && share::me(&self.github).is_some()
             && self.online()
             && !chat::local_shell()
     }
@@ -110,13 +110,8 @@ impl App {
             self.live.proc = Some(proc);
             self.live.host = host;
         }
-        let Some(me) = self.github.me.clone() else {
+        let Some(user) = share::me(&self.github) else {
             return;
-        };
-        let user = Peer {
-            login: me.login.clone(),
-            name: me.shown_name().to_string(),
-            avatar: me.avatar_url.clone(),
         };
         // Files opened since: joined. Files closed: left.
         let open: Vec<String> = self
@@ -231,17 +226,13 @@ impl App {
     /// Out of step with the broker: join again, to get the text as it is.
     fn live_rejoin_msg(&mut self, index: usize) -> ToBroker {
         let tab = &self.tabs[index];
-        let me = self.github.me.clone().unwrap_or_default();
+        let user = share::me(&self.github).unwrap_or_default();
         if let Some(doc) = self.live.docs.get_mut(&tab.path) {
             doc.joined = false;
         }
         ToBroker::Join {
             doc: tab.path.clone(),
-            user: Peer {
-                login: me.login.clone(),
-                name: me.shown_name().to_string(),
-                avatar: me.avatar_url,
-            },
+            user,
             text: tab.buf.plain_text(),
         }
     }
@@ -342,14 +333,9 @@ impl App {
                     }
                     Err(_) => {
                         doc.joined = false;
-                        let me = self.github.me.clone().unwrap_or_default();
                         send.push(ToBroker::Join {
                             doc: path.clone(),
-                            user: Peer {
-                                login: me.login.clone(),
-                                name: me.shown_name().to_string(),
-                                avatar: me.avatar_url,
-                            },
+                            user: share::me(&self.github).unwrap_or_default(),
                             text: tab.buf.plain_text(),
                         });
                     }

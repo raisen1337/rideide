@@ -122,8 +122,10 @@ pub struct Settings {
     // Updates
     /// Check for a new version once a day, download it, and install it when ride closes.
     pub auto_update: bool,
-    /// Edit files together with others on the same host (needs a GitHub sign-in).
+    /// Edit files together with others on the same host.
     pub live_editing: bool,
+    /// The name others see in live editing when there's no GitHub sign-in.
+    pub nickname: String,
 }
 
 impl Default for Settings {
@@ -162,6 +164,7 @@ impl Default for Settings {
             claude_previews: true,
             auto_update: true,
             live_editing: true,
+            nickname: String::new(),
         }
     }
 }
@@ -750,8 +753,10 @@ impl App {
             }
             7 => {
                 let mut live = s.live_editing;
-                self.account_rows(ui, &mut live);
+                let mut nickname = s.nickname.clone();
+                self.account_rows(ui, &mut live, &mut nickname);
                 s.live_editing = live;
+                s.nickname = nickname;
             }
             6 => {
                 row(ui, "Version", "The ride you are running.", |ui| {

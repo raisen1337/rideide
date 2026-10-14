@@ -578,6 +578,8 @@ struct App {
     github: github::GitHub,
     /// The live session hosted here, if one is on.
     share: Option<share::Share>,
+    /// Asking for a nickname (what is typed, and what it is for) before a live session.
+    nickname_ask: Option<(String, share::AfterNickname)>,
     /// The box for joining a session, while it is open.
     join_input: Option<String>,
     live: collab::Live,
@@ -1325,6 +1327,7 @@ impl App {
             db: db::Db::default(),
             github: github::GitHub::load(),
             share: None,
+            nickname_ask: None,
             join_input: None,
             live: collab::Live::default(),
             now: 0.0,
@@ -1629,10 +1632,10 @@ impl App {
         chat::set_local_shell(host == LOCAL);
         share::set_guest(share::is_session_id(&host));
         let identity = if share::is_session_id(&host) {
-            match self.join_identity() {
-                Ok(peer) => Some(peer),
-                Err(error) => {
-                    self.status = error;
+            match share::me(&self.github) {
+                Some(peer) => Some(peer),
+                None => {
+                    self.nickname_ask = Some((String::new(), share::AfterNickname::Join));
                     return;
                 }
             }
@@ -3136,8 +3139,8 @@ impl App {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Who you're signed in to GitHub as; a click opens Settings → Account.
-                if let Some(me) = self.github.me.clone() {
-                    let avatar = self.github.avatar(&ui.ctx().clone(), &me.avatar_url);
+                if let Some(me) = share::me(&self.github) {
+                    let avatar = self.github.avatar(&ui.ctx().clone(), &me.avatar);
                     let pill = Frame::NONE
                         .fill(theme::tint(12))
                         .corner_radius(10)
@@ -3152,7 +3155,9 @@ impl App {
                             // Right to left: the name goes in first, the picture before it.
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(me.shown_name()).small().color(theme::TEXT()),
+                                    RichText::new(share::peer_name(&me))
+                                        .small()
+                                        .color(theme::TEXT()),
                                 )
                                 .selectable(false),
                             );
@@ -3176,7 +3181,11 @@ impl App {
                         })
                         .response
                         .interact(Sense::click())
-                        .on_hover_text(format!("Signed in to GitHub as @{}", me.login));
+                        .on_hover_text(if me.avatar.is_empty() {
+                            format!("{} — your nickname in live editing", me.name)
+                        } else {
+                            format!("Signed in to GitHub as @{}", me.login)
+                        });
                     if pill.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
@@ -4438,6 +4447,7 @@ impl eframe::App for App {
             self.agents_widget(&ctx);
             self.share_window(&ctx);
             self.join_window(&ctx);
+            self.nickname_window(&ctx);
             self.palette_window(&ctx);
             resize_edges(&ctx);
             return;
@@ -4520,6 +4530,7 @@ impl eframe::App for App {
         }
         self.share_window(&ctx);
         self.join_window(&ctx);
+        self.nickname_window(&ctx);
         self.palette_window(&ctx);
         resize_edges(&ctx);
     }

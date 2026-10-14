@@ -81,7 +81,8 @@ There is no API key to paste into ride.
   ([iroh](https://github.com/n0-computer/iroh)). When no direct path can be found, the traffic
   goes through a public relay, still encrypted end to end.
 - People who log in to the same server with the same account edit together without a session.
-- Signing in with GitHub (Settings → Account) puts your name and picture on your cursor.
+- Others see your nickname on your cursor, or your GitHub name and picture if you sign in with
+  GitHub (Settings → Account). Neither needs an account anywhere else.
 
 ## Git, server and databases
 

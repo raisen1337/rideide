@@ -285,7 +285,7 @@ fn sign_in(tx: &Sender<Step>, ctx: &Context) -> Result<Identity, String> {
 
 impl App {
     /// Settings → Account: who you are on GitHub, and live editing.
-    pub(super) fn account_rows(&mut self, ui: &mut Ui, live: &mut bool) {
+    pub(super) fn account_rows(&mut self, ui: &mut Ui, live: &mut bool, nickname: &mut String) {
         self.github.poll();
         let ctx = ui.ctx().clone();
         match self.github.me.clone() {
@@ -361,6 +361,30 @@ impl App {
                 }
             },
         }
+        if self.github.me.is_none() {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - 300.0).max(160.0));
+                    ui.label(RichText::new("Nickname").color(theme::STRONG()));
+                    ui.label(
+                        RichText::new(
+                            "The name others see on your cursor in live editing and live sessions, without a GitHub sign-in.",
+                        )
+                        .small()
+                        .color(theme::COMMENT()),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add(
+                        TextEdit::singleline(nickname)
+                            .desired_width(200.0)
+                            .char_limit(32)
+                            .hint_text("Nickname"),
+                    );
+                });
+            });
+        }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -368,14 +392,14 @@ impl App {
                 ui.label(RichText::new("Live editing").color(theme::STRONG()));
                 ui.label(
                     RichText::new(
-                        "When someone else has the same file open on the same server through ride, you edit it together and see each other's cursor. Needs you signed in.",
+                        "When someone else has the same file open on the same server through ride, you edit it together and see each other's cursor, with your GitHub name or nickname.",
                     )
                     .small()
                     .color(theme::COMMENT()),
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled(self.github.me.is_some(), egui::Checkbox::without_text(live));
+                ui.add(egui::Checkbox::without_text(live));
             });
         });
     }

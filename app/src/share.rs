@@ -138,12 +138,28 @@ pub(super) fn guest() -> bool {
     GUEST.load(Ordering::Relaxed)
 }
 
-fn peer_of(me: &github::Identity) -> Peer {
-    Peer {
-        login: me.login.clone(),
-        name: me.shown_name().to_string(),
-        avatar: me.avatar_url.clone(),
+/// Who you are to others: your GitHub account, or else the nickname you chose.
+pub(super) fn me(github: &github::GitHub) -> Option<Peer> {
+    if let Some(me) = &github.me {
+        return Some(Peer {
+            login: me.login.clone(),
+            name: me.shown_name().to_string(),
+            avatar: me.avatar_url.clone(),
+        });
     }
+    let nickname = settings::with(|s| s.nickname.trim().to_string());
+    (!nickname.is_empty()).then(|| Peer {
+        login: nickname.clone(),
+        name: nickname,
+        avatar: String::new(),
+    })
+}
+
+/// What asking for a nickname was for.
+pub(super) enum AfterNickname {
+    Share,
+    /// Joining the session whose ID is in the host box.
+    Join,
 }
 
 pub(super) fn peer_name(peer: &Peer) -> &str {
@@ -437,11 +453,59 @@ impl App {
         is_session_id(self.host.trim())
     }
 
-    /// The link to a session, for `connect`; an error if there's no GitHub sign-in.
-    pub(super) fn join_identity(&self) -> Result<Peer, String> {
-        self.github.me.as_ref().map(peer_of).ok_or_else(|| {
-            "Sign in with GitHub first (Settings → Account) to join a session".into()
-        })
+    /// Asks for the name others will see, when there's no GitHub sign-in to take it from.
+    pub(super) fn nickname_window(&mut self, ctx: &Context) {
+        let Some((text, _)) = &mut self.nickname_ask else {
+            return;
+        };
+        let (mut go, mut close) = (false, false);
+        egui::Window::new("Choose a nickname")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 120.0])
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(
+                    RichText::new(
+                        "The name the others in the session see on your cursor. You can sign in with GitHub instead, in Settings → Account.",
+                    )
+                    .small()
+                    .color(theme::COMMENT()),
+                );
+                ui.add_space(4.0);
+                let edit = ui.add(
+                    TextEdit::singleline(text)
+                        .desired_width(f32::INFINITY)
+                        .char_limit(32)
+                        .hint_text("Nickname"),
+                );
+                edit.request_focus();
+                let ok = !text.trim().is_empty();
+                go = ok && edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(ok, egui::Button::new("Continue")).clicked() {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.nickname_ask = None;
+        }
+        if !go {
+            return;
+        }
+        let Some((text, after)) = self.nickname_ask.take() else {
+            return;
+        };
+        let nickname = text.trim().to_string();
+        settings::change(|s| s.nickname = nickname);
+        match after {
+            AfterNickname::Share => self.share_start(ctx),
+            AfterNickname::Join => self.connect(ctx),
+        }
     }
 
     pub(super) fn share_start(&mut self, ctx: &Context) {
@@ -455,11 +519,13 @@ impl App {
             Some("This is someone else's session; only its host can share it")
         } else if chat::local_shell() {
             Some("Live sessions share a folder on a Linux server, not one on this computer")
-        } else if self.github.me.is_none() {
-            Some("Sign in with GitHub first (Settings → Account) to host a session")
         } else {
             None
         };
+        if problem.is_none() && me(&self.github).is_none() {
+            self.nickname_ask = Some((String::new(), AfterNickname::Share));
+            return;
+        }
         if let Some(problem) = problem {
             self.status = problem.into();
             return;
@@ -509,7 +575,7 @@ impl App {
     }
 
     pub(super) fn share_admit(&mut self, key: u64, admit: bool) {
-        let me = self.github.me.as_ref().map(peer_of).unwrap_or_default();
+        let me = me(&self.github).unwrap_or_default();
         let Some(share) = self.share.as_mut() else {
             return;
         };
@@ -878,10 +944,16 @@ impl App {
                                 }
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new(peer_name(user)).color(theme::STRONG()));
-                                    let note = if *waiting {
-                                        format!("@{} asks to join", user.login)
+                                    // A nickname is whatever they typed: it says so.
+                                    let who = if user.avatar.is_empty() {
+                                        "not signed in with GitHub".to_string()
                                     } else {
                                         format!("@{}", user.login)
+                                    };
+                                    let note = if *waiting {
+                                        format!("{who} · asks to join")
+                                    } else {
+                                        who
                                     };
                                     ui.label(RichText::new(note).small().color(theme::COMMENT()));
                                 });

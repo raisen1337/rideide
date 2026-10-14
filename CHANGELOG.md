@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.1
+
+- **No GitHub needed.** Live editing and live sessions work without signing in: ride asks you for a nickname the first time, and you can change it in Settings → Account. Signing in with GitHub still gives you your picture and account name.
+- A host sees which guests aren't signed in with GitHub, since a nickname can be anything.
+
 ## 0.6.0
 
 - **Live sessions.** Share the folder you have open with people who can't get onto the server. Start one from the connection menu at the top ("Share this folder in a live session") or from Ctrl+Shift+P. You get a session ID to send them.
