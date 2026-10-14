@@ -71,6 +71,25 @@ enum Item {
     Checkpoint(String),
     /// Something ride itself has to say, such as files having been restored.
     Note(String),
+    /// A subagent Claude started (its Task/Agent tool): what kind, what for, and the id
+    /// its own messages carry.
+    Agent {
+        id: String,
+        kind: String,
+        task: String,
+    },
+}
+
+/// What a subagent did, as it reports it: its messages and tools, and whether it's done.
+#[derive(Default)]
+struct Sub {
+    items: Vec<Item>,
+    done: bool,
+}
+
+/// Claude Code's tools that start a subagent.
+fn starts_agent(tool: &str) -> bool {
+    matches!(tool, "Task" | "Agent")
 }
 
 /// Something Claude wants to do and waits to be allowed.
@@ -174,6 +193,10 @@ pub struct Chat {
     /// Earlier conversations, newest first.
     history: Vec<Saved>,
     show_history: bool,
+    /// Subagents' conversations, by the id of the tool call that started each.
+    subs: std::collections::HashMap<String, Sub>,
+    /// The subagent conversations open, innermost last; empty for the chat itself.
+    viewing: Vec<String>,
     /// Conversations Claude Code had in this folder outside ride (in a terminal), newest
     /// first, with when each was last written; `None` until the host has listed them.
     cli: Option<Vec<(Saved, u64)>>,
@@ -270,6 +293,7 @@ fn item_to_json(item: &Item) -> Value {
         Item::Image { name, .. } => json!({ "k": "image", "a": name }),
         Item::Checkpoint(id) => json!({ "k": "cp", "a": id }),
         Item::Note(text) => json!({ "k": "note", "a": text }),
+        Item::Agent { id, kind, task } => json!({ "k": "agent", "a": task, "b": kind, "c": id }),
     }
 }
 
@@ -288,6 +312,11 @@ fn item_from_json(v: &Value) -> Option<Item> {
         },
         "cp" => Item::Checkpoint(a),
         "note" => Item::Note(a),
+        "agent" => Item::Agent {
+            id: v["c"].as_str().unwrap_or("").to_string(),
+            kind: b,
+            task: a,
+        },
         _ => return None,
     })
 }
@@ -326,6 +355,8 @@ impl Default for Chat {
             last_result: None,
             history: Vec::new(),
             show_history: false,
+            subs: Default::default(),
+            viewing: Vec::new(),
             cli: None,
             changes: Vec::new(),
             pending_changes: Vec::new(),
@@ -678,6 +709,9 @@ impl Chat {
                 Item::Error(text) => format!("error: {}", clip(text)),
                 Item::Image { name, .. } => format!("user attached an image: {name}"),
                 Item::Note(text) => format!("note: {}", clip(text)),
+                Item::Agent { kind, task, .. } => {
+                    format!("claude started a {kind} agent: {}", clip(task))
+                }
                 Item::Checkpoint(_) => String::new(),
             })
             .filter(|line| !line.is_empty())
@@ -729,6 +763,7 @@ impl Chat {
             Some(Item::Checkpoint(_)) => String::new(),
             Some(Item::From { who, text }) => format!("{who}: {}", first_line(text, 70)),
             Some(Item::Tool { name, detail }) => format!("{name} {}", first_line(detail, 70)),
+            Some(Item::Agent { task, .. }) => format!("Agent: {}", first_line(task, 70)),
             None => String::new(),
         }
     }
@@ -818,6 +853,14 @@ impl Chat {
             "turns": self.turns,
             "cost": self.cost(),
             "changes": changes,
+            "subs": self
+                .subs
+                .iter()
+                .map(|(id, sub)| {
+                    let items: Vec<Value> = sub.items.iter().map(item_to_json).collect();
+                    (id.clone(), json!({ "items": items, "done": sub.done }))
+                })
+                .collect::<serde_json::Map<String, Value>>(),
         })
     }
 
@@ -866,6 +909,16 @@ impl Chat {
             ..Self::default()
         };
         chat.load_history(&v["history"].to_string());
+        for (id, sub) in v["subs"].as_object().into_iter().flatten() {
+            let items = sub["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(item_from_json)
+                .collect();
+            let done = sub["done"].as_bool().unwrap_or(true);
+            chat.subs.insert(id.clone(), Sub { items, done });
+        }
         chat
     }
 
@@ -888,6 +941,15 @@ impl Chat {
             .filter(|saved| !saved.items.is_empty())
             .take(HISTORY_LIMIT)
             .collect();
+    }
+
+    /// Opens the first subagent's conversation, as its card does (RIDE_CHAT_AGENT).
+    pub fn open_first_agent(&mut self) {
+        let first = self.items.iter().find_map(|item| match item {
+            Item::Agent { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        self.viewing.extend(first);
     }
 
     /// Shows the history, as its button does; the caller asks the host for the terminal's.
@@ -932,6 +994,137 @@ impl Chat {
         self.items = saved.items;
         self.needs_login = false;
         self.streaming = false;
+    }
+
+    /// A message from inside a subagent: added to that subagent's conversation.
+    fn on_sub_message(&mut self, parent: String, v: &Value) {
+        match v["type"].as_str().unwrap_or("") {
+            "assistant" => {
+                let mut items = Vec::new();
+                for block in v["message"]["content"].as_array().into_iter().flatten() {
+                    match block["type"].as_str().unwrap_or("") {
+                        "text" => {
+                            let text = block["text"].as_str().unwrap_or("");
+                            if !text.trim().is_empty() {
+                                items.push(Item::Text(text.to_string()));
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block["name"].as_str().unwrap_or("tool").to_string();
+                            let id = block["id"].as_str().unwrap_or("").to_string();
+                            if starts_agent(&name) {
+                                items.push(agent_item(&id, &block["input"]));
+                                self.subs.entry(id).or_default();
+                                continue;
+                            }
+                            // Its edits count in the Changes panel too.
+                            for change in changes_from_tool(&name, &block["input"]) {
+                                self.pending_changes.push((id.clone(), change));
+                            }
+                            let detail = tool_detail(&name, &block["input"]);
+                            items.push(Item::Tool { name, detail });
+                        }
+                        _ => {}
+                    }
+                }
+                self.subs.entry(parent).or_default().items.extend(items);
+            }
+            "user" => {
+                for block in v["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] != "tool_result" {
+                        continue;
+                    }
+                    let id = block["tool_use_id"].as_str().unwrap_or("");
+                    if let Some(sub) = self.subs.get_mut(id) {
+                        sub.done = true;
+                    }
+                    let failed = block["is_error"].as_bool().unwrap_or(false);
+                    let (done, waiting): (Vec<_>, Vec<_>) =
+                        std::mem::take(&mut self.pending_changes)
+                            .into_iter()
+                            .partition(|(i, _)| i == id);
+                    self.pending_changes = waiting;
+                    if !failed {
+                        self.changes
+                            .extend(done.into_iter().map(|(_, change)| change));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A subagent's conversation, opened from its card: what it said and the tools it used.
+    fn sub_view(&mut self, ui: &mut Ui, id: &str) -> Option<Action> {
+        let (kind, task) = self
+            .items
+            .iter()
+            .chain(self.subs.values().flat_map(|s| s.items.iter()))
+            .find_map(|item| match item {
+                Item::Agent { id: i, kind, task } if i == id => Some((kind.clone(), task.clone())),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut back = false;
+        ui.horizontal(|ui| {
+            if icon_button(ui, icons::ARROW_LEFT, "Back") {
+                back = true;
+            }
+            ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+            ui.label(RichText::new(icons::AGENTS).color(theme::CLAUDE()));
+            let kind = if kind.is_empty() {
+                "Agent"
+            } else {
+                kind.as_str()
+            };
+            ui.label(RichText::new(kind).strong());
+            ui.label(RichText::new(&task).color(theme::COMMENT()));
+        });
+        ui.add_space(4.0);
+        let busy = self.busy;
+        let mut open = None;
+        let sub = self.subs.get(id);
+        ScrollArea::vertical()
+            .auto_shrink(false)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 10.0;
+                let items = sub.map(|s| s.items.as_slice()).unwrap_or_default();
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Item::Text(text) => markdown(ui, text, 1_000_000 + index),
+                        Item::Tool { name, detail } => tool_chip(ui, name, detail),
+                        Item::Agent { id, kind, task } => {
+                            let inner = self.subs.get(id);
+                            let running = busy && !inner.is_some_and(|s| s.done);
+                            let steps = inner.map_or(0, |s| s.items.len());
+                            if agent_card(ui, kind, task, steps, running) {
+                                open = Some(id.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let done = sub.is_some_and(|s| s.done);
+                if !done && busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("Working…").color(theme::COMMENT()));
+                    });
+                } else if items.is_empty() {
+                    ui.label(
+                        RichText::new("Nothing from this agent was kept.").color(theme::COMMENT()),
+                    );
+                }
+                ui.add_space(4.0);
+            });
+        if back {
+            self.viewing.pop();
+        }
+        if let Some(id) = open {
+            self.viewing.push(id);
+        }
+        None
     }
 
     fn history_view(&mut self, ui: &mut Ui) -> Option<Action> {
@@ -1178,8 +1371,9 @@ impl Chat {
             }
             _ => {}
         }
-        // Output of subagents is summarised by the main agent; showing it too would be noise.
-        if v["parent_tool_use_id"].is_string() {
+        // A subagent's messages make its own conversation, opened from its card.
+        if let Some(parent) = v["parent_tool_use_id"].as_str() {
+            self.on_sub_message(parent.to_string(), &v);
             return false;
         }
         match v["type"].as_str().unwrap_or("") {
@@ -1212,8 +1406,13 @@ impl Chat {
                         }
                         "tool_use" => {
                             let name = block["name"].as_str().unwrap_or("tool").to_string();
-                            let detail = tool_detail(&name, &block["input"]);
                             let id = block["id"].as_str().unwrap_or("").to_string();
+                            if starts_agent(&name) {
+                                self.items.push(agent_item(&id, &block["input"]));
+                                self.subs.entry(id).or_default();
+                                continue;
+                            }
+                            let detail = tool_detail(&name, &block["input"]);
                             for change in changes_from_tool(&name, &block["input"]) {
                                 self.pending_changes.push((id.clone(), change));
                             }
@@ -1261,6 +1460,9 @@ impl Chat {
                         continue;
                     }
                     let id = block["tool_use_id"].as_str().unwrap_or("");
+                    if let Some(sub) = self.subs.get_mut(id) {
+                        sub.done = true;
+                    }
                     let failed = block["is_error"].as_bool().unwrap_or(false);
                     let (done, waiting): (Vec<_>, Vec<_>) =
                         std::mem::take(&mut self.pending_changes)
@@ -1331,6 +1533,9 @@ impl Chat {
     }
 
     pub fn show(&mut self, ui: &mut Ui, open_file: Option<&str>, detached: bool) -> Option<Action> {
+        if let Some(id) = self.viewing.last().cloned() {
+            return self.sub_view(ui, &id);
+        }
         if self.show_history {
             return self.history_view(ui);
         }
@@ -1477,6 +1682,7 @@ impl Chat {
         let mut rewind: Option<(usize, String)> = None;
         let mut confirm = self.confirm_rewind;
         let idle = !self.busy && !self.rewinding;
+        let mut open_sub = None;
         ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             let width = ui.available_width();
@@ -1573,6 +1779,14 @@ impl Chat {
                         glow(ui, &card.response, 12);
                     }
                     Item::Text(text) => markdown(ui, text, index),
+                    Item::Agent { id, kind, task } => {
+                        let sub = self.subs.get(id);
+                        let running = self.busy && !sub.is_some_and(|s| s.done);
+                        let steps = sub.map_or(0, |s| s.items.len());
+                        if agent_card(ui, kind, task, steps, running) {
+                            open_sub = Some(id.clone());
+                        }
+                    }
                     Item::Tool { name, detail } => {
                         let chip = Frame::NONE
                             .fill(theme::tint(7))
@@ -1646,6 +1860,9 @@ impl Chat {
             ui.add_space(4.0);
         });
         self.confirm_rewind = confirm;
+        if let Some(id) = open_sub {
+            self.viewing.push(id);
+        }
         if let Some((index, allow, always)) = decision {
             let ask = self.asks.remove(index);
             self.allow_edits |= always;
@@ -2316,6 +2533,41 @@ mod tests {
         assert_eq!(chat.input, "and another");
     }
 
+    /// A subagent Claude starts gets a card; its own messages make its conversation,
+    /// which is done when its result comes back and survives saving.
+    #[test]
+    fn a_subagent_has_a_conversation_of_its_own() {
+        let mut chat = Chat::default();
+        chat.begin_turn("look around", None);
+        chat.on_stdout(br#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Task","input":{"description":"Find the config","subagent_type":"Explore","prompt":"..."}}]}}
+{"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"text","text":"Looking in src."},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/srv/a.lua"}}]}}
+{"type":"user","parent_tool_use_id":"t1","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"..."}]}}
+{"type":"assistant","parent_tool_use_id":"t1","message":{"content":[{"type":"text","text":"It's in config.lua."}]}}
+"#);
+        assert!(
+            matches!(chat.items.last(), Some(Item::Agent { kind, task, .. }) if kind == "Explore" && task == "Find the config")
+        );
+        assert_eq!(chat.subs["t1"].items.len(), 3);
+        assert!(!chat.subs["t1"].done);
+        assert!(
+            !chat
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Text(t) if t.contains("Looking"))),
+            "kept apart"
+        );
+        chat.on_stdout(br#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"It's in config.lua."}]}}
+{"type":"result","result":"done"}
+"#);
+        assert!(chat.subs["t1"].done);
+        let restored = Chat::from_json(&chat.to_json());
+        assert_eq!(restored.subs["t1"].items.len(), 3);
+        assert!(restored.subs["t1"].done);
+        let mut restored = restored;
+        restored.open_first_agent();
+        assert_eq!(restored.viewing, ["t1"]);
+    }
+
     #[test]
     fn a_permission_request_is_answered() {
         let mut chat = Chat::default();
@@ -2392,4 +2644,81 @@ fn bubble_text(ui: &mut Ui, text: RichText) {
         ui.set_max_width(width);
         ui.add(egui::Label::new(text).wrap());
     });
+}
+
+fn agent_item(id: &str, input: &Value) -> Item {
+    Item::Agent {
+        id: id.to_string(),
+        kind: input["subagent_type"].as_str().unwrap_or("").to_string(),
+        task: input["description"]
+            .as_str()
+            .or(input["prompt"].as_str())
+            .map(|t| first_line(t, 120))
+            .unwrap_or_default(),
+    }
+}
+
+fn tool_chip(ui: &mut Ui, name: &str, detail: &str) {
+    let chip = Frame::NONE
+        .fill(theme::tint(7))
+        .stroke(Stroke::new(1.0, theme::tint(14)))
+        .corner_radius(9)
+        .inner_margin(Margin::symmetric(9, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+                ui.label(RichText::new(tool_icon(name)).color(theme::CLAUDE()));
+                ui.label(RichText::new(name).small().strong());
+                ui.label(
+                    RichText::new(detail)
+                        .small()
+                        .monospace()
+                        .color(theme::COMMENT()),
+                );
+            });
+        });
+    glow(ui, &chip.response, 9);
+}
+
+/// A subagent in the conversation: what it's for and how far it got. True when clicked,
+/// to open its own conversation.
+fn agent_card(ui: &mut Ui, kind: &str, task: &str, steps: usize, running: bool) -> bool {
+    let card = Frame::NONE
+        .fill(theme::CLAUDE().gamma_multiply(0.08))
+        .stroke(Stroke::new(1.0, theme::CLAUDE().gamma_multiply(0.30)))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+                ui.label(RichText::new(icons::AGENTS).color(theme::CLAUDE()));
+                let kind = if kind.is_empty() { "Agent" } else { kind };
+                ui.label(RichText::new(kind).small().strong());
+                ui.label(RichText::new(task).small());
+            });
+            ui.horizontal(|ui| {
+                if running {
+                    ui.spinner();
+                }
+                let state = match (running, steps) {
+                    (true, 0) => "starting".to_string(),
+                    (true, n) => format!("working · {n} steps so far"),
+                    (false, n) => format!("done · {n} steps"),
+                };
+                ui.label(
+                    RichText::new(format!("{state}  ·  open {}", icons::CHEVRON_RIGHT))
+                        .small()
+                        .color(theme::COMMENT()),
+                );
+            });
+        })
+        .response;
+    glow(ui, &card, 10);
+    let card = card.interact(Sense::click());
+    if card.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    card.on_hover_text("Open this agent's conversation")
+        .clicked()
 }

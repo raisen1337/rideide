@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.7
+
+- **Subagents in the Claude chat.** When Claude starts subagents, each one shows as a card in the conversation, with its kind, what it was asked to do, and whether it's still working or done.
+- Click a card to open that subagent's own conversation: what it wrote and every tool it used, as it happens. The arrow at the top goes back. A subagent's own subagents open the same way.
+- Files a subagent edits now count in the Changes panel too.
+
 ## 0.6.6
 
 - **Ctrl+ and Ctrl- zoom the window again** (Ctrl+0 goes back to 100%). The zoom stays where you leave it and matches the slider in Settings → Appearance.

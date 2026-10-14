@@ -1935,6 +1935,11 @@ impl App {
                     let cwd = self.root.clone();
                     self.request_then(Request::ClaudeSessions { cwd }, Pending::ClaudeSessions);
                 }
+                // RIDE_CHAT_AGENT opens the first subagent's conversation in the chat.
+                if std::env::var_os("RIDE_CHAT_AGENT").is_some() {
+                    self.show_chat = true;
+                    self.chat.open_first_agent();
+                }
                 if let Ok(text) = std::env::var("RIDE_CHAT_SEND") {
                     self.show_chat = true;
                     self.chat_send(text);
