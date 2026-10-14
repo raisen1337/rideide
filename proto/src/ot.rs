@@ -326,8 +326,10 @@ impl Client {
     /// A place in the broker's text (after every edit it has passed on) as a place in the
     /// text here, which also has this side's edits not yet taken in.
     pub fn to_local(&self, at: usize) -> usize {
-        let at = self.outstanding.as_ref().map_or(at, |op| op.map(at, false));
-        self.buffer.as_ref().map_or(at, |op| op.map(at, false))
+        // Text typed here right at someone's cursor goes after it, as it will on their
+        // screen when it gets there.
+        let at = self.outstanding.as_ref().map_or(at, |op| op.map(at, true));
+        self.buffer.as_ref().map_or(at, |op| op.map(at, true))
     }
 
     /// An edit from someone else. Returns it as it applies to the text here.
@@ -382,6 +384,9 @@ pub enum ToBroker {
         doc: String,
         at: usize,
         anchor: usize,
+        /// The broker's revision the places are in; edits since then move them along.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<u64>,
     },
     Saved {
         doc: String,
@@ -475,7 +480,7 @@ mod tests {
                     for done in &history[rev as usize..] {
                         let (mine, theirs) = TextOp::transform(&op, done).unwrap();
                         op = mine;
-                        at = (theirs.map(at.0, false), theirs.map(at.1, false));
+                        at = (theirs.map(at.0, true), theirs.map(at.1, true));
                     }
                     server = op.apply(&server).unwrap();
                     history.push(op.clone());
@@ -523,6 +528,174 @@ mod tests {
         assert_eq!(b_text, a_text);
         assert_eq!(server, a_text);
         assert_eq!(b_sees, a_cursor);
+    }
+
+    /// Two people type at once, A on the second line and B on the first, with messages
+    /// arriving late and in random interleavings, cursors sent on their own as well as with
+    /// edits. Each one's cursor as the other sees it stays on its line and only moves right,
+    /// and in the end everyone agrees on the text and the places.
+    #[test]
+    fn two_typists_never_see_each_other_step_back() {
+        #[derive(Clone)]
+        enum Up {
+            Op(u64, TextOp, (usize, usize)),
+            Cursor(u64, usize),
+        }
+        #[derive(Clone)]
+        enum Down {
+            Ack,
+            Op(TextOp, usize),
+            Cursor(usize),
+        }
+        struct Side {
+            client: Client,
+            text: String,
+            cursor: usize,
+            sent: usize,
+            other: usize,
+            up: Vec<Up>,
+            down: Vec<Down>,
+        }
+        fn line_col(text: &str, at: usize) -> (usize, usize) {
+            let before: String = text.chars().take(at).collect();
+            let line = before.matches('\n').count();
+            (
+                line,
+                before.chars().rev().take_while(|c| *c != '\n').count(),
+            )
+        }
+        for seed in 0..300u64 {
+            let mut rng = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let mut roll = |n: u64| {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (rng >> 33) % n
+            };
+            let start = "ab\ncd\n";
+            let mut sides: Vec<Side> = [2usize, 5]
+                .iter()
+                .map(|&cursor| Side {
+                    client: Client::new(0),
+                    text: start.into(),
+                    cursor,
+                    sent: cursor,
+                    other: if cursor == 2 { 5 } else { 2 },
+                    up: Vec::new(),
+                    down: Vec::new(),
+                })
+                .collect();
+            let (mut server, mut history) = (start.to_string(), Vec::<TextOp>::new());
+            let mut seen = [(1usize, 2usize), (0, 2)]; // what B sees of A, what A sees of B
+            let mut log: Vec<String> = Vec::new();
+            for _ in 0..400 {
+                let who = roll(2) as usize;
+                let kind = roll(5);
+                log.push(format!(
+                    "who={who} kind={kind} texts={:?}/{:?} cursors={}/{} others={}/{} server={server:?}",
+                    sides[0].text, sides[1].text, sides[0].cursor, sides[1].cursor, sides[0].other, sides[1].other
+                ));
+                match kind {
+                    // Type a letter (the same one as before it, often) at the cursor.
+                    0 | 1 => {
+                        let s = &mut sides[who];
+                        let old = s.text.clone();
+                        let mut chars: Vec<char> = old.chars().collect();
+                        let letter = if roll(2) == 0 && s.cursor > 0 {
+                            chars[s.cursor - 1]
+                        } else {
+                            'x'
+                        };
+                        let letter = if letter == '\n' { 'x' } else { letter };
+                        chars.insert(s.cursor, letter);
+                        s.text = chars.into_iter().collect();
+                        let op = TextOp::diff_near(&old, &s.text, s.cursor);
+                        // The other's cursor moves with what is typed here, as in the app.
+                        s.other = op.map(s.other, true);
+                        s.cursor += 1;
+                        if let Some((rev, op)) = s.client.local(op).unwrap() {
+                            s.up.push(Up::Op(rev, op, (s.cursor, s.cursor)));
+                            s.sent = s.cursor;
+                        }
+                    }
+                    // Say where the cursor is, if in step and it moved.
+                    2 => {
+                        let s = &mut sides[who];
+                        let in_step = s.client.outstanding.is_none() && s.client.buffer.is_none();
+                        if in_step && s.cursor != s.sent {
+                            s.up.push(Up::Cursor(s.client.revision, s.cursor));
+                            s.sent = s.cursor;
+                        }
+                    }
+                    // The broker takes the oldest message from this side.
+                    3 => {
+                        if sides[who].up.is_empty() {
+                            continue;
+                        }
+                        let msg = sides[who].up.remove(0);
+                        let other = 1 - who;
+                        match msg {
+                            Up::Op(rev, mut op, mut at) => {
+                                for done in &history[rev as usize..] {
+                                    let (mine, theirs) = TextOp::transform(&op, done).unwrap();
+                                    op = mine;
+                                    at = (theirs.map(at.0, true), theirs.map(at.1, true));
+                                }
+                                server = op.apply(&server).unwrap();
+                                history.push(op.clone());
+                                sides[who].down.push(Down::Ack);
+                                sides[other].down.push(Down::Op(op, at.0));
+                            }
+                            Up::Cursor(rev, mut at) => {
+                                for done in history.iter().skip(rev as usize) {
+                                    at = done.map(at, true);
+                                }
+                                sides[other].down.push(Down::Cursor(at));
+                            }
+                        }
+                    }
+                    // This side takes the oldest message for it.
+                    _ => {
+                        if sides[who].down.is_empty() {
+                            continue;
+                        }
+                        let msg = sides[who].down.remove(0);
+                        let s = &mut sides[who];
+                        match msg {
+                            Down::Ack => {
+                                if let Some((rev, op)) = s.client.ack() {
+                                    s.up.push(Up::Op(rev, op, (s.cursor, s.cursor)));
+                                    s.sent = s.cursor;
+                                }
+                            }
+                            Down::Op(op, at) => {
+                                let op = s.client.remote(op).unwrap();
+                                s.text = op.apply(&s.text).unwrap();
+                                s.cursor = op.map(s.cursor, true);
+                                s.other = s.client.to_local(at);
+                            }
+                            Down::Cursor(at) => s.other = s.client.to_local(at),
+                        }
+                        // The other's cursor, as this side sees it: same line, never left.
+                        let place = line_col(&s.text, s.other);
+                        let before = seen[who];
+                        assert_eq!(place.0, before.0, "seed {seed}: line changed");
+                        assert!(
+                            place.1 >= before.1,
+                            "seed {seed}: stepped back {before:?} → {place:?}
+{}",
+                            log[log.len().saturating_sub(12)..].join(
+                                "
+"
+                            )
+                        );
+                        seen[who] = place;
+                    }
+                }
+            }
+        }
     }
 
     #[test]

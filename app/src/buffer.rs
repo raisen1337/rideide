@@ -594,11 +594,20 @@ impl Buffer {
     /// cursor and selection stay on the same text. Undo can't reach past it (its record of
     /// places no longer holds), so the history is started afresh.
     pub fn apply_remote(&mut self, new: &str) {
+        self.apply_remote_op(new, None);
+    }
+
+    /// The same, given the edit itself: where it went is then known, not guessed (text
+    /// typed next to the same letters could have gone in more than one place).
+    pub fn apply_remote_op(&mut self, new: &str, edit: Option<&ride_proto::ot::TextOp>) {
         let old = self.plain_text();
         if old == new {
             return;
         }
-        let op = ride_proto::ot::TextOp::diff(&old, new);
+        let op = match edit {
+            Some(op) => op.clone(),
+            None => ride_proto::ot::TextOp::diff(&old, new),
+        };
         let (cursor, anchor) = (self.offset_of(self.cursor), self.offset_of(self.anchor));
         // The one region that changed, as places in the text before.
         let a: Vec<char> = old.chars().collect();
@@ -614,8 +623,10 @@ impl Buffer {
         let (start, end) = (self.pos_at(prefix), self.pos_at(a.len() - suffix));
         let inserted: String = b[prefix..b.len() - suffix].iter().collect();
         self.splice(start, end, &inserted);
-        self.cursor = self.pos_at(op.map(cursor, false));
-        self.anchor = self.pos_at(op.map(anchor, false));
+        // Text someone else puts right at the cursor goes after it: their Enter at the
+        // end of your line leaves you on your line.
+        self.cursor = self.pos_at(op.map(cursor, true));
+        self.anchor = self.pos_at(op.map(anchor, true));
         self.undo.clear();
         self.redo.clear();
         self.typing_run = false;
@@ -697,6 +708,23 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_put_right_at_the_cursor_by_someone_else_leaves_it_be() {
+        let mut b = Buffer::new("    foo();\n    bar();");
+        b.set_cursor(Pos::new(0, 10), false);
+        // Someone presses Enter at the end of the same line.
+        let new = "    foo();\n    \n    bar();";
+        let op = ride_proto::ot::TextOp::diff_near(&b.plain_text(), new, 10);
+        b.apply_remote_op(new, Some(&op));
+        assert_eq!(b.cursor, Pos::new(0, 10));
+        // Someone types the same letter as the one next to the cursor: still before it.
+        let mut b = Buffer::new("hello");
+        b.set_cursor(Pos::new(0, 3), false);
+        let op = ride_proto::ot::TextOp::diff_near("hello", "helllo", 3);
+        b.apply_remote_op("helllo", Some(&op));
+        assert_eq!(b.cursor, Pos::new(0, 3));
+    }
 
     #[test]
     fn edits_from_others_keep_the_cursor_on_its_text() {

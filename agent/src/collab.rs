@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 /// Versioned, so ride versions that speak differently never share a broker.
 fn socket_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cache/ride/collab-v2.sock"))
+    Some(PathBuf::from(home).join(".cache/ride/collab-v3.sock"))
 }
 
 /// `ride-agent collab`: the app's line to the broker.
@@ -195,7 +195,7 @@ impl State {
                                 op = mine;
                                 // The cursor was in the sender's text; the edit it didn't
                                 // know of moves it along like the rest of that text.
-                                at = at.map(|(a, b)| (theirs.map(a, false), theirs.map(b, false)));
+                                at = at.map(|(a, b)| (theirs.map(a, true), theirs.map(b, true)));
                             }
                             Err(_) => {
                                 ok = false;
@@ -229,7 +229,19 @@ impl State {
                     }
                 }
             }
-            ToBroker::Cursor { doc, at, anchor } => {
+            ToBroker::Cursor {
+                doc,
+                mut at,
+                mut anchor,
+                rev,
+            } => {
+                // Places in the text as the sender had it; what others did since moves them.
+                if let (Some(rev), Some(d)) = (rev, self.docs.get(&doc)) {
+                    for done in d.history.iter().skip(rev as usize) {
+                        at = done.map(at, true);
+                        anchor = done.map(anchor, true);
+                    }
+                }
                 self.to_others(
                     &doc,
                     id,

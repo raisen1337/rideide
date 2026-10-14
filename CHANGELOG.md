@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.4
+
+- **Nobody can push your cursor any more.** Text someone else types right where your cursor is (their Enter at the end of your line, say) now goes after your cursor instead of carrying it along.
+- **Cursors no longer step back while two people type.** A cursor sent on its own is now moved along by the edits its sender hadn't seen yet, just like the edits are.
+- Edits from others land exactly where they were made in your editor too, instead of being worked out again from the text.
+- Both people need this version again; ride on the server switches over by itself.
+
 ## 0.6.3
 
 - **Live cursors move with the typing.** Someone's cursor no longer steps back and then forward while they type. Each edit now carries the typist's cursor, so it moves in the same step as their text.

@@ -223,8 +223,8 @@ impl App {
                 // their own screens, rather than waiting for them to say where they are.
                 for other in doc.others.values_mut() {
                     if let Some((at, anchor)) = &mut other.at {
-                        *at = op.map(*at, false);
-                        *anchor = op.map(*anchor, false);
+                        *at = op.map(*at, true);
+                        *anchor = op.map(*anchor, true);
                     }
                 }
                 match doc.client.local(op) {
@@ -266,6 +266,7 @@ impl App {
                     doc: tab.path.clone(),
                     at: cursor.0,
                     anchor: cursor.1,
+                    rev: Some(doc.client.revision),
                 });
             }
         }
@@ -380,13 +381,16 @@ impl App {
                     .and_then(|op| op.apply(&doc.shadow).map(|text| (op, text)));
                 match applied {
                     Ok((op, text)) => {
-                        tab.buf.apply_remote(&text);
+                        tab.buf.apply_remote_op(&text, Some(&op));
                         doc.shadow = text;
                         doc.revision_seen = tab.buf.revision;
-                        for other in doc.others.values_mut() {
+                        // Text put right at someone's cursor goes after it, unless it's
+                        // theirs (and then their own place comes with it, below).
+                        for (other_id, other) in doc.others.iter_mut() {
+                            let stay = *other_id != id;
                             if let Some((at, anchor)) = &mut other.at {
-                                *at = op.map(*at, false);
-                                *anchor = op.map(*anchor, false);
+                                *at = op.map(*at, stay);
+                                *anchor = op.map(*anchor, stay);
                             }
                         }
                         // The one who made it says where their cursor is now, in the same
