@@ -435,6 +435,7 @@ impl App {
                 self.chat.add_to_input("@selection");
                 self.show_chat = true;
             }
+            other => self.intel_action(index, other),
         }
     }
 

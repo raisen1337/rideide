@@ -187,7 +187,7 @@ pub(super) struct Git {
     pub(super) repo: bool,
     /// The repository's top folder on the host.
     top: String,
-    branch: String,
+    pub(super) branch: String,
     entries: Vec<GitEntry>,
     /// Status letter per changed file, and the folders that contain a change, by full path.
     by_path: HashMap<String, char>,
@@ -797,7 +797,10 @@ impl App {
         let Some(tab) = self.tabs.get(index).filter(|t| t.preview.is_none()) else {
             return;
         };
-        if let Some(diags) = check_json(&tab.path, &tab.buf.text()) {
+        if self.intel_covers(index) {
+            // The language server finds the problems, and more of them.
+            self.tabs[index].view.diags.clear();
+        } else if let Some(diags) = check_json(&tab.path, &tab.buf.text()) {
             self.tabs[index].view.diags = diags;
         } else if let Some((tool, command)) = checker(&tab.path) {
             let kind = JobKind::Check {
@@ -841,7 +844,7 @@ impl App {
 
     /// Shift+Alt+F: formats without saving.
     pub(super) fn format_document(&mut self, index: usize) {
-        if !self.format_tab(index, false) {
+        if !self.format_tab(index, false) && !self.intel_format(index) {
             self.status =
                 "No formatter is set for this kind of file; add one in Settings → Editor".into();
         }

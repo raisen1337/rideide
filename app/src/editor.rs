@@ -29,6 +29,22 @@ pub enum Action {
     AddToChat,
     /// Run a query tab's SQL.
     RunQuery,
+    /// Go to where what is at this place is defined (F12, Ctrl+click).
+    Definition(Pos),
+    /// Find every use of what is at the cursor (Shift+F12).
+    References,
+    /// Rename what is at the cursor everywhere (F2).
+    Rename,
+    /// Quick fixes for the cursor's line (Ctrl+.).
+    CodeActions,
+    /// Show completions now (Ctrl+Space).
+    Complete,
+    /// Take the completion with this index.
+    Accept(usize),
+    /// Run the quick fix with this index.
+    RunAction(usize),
+    /// A button of the note about the file's language server.
+    Server(crate::intel::NoteAction),
 }
 
 #[derive(Default)]
@@ -54,6 +70,8 @@ pub struct EditorState {
     pub env_revealed: BTreeSet<usize>,
     /// Others editing this file live: who, and where.
     pub peers: Vec<crate::collab::Mark>,
+    /// What the language server has to show: completions, hover, problems.
+    pub intel: crate::intel::Intel,
     /// First lines of the folded blocks.
     pub folded: BTreeSet<usize>,
     /// For each line, the last line of the block starting there.
@@ -234,6 +252,34 @@ fn col_at_visual(line: &str, vcol: usize) -> usize {
     line.chars().count()
 }
 
+/// The char drawn at a screen column, if the line reaches that far.
+fn col_under(line: &str, vcol: usize) -> Option<usize> {
+    let mut v = 0;
+    for (i, c) in line.chars().enumerate() {
+        let w = char_width(c, v);
+        if vcol < v + w {
+            return Some(i);
+        }
+        v += w;
+    }
+    None
+}
+
+/// A wavy line under text, as editors mark problems.
+fn squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
+    let (step, height) = (3.0, 1.6);
+    let mut points = Vec::new();
+    let mut x = x0;
+    let mut up = true;
+    while x < x1 {
+        points.push(pos2(x, if up { y - height } else { y }));
+        x += step;
+        up = !up;
+    }
+    points.push(pos2(x1, if up { y - height } else { y }));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, color)));
+}
+
 fn color(kind: Kind) -> Color32 {
     match kind {
         Kind::Text => theme::TEXT(),
@@ -301,11 +347,14 @@ pub fn show(ui: &mut Ui, buf: &mut Buffer, st: &mut EditorState, lang: &Lang) ->
     } else {
         full
     };
-    let action = ui
+    let mut action = ui
         .scope_builder(egui::UiBuilder::new().max_rect(editor_rect), |ui| {
             code(ui, buf, st, lang, &prefs)
         })
         .inner;
+    if let Some(chosen) = crate::intel::popups(ui, buf, st) {
+        action = Some(chosen);
+    }
     if minimap {
         let rect = Rect::from_min_max(pos2(editor_rect.max.x, full.min.y), full.max);
         minimap_ui(ui, rect, buf, st, lang, &prefs);
@@ -485,6 +534,9 @@ fn code(
     let row_h = (glyph_h + prefs.line_gap).round();
     let pad_y = ((row_h - glyph_h) / 2.0).floor();
 
+    st.intel.typed = None;
+    st.intel.keys.clear();
+    st.intel.cursor_rect = None;
     if st.cached_revision != Some(buf.revision) {
         st.cached_revision = Some(buf.revision);
         st.states.clear();
@@ -544,6 +596,18 @@ fn code(
         }
         resp.context_menu(|ui| {
             for (label, choice) in [
+                ("Go to definition    F12", Action::Definition(buf.cursor)),
+                ("Find references    Shift+F12", Action::References),
+                ("Rename symbol    F2", Action::Rename),
+                ("Quick fix…    Ctrl+.", Action::CodeActions),
+            ] {
+                if ui.button(label).clicked() {
+                    action = Some(choice);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            for (label, choice) in [
                 ("Edit with Claude    Ctrl+K", Action::InlineEdit),
                 ("Explain with Claude", Action::Explain),
                 ("Add selection to chat", Action::AddToChat),
@@ -573,17 +637,23 @@ fn code(
         };
         if let Some(p) = resp.interact_pointer_pos() {
             let pos = hit(st, buf, p);
-            let (pressed, down, shift) = ui.input(|i| {
+            let (pressed, down, shift, command) = ui.input(|i| {
                 (
                     i.pointer.primary_pressed(),
                     i.pointer.primary_down(),
                     i.modifiers.shift,
+                    i.modifiers.command,
                 )
             });
             // A press on a fold arrow folds or unfolds; the cursor stays where it is.
             let on_arrow = p.x >= fold_x && p.x < text_x && st.foldable(pos.line);
             if pressed && on_arrow {
                 st.toggle_fold(pos.line);
+            } else if pressed && command && !shift {
+                // Ctrl+click goes to the definition.
+                resp.request_focus();
+                buf.set_cursor(pos, false);
+                action = Some(Action::Definition(pos));
             } else if pressed {
                 resp.request_focus();
                 buf.set_cursor(pos, shift);
@@ -599,21 +669,72 @@ fn code(
             }
         }
 
+        // The char under the mouse, for hover: where it is and since when it is there.
+        let under = resp
+            .hover_pos()
+            .filter(|p| p.x >= text_x && !ui.input(|i| i.pointer.any_down()))
+            .and_then(|p| {
+                let row = row_at(st, p);
+                let line = st.rows[row].min(buf.line_count() - 1);
+                let vcol = ((p.x - text_x) / cw).floor().max(0.0) as usize;
+                let col = col_under(buf.line(line), vcol)?;
+                let x = text_x + visual_col(buf.line(line), col) as f32 * cw;
+                let y = origin.y + row as f32 * row_h;
+                Some((
+                    Pos::new(line, col),
+                    Rect::from_min_size(pos2(x, y), vec2(cw, row_h)),
+                ))
+            });
+        let now = ui.input(|i| i.time);
+        if under.map(|u| u.0) != st.intel.mouse.map(|m| m.0) {
+            st.intel.mouse_since = now;
+        }
+        st.intel.mouse = under;
+
         // ---- keyboard ----
         let mut vertical = None;
+        // An open list (completions, quick fixes) takes the arrows, Enter, Tab and Escape.
+        let list_open = st.intel.list_open();
+        let popup_open = list_open || st.intel.signature.is_some() || st.intel.hover.is_some();
         if resp.has_focus() {
             focused = true;
             let filter = EventFilter {
                 tab: true,
                 horizontal_arrows: true,
                 vertical_arrows: true,
-                escape: false,
+                escape: popup_open,
             };
             ui.memory_mut(|m| m.set_focus_lock_filter(resp.id, filter));
             let page = ((viewport.height() / row_h) as isize - 1).max(1);
             for event in ui.input(|i| i.events.clone()) {
+                if let Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = &event
+                {
+                    let for_list = matches!(
+                        key,
+                        Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Enter
+                    ) || *key == Key::Tab && !modifiers.shift;
+                    if list_open && for_list && !modifiers.command
+                        || popup_open && *key == Key::Escape
+                    {
+                        st.intel.keys.push(*key);
+                        continue;
+                    }
+                }
                 match event {
-                    Event::Text(text) | Event::Paste(text) => buf.insert(&text),
+                    Event::Text(text) => {
+                        buf.insert(&text);
+                        let mut chars = text.chars();
+                        st.intel.typed = chars.next().filter(|_| chars.next().is_none());
+                    }
+                    Event::Paste(text) => {
+                        buf.insert(&text);
+                        st.intel.completion = None;
+                    }
                     Event::Copy if buf.has_selection() => ui.ctx().copy_text(buf.selected_text()),
                     Event::Cut if buf.has_selection() => {
                         ui.ctx().copy_text(buf.selected_text());
@@ -661,6 +782,11 @@ fn code(
                             Key::Z if cmd => buf.undo(),
                             Key::Y if cmd => buf.redo(),
                             Key::K if cmd => action = Some(Action::InlineEdit),
+                            Key::F12 if sel => action = Some(Action::References),
+                            Key::F12 => action = Some(Action::Definition(buf.cursor)),
+                            Key::F2 => action = Some(Action::Rename),
+                            Key::Period if cmd => action = Some(Action::CodeActions),
+                            Key::Space if cmd => action = Some(Action::Complete),
                             Key::OpenBracket if cmd && sel => st.fold_at(buf.cursor.line),
                             Key::CloseBracket if cmd && sel => st.unfold_at(buf.cursor.line),
                             Key::Slash if cmd => {
@@ -841,6 +967,12 @@ fn code(
             pos2(cursor_x - 1.0, line_y(st, buf.cursor.line)),
             vec2(2.0, row_h),
         );
+        // Where popups at the cursor go; none while the cursor is scrolled out of view.
+        // (RIDE_INTEL_COMPLETE shows them in a test window, which never has the keyboard.)
+        let looking = std::env::var_os("RIDE_INTEL_COMPLETE").is_some();
+        if (focused || looking) && view.intersects(cursor_rect) {
+            st.intel.cursor_rect = Some(cursor_rect);
+        }
         if focused {
             let blink_on =
                 !prefs.cursor_blink || ui.input(|i| i.time) % 1.0 < 0.5 || st.reveal_cursor;
@@ -871,6 +1003,57 @@ fn code(
             );
         }
 
+        // Problems the language server found: a wavy line under each, and the worst one's
+        // message at the end of its line.
+        let mut worst: Vec<(usize, u8, &str)> = Vec::new();
+        for diag in st.intel.diags.iter().filter(|d| d.severity <= 3) {
+            let (first, last) = (diag.start.line as usize, diag.end.line as usize);
+            if first >= buf.line_count() {
+                continue;
+            }
+            let color = crate::intel::severity_color(diag.severity);
+            let last_line = last.min(buf.line_count() - 1);
+            for &line in visible.iter().filter(|&&l| l >= first && l <= last_line) {
+                let text = buf.line(line);
+                let from = if line == first {
+                    crate::lsp::col_of(text, diag.start.ch)
+                } else {
+                    0
+                };
+                let to = if line == last {
+                    crate::lsp::col_of(text, diag.end.ch)
+                } else {
+                    usize::MAX
+                };
+                let x0 = col_x(buf, Pos::new(line, from));
+                let x1 = col_x(buf, Pos::new(line, to)).max(x0 + cw);
+                squiggle(painter, x0, x1, line_y(st, line) + row_h - 1.5, color);
+            }
+            if diag.severity <= 2 {
+                match worst.iter_mut().find(|(l, _, _)| *l == first) {
+                    Some(entry) if entry.1 > diag.severity => {
+                        *entry = (first, diag.severity, &diag.message)
+                    }
+                    Some(_) => {}
+                    None => worst.push((first, diag.severity, &diag.message)),
+                }
+            }
+        }
+        for (line, severity, message) in &worst {
+            if !visible.contains(line) || st.diags.iter().any(|(l, _)| l == line) {
+                continue;
+            }
+            let message = message.lines().next().unwrap_or("");
+            let x = col_x(buf, Pos::new(*line, usize::MAX)) + cw * 3.0;
+            painter.text(
+                pos2(x, line_y(st, *line) + pad_y),
+                egui::Align2::LEFT_TOP,
+                message,
+                font.clone(),
+                crate::intel::severity_color(*severity).gamma_multiply(0.8),
+            );
+        }
+
         // Who changed the cursor's line last, faintly at its end, while the text is still
         // as it was when that was looked up.
         let line = buf.cursor.line;
@@ -878,7 +1061,8 @@ fn code(
             .blame
             .get(line)
             .filter(|_| prefs.blame && st.blame_revision == Some(buf.revision))
-            .filter(|_| !st.diags.iter().any(|(l, _)| *l == line) && visible.contains(&line));
+            .filter(|_| !st.diags.iter().any(|(l, _)| *l == line) && visible.contains(&line))
+            .filter(|_| !worst.iter().any(|(l, _, _)| *l == line));
         if let Some(text) = blame {
             let x = col_x(buf, Pos::new(line, usize::MAX)) + cw * 4.0;
             painter.text(
@@ -917,8 +1101,11 @@ fn code(
         }
         let numbers_right = fold_x - cw * 0.3;
         for &line in visible.iter().filter(|_| prefs.line_numbers) {
+            let lsp_worst = worst.iter().find(|(l, _, _)| *l == line).map(|w| w.1);
             let color = if st.diags.iter().any(|(l, _)| *l == line) {
                 error
+            } else if let Some(severity) = lsp_worst {
+                crate::intel::severity_color(severity)
             } else if line == buf.cursor.line {
                 theme::TEXT()
             } else {

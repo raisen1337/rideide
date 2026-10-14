@@ -3,6 +3,7 @@
 mod ai;
 mod buffer;
 mod chat;
+mod chrome;
 mod collab;
 mod conn;
 mod db;
@@ -14,12 +15,15 @@ mod github;
 mod highlight;
 mod icons;
 mod iconsets;
+mod intel;
+mod lsp;
 mod markdown;
 mod nav;
 mod outline;
 mod palette;
 mod panes;
 mod preview;
+mod replace;
 mod sessions;
 mod settings;
 mod share;
@@ -120,6 +124,9 @@ fn main() -> eframe::Result {
 
 /// The entry in the host list that opens folders on this computer instead of a server.
 const LOCAL: &str = "This computer";
+/// Codicons for replacing one match and all of them.
+const REPLACE_ICON: char = '\u{eb3d}';
+const REPLACE_ALL_ICON: char = '\u{eb3c}';
 
 enum Link {
     Offline,
@@ -187,6 +194,20 @@ enum Pending {
     PaletteFiles {
         query: String,
     },
+    /// A file listed with places in it (references, say), read for its lines.
+    HitLines {
+        path: String,
+    },
+    /// A file the folder search found, read to have its matches replaced.
+    ReplaceIn {
+        path: String,
+        replacement: replace::Replacement,
+    },
+    /// A file a rename reaches that isn't open, read to be changed.
+    LspEdit {
+        path: String,
+        edits: Vec<lsp::TextEdit>,
+    },
 }
 
 enum DirState {
@@ -234,6 +255,16 @@ struct Search {
     /// Let Claude find it, instead of matching text.
     ai: bool,
     ai_busy: bool,
+    /// What the results are when they aren't a search's (references to a name, say).
+    title: Option<String>,
+    /// The replacement, and whether its box is shown.
+    replace: String,
+    show_replace: bool,
+    focus_replace: bool,
+    /// The search as a regular expression, and what it was made from.
+    compiled: Option<((String, bool, bool), regex::Regex)>,
+    /// Matches and files replaced by the last replace.
+    replaced: (usize, usize),
 }
 
 enum PromptAction {
@@ -242,6 +273,11 @@ enum PromptAction {
     Rename(String),
     /// Save the current agents as a team template under the typed name.
     SaveTeam,
+    /// Rename what is at a place of a tab, with the language server.
+    RenameSymbol {
+        tab: u64,
+        pos: Pos,
+    },
 }
 
 enum Dialog {
@@ -254,6 +290,11 @@ enum Dialog {
         path: String,
     },
     ConfirmClose(usize),
+    /// Replace the folder search's matches in these files; `lines` is how many lines matched.
+    ConfirmReplace {
+        paths: Vec<String>,
+        lines: usize,
+    },
     /// Text to read and copy, such as a generated commit message.
     Text {
         title: String,
@@ -526,6 +567,8 @@ fn ensure_proc(link: &mut Link, cwd: &str, chat: &mut Chat, started_with: &mut O
 #[derive(PartialEq)]
 enum Side {
     Files,
+    /// Search and replace in the folder; references and the like are listed here too.
+    Search,
     Changes,
     Git,
     Server,
@@ -553,8 +596,12 @@ struct App {
     show_side: bool,
     search: Search,
     /// The folder search is shown above the file tree.
-    show_search: bool,
     focus_search: bool,
+    /// What the panel at the bottom shows: the terminal or the problems.
+    panel_tab: chrome::PanelTab,
+    /// The box for opening another folder is shown in the explorer, and wants the keyboard.
+    root_edit: bool,
+    root_focus: bool,
     find: Option<String>,
     focus_find: bool,
     terms: Vec<Terminal>,
@@ -607,6 +654,8 @@ struct App {
     /// The box for joining a session, while it is open.
     join_input: Option<String>,
     live: collab::Live,
+    /// The language servers of the connection, and what they found.
+    lsp: lsp::Lsp,
     /// The app's clock (seconds), as of this frame.
     now: f64,
     /// Changelog entries to show once after an update: (version, text).
@@ -1248,16 +1297,6 @@ fn icon_button(ui: &mut Ui, icon: char, hint: &str) -> bool {
         .clicked()
 }
 
-fn icon_toggle(ui: &mut Ui, on: bool, icon: char, hint: &str) -> bool {
-    let color = if on { theme::TEXT() } else { theme::COMMENT() };
-    ui.add(egui::Button::selectable(
-        on,
-        RichText::new(icon).size(16.0).color(color),
-    ))
-    .on_hover_text(hint)
-    .clicked()
-}
-
 fn menu_item(ui: &mut Ui, icon: char, text: &str) -> bool {
     let clicked = ui.button(format!("{icon}   {text}")).clicked();
     if clicked {
@@ -1307,8 +1346,10 @@ impl App {
             side: Side::Files,
             show_side: true,
             search: Search::default(),
-            show_search: false,
             focus_search: false,
+            panel_tab: chrome::PanelTab::Terminal,
+            root_edit: false,
+            root_focus: false,
             find: None,
             focus_find: false,
             terms: Vec::new(),
@@ -1355,6 +1396,7 @@ impl App {
             nickname_ask: None,
             join_input: None,
             live: collab::Live::default(),
+            lsp: lsp::Lsp::default(),
             now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
@@ -1434,6 +1476,11 @@ impl App {
             Ok("server") => app.side = Side::Server,
             Ok("outline") => app.side = Side::Outline,
             Ok("database") => app.side = Side::Database,
+            Ok("search") => app.side = Side::Search,
+            Ok("problems") => {
+                app.panel_tab = chrome::PanelTab::Problems;
+                app.show_term = true;
+            }
             _ => {}
         }
         app.refresh_themes();
@@ -1699,6 +1746,8 @@ impl App {
     /// Drops everything tied to the connection. Open tabs stay, so unsaved edits aren't lost.
     fn disconnect(&mut self) {
         self.link = Link::Offline;
+        // The servers ran on the connection; they went with it.
+        self.lsp = lsp::Lsp::default();
         self.forwards.clear();
         self.pending.clear();
         self.tree.clear();
@@ -1785,6 +1834,7 @@ impl App {
         if self.job_message(id, &resp)
             || self.transfer_message(id, &resp)
             || self.live_message(id, &resp)
+            || self.intel_message(id, &resp)
         {
             return;
         }
@@ -1913,16 +1963,20 @@ impl App {
                     }
                 }
                 // RIDE_OPEN names more files to open, separated by semicolons; `path@LINE`
-                // puts the cursor on a line.
+                // puts the cursor on a line, `path@LINE:COLUMN` in it.
                 for item in std::env::var("RIDE_OPEN")
                     .iter()
                     .flat_map(|list| list.split(';'))
                 {
-                    let (path, line) = match item.rsplit_once('@') {
-                        Some((path, line)) => (path, line.parse::<usize>().ok()),
+                    let (path, place) = match item.rsplit_once('@') {
+                        Some((path, place)) => (path, Some(place)),
                         None => (item, None),
                     };
-                    let goto = line.map(|l| Pos::new(l.saturating_sub(1), 0));
+                    let goto = place.and_then(|place| {
+                        let (line, col) = place.split_once(':').unwrap_or((place, "1"));
+                        let (line, col) = (line.parse::<usize>().ok()?, col.parse::<usize>().ok()?);
+                        Some(Pos::new(line.saturating_sub(1), col.saturating_sub(1)))
+                    });
                     self.open_file(path.replace('\\', "/"), goto);
                 }
                 // RIDE_CHAT_SEND sends a first message to the side chat, to look at its answer.
@@ -2023,6 +2077,7 @@ impl App {
                 }
                 self.git_refresh();
                 self.live_saved(&path);
+                self.intel_saved(&path);
                 self.status = format!("Saved {path}");
             }
             (Pending::FsOp { refresh }, Response::Ok) => self.load_dir(&refresh),
@@ -2038,6 +2093,22 @@ impl App {
                 self.palette_files_found(&query, paths)
             }
             (Pending::PaletteFiles { .. }, _) => {}
+            (Pending::HitLines { path }, Response::File { data }) => {
+                self.fill_hit_lines(&path, &data)
+            }
+            (Pending::HitLines { .. }, _) => {}
+            (Pending::ReplaceIn { path, replacement }, Response::File { data }) => {
+                self.replace_in_file(path, replacement, data)
+            }
+            (Pending::ReplaceIn { path, .. }, Response::Error { message }) => {
+                self.status = format!("Couldn't replace in {}: {message}", file_name(&path));
+            }
+            (Pending::LspEdit { path, edits }, Response::File { data }) => {
+                self.edit_file_on_disk(path, edits, data)
+            }
+            (Pending::LspEdit { path, .. }, Response::Error { message }) => {
+                self.status = format!("Couldn't change {}: {message}", file_name(&path));
+            }
             (Pending::DbEnv, Response::File { data }) => self.db_env_read(&data),
             (
                 Pending::Compare {
@@ -2080,6 +2151,11 @@ impl App {
         self.root_input = root.clone();
         self.root = root.clone();
         self.load_dir(&root);
+        // Language servers know one folder; the next files start them anew.
+        self.lsp.stop_all();
+        for request in self.lsp.outgoing() {
+            self.request(request);
+        }
         self.git = tools::Git::default();
         self.monitor = tools::Monitor::default();
         self.git_refresh();
@@ -2264,6 +2340,7 @@ impl App {
             self.request(Request::Cancel { target: id });
         }
         self.search.hits.clear();
+        self.search.title = None;
         if self.search.query.is_empty() || !self.online() {
             return;
         }
@@ -2921,6 +2998,7 @@ impl App {
         }
         if pressed(Modifiers::COMMAND, Key::Backtick) {
             self.show_term = !(self.show_term && self.term_focused);
+            self.panel_tab = chrome::PanelTab::Terminal;
             if let Some(term) = self.terms.get_mut(self.active_term) {
                 term.request_focus = self.show_term;
             }
@@ -2945,6 +3023,11 @@ impl App {
             if let Some(index) = active {
                 self.format_document(index);
             }
+        }
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
+            self.open_search();
+            self.search.show_replace = true;
+            self.search.focus_replace = true;
         }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
             self.toggle_search();
@@ -2972,165 +3055,12 @@ impl App {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut Ui) {
-        title_drag(ui);
-        // What is shown depends on the room there is. Whatever is dropped on a narrow
-        // window stays reachable through the command palette.
-        let width = ui.available_width();
-        let (labels, brand, folder, toggles) = (
-            width >= 1150.0,
-            width >= 820.0,
-            width >= 700.0,
-            width >= 540.0,
-        );
-        let right_width = 3.0 * 36.0 + 20.0 + if toggles { 4.0 * 32.0 } else { 32.0 };
-
-        ui.horizontal(|ui| {
-            // The left part gets exactly what the right part leaves, and is clipped to it,
-            // so the two can never run into each other.
-            let left = vec2(
-                (ui.available_width() - right_width).max(60.0),
-                ui.spacing().interact_size.y + 6.0,
-            );
-            ui.allocate_ui_with_layout(left, Layout::left_to_right(Align::Center), |ui| {
-                ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                if brand {
-                    ui.add(
-                        egui::Label::new(RichText::new("ride").strong().color(theme::COMMENT()))
-                            .selectable(false),
-                    );
-                    ui.add_space(6.0);
-                }
-                let views_width = if labels { 4.0 * 98.0 } else { 4.0 * 38.0 };
-                match &self.link {
-                    Link::Offline => {
-                        ui.label(
-                            RichText::new(icons::REMOTE)
-                                .size(16.0)
-                                .color(theme::COMMENT()),
-                        );
-                        let room = (ui.available_width() - views_width - 150.0).clamp(70.0, 200.0);
-                        let edit = ui.add(
-                            TextEdit::singleline(&mut self.host)
-                                .desired_width(room)
-                                .hint_text("host, user@host or session ID"),
-                        );
-                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                        if !self.hosts.is_empty() {
-                            ui.menu_button(RichText::new(icons::CHEVRON_DOWN), |ui| {
-                                for host in &self.hosts {
-                                    if menu_item(ui, icons::REMOTE, host) {
-                                        self.host = host.clone();
-                                    }
-                                }
-                            });
-                        }
-                        let text = if labels {
-                            format!("{}  Connect", icons::PLUG)
-                        } else {
-                            icons::PLUG.to_string()
-                        };
-                        let connect = egui::Button::new(RichText::new(text).color(Color32::WHITE))
-                            .fill(theme::ACCENT().gamma_multiply(0.55));
-                        if ui.add(connect).on_hover_text("Connect").clicked() || enter {
-                            self.connect(ui.ctx());
-                        }
-                    }
-                    Link::Connecting { status, .. } => {
-                        ui.spinner();
-                        let shown = share::label(&self.host).unwrap_or_else(|| self.host.clone());
-                        let text = format!("{shown}: {}", status.lock().unwrap());
-                        ui.add(egui::Label::new(text).truncate());
-                        if ui.button("Cancel").clicked() {
-                            self.disconnect();
-                        }
-                    }
-                    Link::Online(_) => {
-                        let more = match self.sessions.len() {
-                            0 => String::new(),
-                            n => format!("  +{n}"),
-                        };
-                        let shown = share::label(&self.host)
-                            .unwrap_or_else(|| self.host.trim().to_string());
-                        let name = pieces(&[
-                            (&format!("{}  ", icons::REMOTE), theme::STRING()),
-                            (&shown, theme::TEXT()),
-                            (&more, theme::COMMENT()),
-                        ]);
-                        let chip = egui::Button::new(name)
-                            .fill(theme::STRING().gamma_multiply(0.16))
-                            .corner_radius(9);
-                        let hosts_before = self.sessions.len();
-                        egui::containers::menu::MenuButton::from_button(chip)
-                            .ui(ui, |ui| self.sessions_menu(ui));
-                        // The menu may have closed this connection or shown another.
-                        if !self.online() || self.sessions.len() != hosts_before {
-                            return;
-                        }
-                        if icon_button(ui, icons::DISCONNECT, "Disconnect") {
-                            self.close_session();
-                            return;
-                        }
-                        if folder {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(icons::FOLDER_ROOT).color(theme::COMMENT()));
-                            // The folder box takes what the view buttons after it don't need.
-                            let room =
-                                (ui.available_width() - views_width - 20.0).clamp(60.0, 380.0);
-                            let edit = ui.add(
-                                TextEdit::singleline(&mut self.root_input).desired_width(room),
-                            );
-                            if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                                self.open_root(self.root_input.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                ui.add_space(8.0);
-                let views = [
-                    (View::Code, icons::CODE, "Code", true),
-                    (View::Agents, icons::AGENTS, "Agents", self.online()),
-                    (View::Themes, icons::PALETTE, "Themes", true),
-                    (View::Settings, icons::GEAR, "Settings", true),
-                ];
-                for (view, icon, label, available) in views {
-                    let text = if labels {
-                        format!("{icon}  {label}")
-                    } else {
-                        icon.to_string()
-                    };
-                    let button = egui::Button::selectable(self.view == view, text);
-                    if available && ui.add(button).on_hover_text(label).clicked() {
-                        self.view = view;
-                    }
-                }
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                window_buttons(ui);
-                ui.add_space(10.0);
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if icon_button(ui, icons::SEARCH, "Command palette (Ctrl+Shift+P)") {
-                    self.open_palette(false);
-                }
-                if toggles {
-                    if icon_toggle(ui, self.show_chat, icons::SPARKLE, "Claude chat") {
-                        self.show_chat = !self.show_chat;
-                    }
-                    if icon_toggle(ui, self.show_term, icons::TERMINAL, "Terminal (Ctrl+`)") {
-                        self.show_term = !self.show_term;
-                    }
-                    if icon_toggle(ui, self.show_side, icons::FILES, "Files and search") {
-                        self.show_side = !self.show_side;
-                    }
-                }
-            });
-        });
-    }
-
     fn status_bar(&mut self, ui: &mut Ui) {
         let mut cancel = None;
         let mut dismiss = None;
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            self.remote_chip(ui);
             for (index, download) in self.downloads.iter().enumerate() {
                 match &download.outcome {
                     None => {
@@ -3247,6 +3177,11 @@ impl App {
                     }
                     ui.add_space(8.0);
                 }
+                if let Some(busy) = self.intel_busy() {
+                    let busy: String = busy.chars().take(60).collect();
+                    ui.label(RichText::new(busy).small().color(theme::COMMENT()));
+                    ui.add_space(8.0);
+                }
                 if let Some(index) = self.docked_active() {
                     let c = self.tabs[index].buf.cursor;
                     ui.label(
@@ -3276,64 +3211,11 @@ impl App {
     }
 
     fn side_panel(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            if icon_toggle(ui, self.side == Side::Files, icons::FILES, "Files") {
-                self.side = Side::Files;
-            }
-            if icon_toggle(
-                ui,
-                self.side == Side::Changes,
-                icons::DIFF,
-                "What Claude changed",
-            ) {
-                self.side = Side::Changes;
-            }
-            if icon_toggle(ui, self.side == Side::Git, icons::SOURCE_CONTROL, "Git") {
-                self.side = Side::Git;
-                self.git_refresh();
-            }
-            if icon_toggle(
-                ui,
-                self.side == Side::Server,
-                icons::PULSE,
-                "Server monitor",
-            ) {
-                self.side = Side::Server;
-            }
-            if icon_toggle(
-                ui,
-                self.side == Side::Outline,
-                icons::METHOD,
-                "Outline: functions and types in this file (Ctrl+Shift+O)",
-            ) {
-                self.side = Side::Outline;
-            }
-            if icon_toggle(
-                ui,
-                self.side == Side::Database,
-                icons::DATABASE,
-                "Databases",
-            ) {
-                self.side = Side::Database;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_toggle(
-                    ui,
-                    self.show_search,
-                    icons::SEARCH,
-                    "Search in folder (Ctrl+Shift+F)",
-                ) {
-                    self.toggle_search();
-                }
-            });
-        });
-        ui.add_space(2.0);
+        self.side_title(ui);
         ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
         match self.side {
+            Side::Search => self.search_section(ui),
             Side::Files => {
-                if self.show_search {
-                    self.search_section(ui);
-                }
                 if !self.sessions.is_empty() && !self.hide_beside {
                     let height = ui.available_height();
                     Panel::bottom("other_tree")
@@ -3364,15 +3246,30 @@ impl App {
         }
     }
 
-    /// Shows or hides the folder search above the file tree.
+    /// Whether the results are a search's that can be replaced (not references, nor
+    /// Claude's finds), and the search is done.
+    fn can_replace(&self) -> bool {
+        !self.search.hits.is_empty()
+            && self.search.title.is_none()
+            && !self.search.ai
+            && self.search.id.is_none()
+            && !self.search.query.is_empty()
+    }
+
+    /// Ctrl+Shift+F: the search view, or back to the files from it.
     fn toggle_search(&mut self) {
-        self.show_search = !self.show_search;
-        if self.show_search {
-            self.view = View::Code;
+        if self.side == Side::Search && self.show_side && self.view == View::Code {
             self.side = Side::Files;
-            self.show_side = true;
-            self.focus_search = true;
+        } else {
+            self.open_search();
         }
+    }
+
+    fn open_search(&mut self) {
+        self.view = View::Code;
+        self.side = Side::Search;
+        self.show_side = true;
+        self.focus_search = true;
     }
 
     fn push_rows(&self, dir: &str, depth: usize, rows: &mut Vec<TreeRow>) {
@@ -3598,6 +3495,7 @@ impl App {
         }
 
         let mut run = false;
+        let mut replace_all = false;
         Frame::NONE
             .fill(theme::tint(8))
             .stroke((1.0, theme::LINE()))
@@ -3611,6 +3509,15 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
+                    let arrow = if self.search.show_replace {
+                        icons::CHEVRON_DOWN
+                    } else {
+                        icons::CHEVRON_RIGHT
+                    };
+                    if icon_button(ui, arrow, "Replace (Ctrl+Shift+H)") {
+                        self.search.show_replace = !self.search.show_replace;
+                        self.search.focus_replace = self.search.show_replace;
+                    }
                     ui.label(RichText::new(icons::SEARCH).color(theme::COMMENT()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let sparkle = icons::SPARKLE.to_string();
@@ -3634,7 +3541,44 @@ impl App {
                         run |= edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     });
                 });
+                if self.search.show_replace {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.add_space(22.0);
+                        ui.label(RichText::new(REPLACE_ICON.to_string()).color(theme::COMMENT()));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let can = self.can_replace();
+                            let button = egui::Button::new(
+                                RichText::new(REPLACE_ALL_ICON.to_string()).small(),
+                            );
+                            let hint = if can {
+                                "Replace all"
+                            } else {
+                                "Search first; the results are what gets replaced"
+                            };
+                            if ui.add_enabled(can, button).on_hover_text(hint).clicked() {
+                                replace_all = true;
+                            }
+                            let edit = ui.add(
+                                TextEdit::singleline(&mut self.search.replace)
+                                    .desired_width(f32::INFINITY)
+                                    .frame(Frame::NONE)
+                                    .hint_text(if self.search.regex {
+                                        "Replace with ($1 for a group)"
+                                    } else {
+                                        "Replace with"
+                                    }),
+                            );
+                            if std::mem::take(&mut self.search.focus_replace) {
+                                edit.request_focus();
+                            }
+                        });
+                    });
+                }
             });
+        if replace_all {
+            self.ask_replace_all();
+        }
         if run && self.search.query.trim().is_empty() {
             self.search.hits.clear();
         } else if run && self.search.ai {
@@ -3653,16 +3597,27 @@ impl App {
             if busy {
                 ui.spinner();
             }
-            ui.label(
-                RichText::new(format!("{} results", self.search.hits.len()))
-                    .small()
-                    .color(theme::COMMENT()),
-            );
+            let count = match &self.search.title {
+                Some(title) => title.clone(),
+                None => format!("{} results", self.search.hits.len()),
+            };
+            ui.label(RichText::new(count).small().color(theme::COMMENT()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 clear = icon_button(ui, icons::CLOSE, "Clear the results");
             });
         });
 
+        // With the replacement box open, each line shows what it would become.
+        let previewing = self.search.show_replace && self.can_replace();
+        let re = if previewing {
+            self.search_regex()
+        } else {
+            None
+        };
+        let (with, regex) = (self.search.replace.clone(), self.search.regex);
+        let can_replace = self.can_replace();
+        let mut replace_file = None;
+        let mut dismiss_file = None;
         // Hits arrive grouped per file; a header row goes wherever the file changes.
         let hits = &self.search.hits;
         let mut rows = Vec::with_capacity(hits.len());
@@ -3674,8 +3629,7 @@ impl App {
         }
         let prefix = format!("{}/", self.root.trim_end_matches('/'));
         let row_height = ui.text_style_height(&egui::TextStyle::Button) + 4.0;
-        // The results get up to half the panel; the tree keeps the rest.
-        let max_height = (ui.available_height() * 0.5).max(120.0);
+        let max_height = (ui.available_height() - 6.0).max(120.0);
         let mut open = None;
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -3697,12 +3651,48 @@ impl App {
                                     (&format!("{icon}  "), color),
                                     (shown, theme::TEXT()),
                                 ]));
+                                if self.search.title.is_none() {
+                                    if icon_button(ui, icons::CLOSE, "Leave this file out") {
+                                        dismiss_file = Some(hit.path.clone());
+                                    }
+                                    if previewing
+                                        && can_replace
+                                        && icon_button(ui, REPLACE_ALL_ICON, "Replace in this file")
+                                    {
+                                        replace_file = Some(hit.path.clone());
+                                    }
+                                }
                             });
                         } else {
-                            let label = pieces(&[
-                                (&format!("    {:>4}  ", hit.line + 1), theme::LINE_NUMBER()),
-                                (hit.text.trim_start(), theme::MUTED()),
-                            ]);
+                            let number = format!("    {:>4}  ", hit.line + 1);
+                            let changed = re.as_ref().and_then(|re| {
+                                replace::preview(re, &with, regex, &hit.text, hit.col as usize)
+                            });
+                            let label = match &changed {
+                                Some((before, old, new, after)) => {
+                                    let mut job = egui::text::LayoutJob::default();
+                                    let font = egui::TextStyle::Button.resolve(ui.style());
+                                    let plain =
+                                        |color| egui::TextFormat::simple(font.clone(), color);
+                                    job.append(&number, 0.0, plain(theme::LINE_NUMBER()));
+                                    job.append(before.trim_start(), 0.0, plain(theme::MUTED()));
+                                    let mut removed = plain(theme::ANSI()[1]);
+                                    removed.strikethrough =
+                                        egui::Stroke::new(1.0, theme::ANSI()[1]);
+                                    removed.background = theme::ANSI()[1].gamma_multiply(0.15);
+                                    job.append(old, 0.0, removed);
+                                    let mut added = plain(theme::ANSI()[2]);
+                                    added.background = theme::ANSI()[2].gamma_multiply(0.15);
+                                    job.append(new, 0.0, added);
+                                    job.append(after, 0.0, plain(theme::MUTED()));
+                                    egui::WidgetText::from(job)
+                                }
+                                None => pieces(&[
+                                    (&number, theme::LINE_NUMBER()),
+                                    (hit.text.trim_start(), theme::MUTED()),
+                                ])
+                                .into(),
+                            };
                             if ui.selectable_label(false, label).clicked() {
                                 open = Some((
                                     hit.path.clone(),
@@ -3717,6 +3707,12 @@ impl App {
         if let Some((path, pos)) = open {
             self.open_file(path, Some(pos));
         }
+        if let Some(path) = dismiss_file {
+            self.search.hits.retain(|h| h.path != path);
+        }
+        if let Some(path) = replace_file {
+            self.replace_in(vec![path]);
+        }
         if clear {
             if let Some(id) = self.search.id.take() {
                 self.request(Request::Cancel { target: id });
@@ -3727,16 +3723,22 @@ impl App {
 
     fn term_panel(&mut self, ui: &mut Ui) {
         let mut close = None;
+        if self.guest() {
+            self.panel_tab = chrome::PanelTab::Problems;
+        }
+        let terminal = self.panel_tab == chrome::PanelTab::Terminal;
         Frame::NONE
             .inner_margin(Margin {
-                left: 8,
+                left: 12,
                 right: 8,
                 top: 6,
                 bottom: 2,
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (index, term) in self.terms.iter().enumerate() {
+                    self.panel_tabs(ui);
+                    ui.add_space(8.0);
+                    for (index, term) in self.terms.iter().enumerate().filter(|_| terminal) {
                         let title = if term.title.is_empty() {
                             format!("Terminal {}", index + 1)
                         } else {
@@ -3756,10 +3758,13 @@ impl App {
                             close = Some(index);
                         }
                     }
-                    if icon_button(ui, icons::ADD, "New terminal") {
+                    if terminal && icon_button(ui, icons::ADD, "New terminal") {
                         self.new_term();
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, icons::CLOSE, "Hide the panel") {
+                            self.show_term = false;
+                        }
                         ui.menu_button(RichText::new(icons::DOCK).size(13.0), |ui| {
                             for (dock, name) in TermDock::ALL {
                                 let label = format!("Dock at the {name}");
@@ -3770,7 +3775,7 @@ impl App {
                             }
                         })
                         .response
-                        .on_hover_text("Move the terminal (or drag this bar to an edge)");
+                        .on_hover_text("Move the panel (or drag this bar to an edge)");
                     });
                 });
                 // The bar itself is the handle: drag it toward an edge of the editor area.
@@ -3802,6 +3807,13 @@ impl App {
             let id = self.terms.remove(index).id;
             self.request(Request::TermClose { term: id });
             self.active_term = self.active_term.min(self.terms.len().saturating_sub(1));
+        }
+        if !terminal {
+            self.term_focused = false;
+            Frame::NONE
+                .inner_margin(Margin::symmetric(12, 4))
+                .show(ui, |ui| self.problems_panel(ui));
+            return;
         }
         if self.terms.is_empty() {
             self.new_term();
@@ -4180,6 +4192,7 @@ impl App {
             Dialog::Prompt { title, .. } => title.clone(),
             Dialog::ConfirmDelete { .. } => "Delete".into(),
             Dialog::ConfirmClose(_) => "Unsaved changes".into(),
+            Dialog::ConfirmReplace { .. } => "Replace in files".into(),
             Dialog::Text { title, .. } => title.clone(),
             Dialog::Schedule { .. } => "Scheduled task".into(),
         };
@@ -4210,6 +4223,18 @@ impl App {
                         let name = self.tabs.get(*index).map_or("", |t| file_name(&t.path));
                         ui.label(format!("{name} has unsaved changes."));
                         "Close without saving"
+                    }
+                    Dialog::ConfirmReplace { paths, lines } => {
+                        let files = if paths.len() == 1 {
+                            "1 file".to_string()
+                        } else {
+                            format!("{} files", paths.len())
+                        };
+                        ui.label(format!(
+                            "Replace every match of \"{}\" with \"{}\" in {files} ({lines} lines)?\nFiles that aren't open are changed on the server right away; an open file's change can be undone in it.",
+                            self.search.query, self.search.replace
+                        ));
+                        "Replace"
                     }
                     Dialog::Text { text, .. } => {
                         ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
@@ -4283,6 +4308,7 @@ impl App {
                         );
                     }
                     PromptAction::SaveTeam => self.save_team(name),
+                    PromptAction::RenameSymbol { tab, pos } => self.intel_rename(tab, pos, name),
                 }
             }
             Dialog::ConfirmDelete { path } => {
@@ -4294,6 +4320,7 @@ impl App {
                     self.close_tab(index, true);
                 }
             }
+            Dialog::ConfirmReplace { paths, .. } => self.replace_in(paths),
             Dialog::Text { text, .. } => ctx.copy_text(text),
             Dialog::Schedule { prompt, minutes } => {
                 let now = ctx.input(|i| i.time);
@@ -4333,7 +4360,9 @@ fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
         }
         None => {
             let lang = highlight::lang_for(&tab.path);
-            editor::show(ui, &mut tab.buf, &mut tab.view, lang)
+            let note = intel::note_bar(ui, &tab.view.intel);
+            let action = editor::show(ui, &mut tab.buf, &mut tab.view, lang);
+            note.or(action)
         }
     }
 }
@@ -4374,6 +4403,7 @@ impl App {
         self.now = ctx.input(|i| i.time);
         self.poll(&ctx);
         self.live_tick(&ctx);
+        self.intel_tick(&ctx);
         self.shortcuts(&ctx);
         self.sync_glass(frame);
         self.apply_settings(&ctx);
@@ -4464,13 +4494,13 @@ impl App {
             online && self.show_chat && !self.chat_detached && !agents_view && size.x >= chat_room;
         Panel::top("top")
             .frame(Frame::NONE.fill(theme::chrome()).inner_margin(Margin {
-                left: 12,
+                left: 8,
                 right: 0,
-                top: 3,
-                bottom: 3,
+                top: 2,
+                bottom: 2,
             }))
             .show_separator_line(true)
-            .show(ui, |ui| self.top_bar(ui));
+            .show(ui, |ui| self.title_bar(ui));
         Panel::bottom("status")
             .frame(
                 Frame::NONE
@@ -4479,6 +4509,13 @@ impl App {
             )
             .show_separator_line(true)
             .show(ui, |ui| self.status_bar(ui));
+        Panel::left("activity")
+            .resizable(false)
+            .default_size(chrome::ACTIVITY_W)
+            .size_range(chrome::ACTIVITY_W..=chrome::ACTIVITY_W)
+            .show_separator_line(true)
+            .frame(Frame::NONE.fill(theme::chrome()))
+            .show(ui, |ui| self.activity_bar(ui));
         if self.view == View::Themes || self.view == View::Settings {
             if self.view == View::Themes {
                 self.themes_view(ui);

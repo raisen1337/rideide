@@ -33,6 +33,7 @@ pub(super) struct Session {
     restore_order: Vec<String>,
     restore_active: Option<String>,
     restore_host: String,
+    lsp: lsp::Lsp,
 }
 
 impl Session {
@@ -64,6 +65,7 @@ impl Session {
             restore_order: Vec::new(),
             restore_active: None,
             restore_host: String::new(),
+            lsp: lsp::Lsp::default(),
         }
     }
 }
@@ -158,6 +160,7 @@ impl App {
         swap(&mut self.restore_order, &mut other.restore_order);
         swap(&mut self.restore_active, &mut other.restore_active);
         swap(&mut self.restore_host, &mut other.restore_host);
+        swap(&mut self.lsp, &mut other.lsp);
         chat::set_local_shell(self.host.trim() == LOCAL);
         share::set_guest(share::is_session_id(&self.host));
     }

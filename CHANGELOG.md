@@ -3,6 +3,20 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.0
+
+- **Language servers.** ride now understands your code the way VS Code does, with the same programs, run on the server next to it:
+  - completions as you type (Tab or Enter takes one; Ctrl+Space asks for them), with each one's type and documentation;
+  - problems underlined as you type, with the message at the end of the line and in the new Problems tab;
+  - rest the mouse on a name to see what it is;
+  - the arguments of the call you're typing, above the cursor;
+  - F12 or Ctrl+click goes to a definition, Shift+F12 lists every reference, F2 renames across files, Ctrl+. offers quick fixes;
+  - Shift+Alt+F formats with the language server when the file has no formatter set.
+- TypeScript and JavaScript, Python, Lua, Rust, Go, C and C++, PHP, JSON, CSS, HTML, Bash and YAML are set up. The first time a file needs a server that isn't on the server, ride offers to install it in a terminal. The list can be changed in Settings → Editor.
+- **Replace in the folder.** The arrow next to the folder search (or Ctrl+Shift+H) opens a Replace box. Each result shows what the line will become; replace in one file or in all of them, and leave a file out with its ×. Open files change in their tab, so Ctrl+Z takes it back.
+- **A layout like VS Code's.** The title bar is slim, with the open folder in the middle (click it to go to a file) and buttons for the side bar, the panel and the chat. The views moved to a column of icons on the left: Explorer, Search, Source control, Claude's changes, Outline, Databases and the server monitor, with Agents, Themes, your account and Settings at the bottom. The connection, the branch and the problem count are at the left of the status bar.
+- The panel at the bottom has two tabs, Terminal and Problems.
+
 ## 0.6.8
 
 - **Full Markdown in the Claude chat and the Agents view.** Tables, numbered and nested lists, checklists, italic and struck-through text, links (a click opens them in the browser), quotes, horizontal rules and headings of every level now show formatted, instead of as raw symbols.

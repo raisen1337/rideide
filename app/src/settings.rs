@@ -54,6 +54,121 @@ pub fn default_formatters() -> Vec<Formatter> {
     .collect()
 }
 
+/// A language server: what it is called, the file extensions it is for (space-separated),
+/// the command that starts it on the host, and the one that installs it there.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LangServer {
+    pub name: String,
+    pub exts: String,
+    pub command: String,
+    pub install: String,
+}
+
+/// Installs the Lua language server from its GitHub releases into ~/.local, for the
+/// processor of the host.
+const LUA_INSTALL: &str = r#"a=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && mkdir -p ~/.local/share/lua-language-server ~/.local/bin && curl -fsSL "$(curl -fsSL https://api.github.com/repos/LuaLS/lua-language-server/releases/latest | grep -o "https://[^\"]*linux-$a.tar.gz" | head -n 1)" | tar xz -C ~/.local/share/lua-language-server && printf '#!/bin/sh\nexec "$HOME/.local/share/lua-language-server/bin/lua-language-server" "$@"\n' > ~/.local/bin/lua-language-server && chmod +x ~/.local/bin/lua-language-server"#;
+
+pub fn default_servers() -> Vec<LangServer> {
+    [
+        (
+            "TypeScript",
+            "ts tsx js jsx mjs cjs mts cts",
+            // TypeScript 7 has its language server built in.
+            "tsc --lsp --stdio",
+            "npm install -g typescript",
+        ),
+        (
+            "Python",
+            "py pyi",
+            "pyright-langserver --stdio",
+            "npm install -g pyright",
+        ),
+        ("Lua", "lua", "lua-language-server", LUA_INSTALL),
+        (
+            "Rust",
+            "rs",
+            "rust-analyzer",
+            "rustup component add rust-analyzer",
+        ),
+        (
+            "Go",
+            "go",
+            "gopls",
+            "go install golang.org/x/tools/gopls@latest",
+        ),
+        (
+            "C and C++",
+            "c h cpp hpp cc cxx hh",
+            "clangd",
+            "sudo apt-get install -y clangd || apt-get install -y clangd",
+        ),
+        (
+            "PHP",
+            "php",
+            "intelephense --stdio",
+            "npm install -g intelephense",
+        ),
+        (
+            "JSON",
+            "json jsonc",
+            "vscode-json-language-server --stdio",
+            "npm install -g vscode-langservers-extracted",
+        ),
+        (
+            "CSS",
+            "css scss less",
+            "vscode-css-language-server --stdio",
+            "npm install -g vscode-langservers-extracted",
+        ),
+        (
+            "HTML",
+            "html htm",
+            "vscode-html-language-server --stdio",
+            "npm install -g vscode-langservers-extracted",
+        ),
+        (
+            "Bash",
+            "sh bash",
+            "bash-language-server start",
+            "npm install -g bash-language-server",
+        ),
+        (
+            "YAML",
+            "yaml yml",
+            "yaml-language-server --stdio",
+            "npm install -g yaml-language-server",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, exts, command, install)| LangServer {
+        name: name.into(),
+        exts: exts.into(),
+        command: command.into(),
+        install: install.into(),
+    })
+    .collect()
+}
+
+/// The language server for a file, if one is set for its kind.
+pub fn server_for(path: &str) -> Option<LangServer> {
+    let ext = path.rsplit_once('.')?.1.to_lowercase();
+    with(|s| {
+        if !s.language_servers_on {
+            return None;
+        }
+        s.language_servers
+            .iter()
+            .find(|l| {
+                l.exts
+                    .split_whitespace()
+                    .any(|e| e.trim_start_matches('.') == ext)
+            })
+            .filter(|l| !l.command.trim().is_empty() && !l.name.trim().is_empty())
+            .cloned()
+    })
+}
+
 /// The formatter command for a file, with its path filled in.
 pub fn formatter_for(path: &str) -> Option<String> {
     let ext = path.rsplit_once('.')?.1.to_lowercase();
@@ -100,6 +215,9 @@ pub struct Settings {
     pub format_on_save: bool,
     /// Which program formats which files; run on the host, text in on stdin, out on stdout.
     pub formatters: Vec<Formatter>,
+    /// Completion, problems, go to definition and the rest, from language servers.
+    pub language_servers_on: bool,
+    pub language_servers: Vec<LangServer>,
     // Files
     pub confirm_delete: bool,
     /// Files above this size, in megabytes, aren't opened.
@@ -150,6 +268,8 @@ impl Default for Settings {
             breadcrumbs: true,
             format_on_save: false,
             formatters: default_formatters(),
+            language_servers_on: true,
+            language_servers: default_servers(),
             confirm_delete: true,
             max_open_mb: 64,
             scrollback: 10_000,
@@ -648,6 +768,69 @@ impl App {
                     }
                     if ui.button("Restore the defaults").clicked() {
                         s.formatters = default_formatters();
+                    }
+                });
+                ui.add_space(14.0);
+                row(
+                    ui,
+                    "Language servers",
+                    "Completion, problems, hover, go to definition (F12), references (Shift+F12), rename (F2) and quick fixes (Ctrl+.), from the same programs VS Code uses. They run on the host; ride offers to install one the first time a file needs it.",
+                    |ui| toggle(ui, &mut s.language_servers_on),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Name, file extensions, the command that starts it on the host (speaking LSP on stdin and stdout), and the one that installs it.",
+                    )
+                    .small()
+                    .color(theme::COMMENT()),
+                );
+                ui.add_space(6.0);
+                let mut remove = None;
+                for (index, server) in s.language_servers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.name)
+                                .desired_width(90.0)
+                                .hint_text("name"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.exts)
+                                .desired_width(120.0)
+                                .hint_text("extensions")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.command)
+                                .desired_width((ui.available_width() - 40.0).max(120.0))
+                                .hint_text("command")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if icon_button(ui, icons::CLOSE, "Remove") {
+                            remove = Some(index);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(98.0);
+                        ui.label(RichText::new("install").small().color(theme::COMMENT()));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.install)
+                                .desired_width((ui.available_width() - 40.0).max(120.0))
+                                .hint_text("command that installs it")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
+                if let Some(index) = remove {
+                    s.language_servers.remove(index);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Add a language server").clicked() {
+                        s.language_servers.push(LangServer::default());
+                    }
+                    if ui.button("Restore the defaults").clicked() {
+                        s.language_servers = default_servers();
                     }
                 });
                 ui.add_space(10.0);

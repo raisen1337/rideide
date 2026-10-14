@@ -59,13 +59,21 @@ There is no API key to paste into ride.
 
 ## Editor
 
+- Language servers, the same ones VS Code uses, running on the server next to the code:
+  completion as you type, problems underlined as you go, hover, the arguments of the call
+  you're typing, go to definition (F12 or Ctrl+click), find references (Shift+F12), rename
+  across files (F2) and quick fixes (Ctrl+.). TypeScript/JavaScript, Python, Lua, Rust, Go,
+  C/C++, PHP, JSON, CSS, HTML, Bash and YAML are set up; ride offers to install a server the
+  first time a file needs one, and you can add others in Settings.
+- Search and replace in the whole folder (Ctrl+Shift+F, Ctrl+Shift+H), with regular
+  expressions, a preview of each change, and files left out with a click.
 - Split the editor into columns and rows by dragging a tab to the edge of another pane.
 - Code folding, a minimap, breadcrumbs, and an outline of the file's functions and types
   (Ctrl+Shift+O to jump to one).
 - Format on save, with the formatter of your choice per file type, run on the server. Prettier
   and StyLua work out of the box through npx.
-- Errors on open and save, for Lua, JavaScript, Python, PHP, shell and JSON, using the checkers already
-  on the server (`luac`, `node`, `python3`, `php`, `bash`).
+- Without a language server, syntax errors on open and save for Lua, JavaScript, Python, PHP,
+  shell and JSON, using the checkers already on the server (`luac`, `node`, `python3`, `php`, `bash`).
 - Compare any two files side by side.
 - `.env` files open as a table, with the values hidden until you show them.
 - The Command Palette (Ctrl+Shift+P) can search the VS Code Marketplace for themes and file icons,

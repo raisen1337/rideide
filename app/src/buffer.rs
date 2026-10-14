@@ -388,6 +388,69 @@ impl Buffer {
         self.edit(start, end, &text);
     }
 
+    /// Replaces several ranges at once, as one undo step: what a rename or a quick fix asks
+    /// for. The ranges are places in the text as it is now; ones that overlap an earlier one
+    /// are left out. The cursor and selection stay on their text, and one at the end of a
+    /// replaced range ends up after what replaced it.
+    pub fn apply_edits(&mut self, edits: Vec<(Pos, Pos, String)>) {
+        let mut edits: Vec<(Pos, Pos, String)> = edits
+            .into_iter()
+            .map(|(a, b, text)| {
+                let (a, b) = (self.clamp(a), self.clamp(b));
+                (a.min(b), a.max(b), text.replace("\r\n", "\n"))
+            })
+            .collect();
+        edits.sort_by_key(|(start, end, _)| (*start, *end));
+        let mut kept: Vec<(Pos, Pos, String)> = Vec::with_capacity(edits.len());
+        for edit in edits {
+            if kept.last().is_none_or(|last| edit.0 >= last.1) {
+                kept.push(edit);
+            }
+        }
+        let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+            return;
+        };
+        let (low, high) = (first.0, last.1);
+        // The text between the first edit and the last, with every edit made in it.
+        let mut text = String::new();
+        let mut at = low;
+        for (start, end, new) in &kept {
+            text.push_str(&self.text_range(at, *start));
+            text.push_str(new);
+            at = *end;
+        }
+        // Where the cursor and the anchor go, as offsets into the new text.
+        let spans: Vec<(usize, usize, usize)> = kept
+            .iter()
+            .map(|(start, end, new)| (self.offset_of(*start), self.offset_of(*end), char_len(new)))
+            .collect();
+        let place = |offset: usize| {
+            let mut shift = 0isize;
+            for &(start, end, len) in &spans {
+                if offset >= end {
+                    shift += len as isize - (end - start) as isize;
+                } else if offset > start {
+                    // Inside a replaced range: to the end of what replaced it.
+                    return (start as isize + shift) as usize + len;
+                }
+            }
+            (offset as isize + shift) as usize
+        };
+        let (cursor, anchor) = (
+            place(self.offset_of(self.cursor)),
+            place(self.offset_of(self.anchor)),
+        );
+        let goal = (self.cursor, self.anchor);
+        self.edit(low, high, &text);
+        self.typing_run = false;
+        // `edit` recorded the cursor from before; the undo step should bring it back there.
+        if let Some(step) = self.undo.last_mut() {
+            (step.cursor_before, step.anchor_before) = goal;
+        }
+        self.cursor = self.pos_at(cursor);
+        self.anchor = self.pos_at(anchor);
+    }
+
     pub fn newline(&mut self) {
         if !crate::settings::with(|s| s.auto_indent) {
             return self.insert("\n");
@@ -821,6 +884,31 @@ mod tests {
         assert_eq!(hit.0, Pos::new(0, 0));
         let hit = b.find("foo", Pos::new(0, 0), false, false).unwrap();
         assert_eq!(hit.0, Pos::new(1, 0));
+    }
+
+    #[test]
+    fn several_edits_are_one_undo_step() {
+        let mut b = Buffer::new("let foo = 1;\nprint(foo);\nfoo();");
+        b.set_cursor(Pos::new(1, 9), false);
+        b.apply_edits(vec![
+            (Pos::new(2, 0), Pos::new(2, 3), "bar".into()),
+            (Pos::new(0, 4), Pos::new(0, 7), "bar".into()),
+            (Pos::new(1, 6), Pos::new(1, 9), "bar".into()),
+        ]);
+        assert_eq!(b.text(), "let bar = 1;\nprint(bar);\nbar();");
+        // The cursor was at the end of a renamed word: it stays at the end of the new one.
+        assert_eq!(b.cursor, Pos::new(1, 9));
+        b.undo();
+        assert_eq!(b.text(), "let foo = 1;\nprint(foo);\nfoo();");
+        assert_eq!(b.cursor, Pos::new(1, 9));
+        // An import added above moves the cursor down with its line.
+        b.set_cursor(Pos::new(2, 1), false);
+        b.apply_edits(vec![(Pos::new(0, 0), Pos::new(0, 0), "use x;\n".into())]);
+        assert_eq!(b.cursor, Pos::new(3, 1));
+        // Text put in at the cursor leaves it after the text.
+        b.set_cursor(Pos::new(3, 3), false);
+        b.apply_edits(vec![(Pos::new(3, 0), Pos::new(3, 3), "foo_bar".into())]);
+        assert_eq!(b.cursor, Pos::new(3, 7));
     }
 
     #[test]

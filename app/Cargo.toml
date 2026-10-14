@@ -29,6 +29,8 @@ raw-window-handle = "0.6"
 arboard = "3"
 resvg = { version = "0.48", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
+# Replace in the folder matches what the host's search found, the same way.
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"

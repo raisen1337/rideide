@@ -372,13 +372,7 @@ impl App {
                 self.find = Some(self.find.take().unwrap_or_default());
                 self.focus_find = true;
             }
-            Command::SearchFolder => {
-                if self.show_search {
-                    self.focus_search = true;
-                } else {
-                    self.toggle_search();
-                }
-            }
+            Command::SearchFolder => self.open_search(),
             Command::InlineEdit => {
                 if let Some(index) = self.docked_active() {
                     self.editor_action(index, editor::Action::InlineEdit);
