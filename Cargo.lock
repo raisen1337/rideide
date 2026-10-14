@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "ignore",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "postcard",
  "serde",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "ride-setup"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "flate2",

@@ -3,6 +3,8 @@
 //! this computer the app runs the same code in-process over a pair of pipes.
 
 #[cfg(unix)]
+pub mod collab;
+#[cfg(unix)]
 mod host;
 pub mod mcp;
 

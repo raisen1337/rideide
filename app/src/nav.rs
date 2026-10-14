@@ -108,6 +108,29 @@ pub(super) fn breadcrumbs(ui: &mut Ui, tab: &mut Tab, root: &str) {
                         .response
                         .on_hover_text("Functions and types in this file");
                 }
+                // Who else is editing this file live, at the right.
+                if !tab.view.peers.is_empty() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        for mark in &tab.view.peers {
+                            let size = vec2(18.0, 18.0);
+                            let resp = match mark.avatar {
+                                Some(texture) => ui.add(
+                                    egui::Image::new(egui::load::SizedTexture::new(texture, size))
+                                        .corner_radius(9),
+                                ),
+                                None => {
+                                    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 9.0, mark.color);
+                                    resp
+                                }
+                            };
+                            // A ring in their cursor's colour ties the face to the cursor.
+                            ui.painter()
+                                .circle_stroke(resp.rect.center(), 9.5, (1.5, mark.color));
+                            resp.on_hover_text(format!("{} is editing this file", mark.name));
+                        }
+                    });
+                }
             });
         });
     if let Some(line) = jump_to {

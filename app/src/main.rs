@@ -3,12 +3,14 @@
 mod ai;
 mod buffer;
 mod chat;
+mod collab;
 mod conn;
 mod db;
 mod diff;
 mod editor;
 mod envfile;
 mod extras;
+mod github;
 mod highlight;
 mod icons;
 mod iconsets;
@@ -567,6 +569,8 @@ struct App {
     /// What the outline side tab is narrowed to.
     outline_filter: String,
     db: db::Db,
+    github: github::GitHub,
+    live: collab::Live,
     /// The app's clock (seconds), as of this frame.
     now: f64,
     /// Changelog entries to show once after an update: (version, text).
@@ -1309,6 +1313,8 @@ impl App {
             updater: update::Updater::new(),
             outline_filter: String::new(),
             db: db::Db::default(),
+            github: github::GitHub::load(),
+            live: collab::Live::default(),
             now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
@@ -1706,7 +1712,10 @@ impl App {
             });
             return;
         }
-        if self.job_message(id, &resp) || self.transfer_message(id, &resp) {
+        if self.job_message(id, &resp)
+            || self.transfer_message(id, &resp)
+            || self.live_message(id, &resp)
+        {
             return;
         }
         if let Some(index) = self.terms.iter().position(|t| t.id == id) {
@@ -1919,6 +1928,7 @@ impl App {
                     self.check_file(index);
                 }
                 self.git_refresh();
+                self.live_saved(&path);
                 self.status = format!("Saved {path}");
             }
             (Pending::FsOp { refresh }, Response::Ok) => self.load_dir(&refresh),
@@ -4177,6 +4187,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
         self.poll(&ctx);
+        self.live_tick(&ctx);
         self.shortcuts(&ctx);
         self.sync_glass(frame);
         self.apply_settings(&ctx);

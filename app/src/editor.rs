@@ -52,6 +52,8 @@ pub struct EditorState {
     pub env_as_text: bool,
     pub env_show_all: bool,
     pub env_revealed: BTreeSet<usize>,
+    /// Others editing this file live: who, and where.
+    pub peers: Vec<crate::collab::Mark>,
     /// First lines of the folded blocks.
     pub folded: BTreeSet<usize>,
     /// For each line, the last line of the block starting there.
@@ -778,6 +780,60 @@ fn code(
                     theme::COMMENT(),
                 );
             }
+        }
+
+        // Others editing live: their selection faintly, their cursor, and their name on it.
+        for mark in &st.peers {
+            let Some((at, anchor)) = mark.at else {
+                continue;
+            };
+            let (at, anchor) = (buf.clamp(at), buf.clamp(anchor));
+            let (from, to) = if anchor < at {
+                (anchor, at)
+            } else {
+                (at, anchor)
+            };
+            for &line in visible.iter().filter(|&&l| l >= from.line && l <= to.line) {
+                if from == to {
+                    break;
+                }
+                let x0 = if line == from.line {
+                    col_x(buf, from)
+                } else {
+                    text_x
+                };
+                let x1 = if line == to.line {
+                    col_x(buf, to)
+                } else {
+                    col_x(buf, Pos::new(line, usize::MAX)) + cw * 0.5
+                };
+                let y = line_y(st, line);
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(x0, y), pos2(x1, y + row_h)),
+                    0.0,
+                    mark.color.gamma_multiply(0.22),
+                );
+            }
+            if !visible.contains(&at.line) {
+                continue;
+            }
+            let (x, y) = (col_x(buf, at), line_y(st, at.line));
+            painter.rect_filled(
+                Rect::from_min_size(pos2(x - 1.0, y), vec2(2.0, row_h)),
+                0.0,
+                mark.color,
+            );
+            let label = painter.layout_no_wrap(
+                mark.name.clone(),
+                FontId::proportional(11.0),
+                Color32::from_rgb(0x16, 0x16, 0x18),
+            );
+            // Above the line, or below it where there is no room above.
+            let above = y - label.size().y - 2.0;
+            let top = if above < view.min.y { y + row_h } else { above };
+            let tag = Rect::from_min_size(pos2(x - 1.0, top), label.size() + vec2(8.0, 2.0));
+            painter.rect_filled(tag, 3.0, mark.color);
+            painter.galley(tag.min + vec2(4.0, 1.0), label, Color32::BLACK);
         }
 
         let cursor_x = col_x(buf, buf.cursor);

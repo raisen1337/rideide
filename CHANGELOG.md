@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.5.0
+
+- **Live editing.** When someone else opens the same file on the same server through ride, you edit it together: their changes appear as they type, and you see their cursor and selection with their name. Their GitHub picture shows above the code while they're in the file.
+- **Sign in with GitHub** in Settings → Account, to have your name and picture in live editing. ride shows a code to enter on github.com and reads only your public profile.
+- Live editing works between people who log in to the server with the same account, and can be turned off in Settings → Account.
+
 ## 0.4.0
 
 - **Database explorer.** A new side tab for MySQL, MariaDB and PostgreSQL databases on the server you're connected to. Add a connection, or fill it in from the folder's `.env`. Browse the tables and their columns, open the first 200 rows of a table with a click, and run any SQL in a query tab with Ctrl+Enter. Results show in a grid, and clicking a cell copies it.

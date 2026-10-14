@@ -560,6 +560,68 @@ impl Buffer {
         }
     }
 
+    // ---- live editing ----
+
+    /// The text with `\n` line ends, whatever the file uses: what is shared.
+    pub fn plain_text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// A place as a count of characters from the start of `plain_text`.
+    pub fn offset_of(&self, pos: Pos) -> usize {
+        let pos = self.clamp(pos);
+        self.lines[..pos.line]
+            .iter()
+            .map(|l| char_len(l) + 1)
+            .sum::<usize>()
+            + pos.col
+    }
+
+    pub fn pos_at(&self, offset: usize) -> Pos {
+        let mut left = offset;
+        for (line, text) in self.lines.iter().enumerate() {
+            let len = char_len(text);
+            if left <= len {
+                return Pos::new(line, left);
+            }
+            left -= len + 1;
+        }
+        let last = self.lines.len() - 1;
+        Pos::new(last, char_len(&self.lines[last]))
+    }
+
+    /// Takes in an edit someone else made, which turned `plain_text` into `new`. The
+    /// cursor and selection stay on the same text. Undo can't reach past it (its record of
+    /// places no longer holds), so the history is started afresh.
+    pub fn apply_remote(&mut self, new: &str) {
+        let old = self.plain_text();
+        if old == new {
+            return;
+        }
+        let op = ride_proto::ot::TextOp::diff(&old, new);
+        let (cursor, anchor) = (self.offset_of(self.cursor), self.offset_of(self.anchor));
+        // The one region that changed, as places in the text before.
+        let a: Vec<char> = old.chars().collect();
+        let b: Vec<char> = new.chars().collect();
+        let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        let suffix = a
+            .iter()
+            .rev()
+            .zip(b.iter().rev())
+            .take(a.len().min(b.len()) - prefix)
+            .take_while(|(x, y)| x == y)
+            .count();
+        let (start, end) = (self.pos_at(prefix), self.pos_at(a.len() - suffix));
+        let inserted: String = b[prefix..b.len() - suffix].iter().collect();
+        self.splice(start, end, &inserted);
+        self.cursor = self.pos_at(op.map(cursor, false));
+        self.anchor = self.pos_at(op.map(anchor, false));
+        self.undo.clear();
+        self.redo.clear();
+        self.typing_run = false;
+        self.goal_col = None;
+    }
+
     pub fn undo(&mut self) {
         let Some(edit) = self.undo.pop() else { return };
         let end = self.end_of(edit.start, &edit.inserted);
@@ -635,6 +697,21 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_from_others_keep_the_cursor_on_its_text() {
+        let mut b = Buffer::new("let x = 1;\nfoo();");
+        b.set_cursor(Pos::new(1, 3), false);
+        assert_eq!(b.offset_of(b.cursor), 14);
+        assert_eq!(b.pos_at(14), Pos::new(1, 3));
+        // Someone adds a line above: the cursor moves down with "foo".
+        b.apply_remote("// note\nlet x = 1;\nfoo();");
+        assert_eq!(b.cursor, Pos::new(2, 3));
+        assert_eq!(b.text(), "// note\nlet x = 1;\nfoo();");
+        // Something after the cursor changes: it stays.
+        b.apply_remote("// note\nlet x = 1;\nfoo(bar);");
+        assert_eq!(b.cursor, Pos::new(2, 3));
+    }
 
     #[test]
     fn insert_and_undo_multiline() {

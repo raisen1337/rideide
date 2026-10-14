@@ -122,6 +122,8 @@ pub struct Settings {
     // Updates
     /// Check for a new version once a day, download it, and install it when ride closes.
     pub auto_update: bool,
+    /// Edit files together with others on the same host (needs a GitHub sign-in).
+    pub live_editing: bool,
 }
 
 impl Default for Settings {
@@ -159,6 +161,7 @@ impl Default for Settings {
             reconnect: true,
             claude_previews: true,
             auto_update: true,
+            live_editing: true,
         }
     }
 }
@@ -239,7 +242,7 @@ pub fn chat_mode() -> chat::Mode {
     })
 }
 
-const SECTIONS: [&str; 7] = [
+const SECTIONS: [&str; 8] = [
     "Appearance",
     "Editor",
     "Files",
@@ -247,6 +250,7 @@ const SECTIONS: [&str; 7] = [
     "Claude",
     "Connection",
     "Updates",
+    "Account",
 ];
 const MODELS: [(&str, &str); 4] = [
     ("haiku", "Haiku"),
@@ -743,6 +747,11 @@ impl App {
                     },
                 );
                 row(ui, "Notifications", "A Windows notification when Claude or an agent finishes while ride is in the background.", |ui| toggle(ui, &mut s.notifications));
+            }
+            7 => {
+                let mut live = s.live_editing;
+                self.account_rows(ui, &mut live);
+                s.live_editing = live;
             }
             6 => {
                 row(ui, "Version", "The ride you are running.", |ui| {

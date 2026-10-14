@@ -5,6 +5,8 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
+pub mod ot;
+
 /// Written by the agent before the first frame, so the client can skip anything
 /// the remote shell's startup files printed.
 pub const MAGIC: &[u8] = b"\0RIDE-AGENT-READY\0";
