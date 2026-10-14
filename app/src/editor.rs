@@ -41,6 +41,10 @@ pub struct EditorState {
     pub marks: Vec<(usize, usize, u8)>,
     /// The functions, classes and types declared in the file.
     pub symbols: Vec<outline::Symbol>,
+    /// Per line, who changed it last and when (from `git blame`), for the text as it was
+    /// at `blame_revision`.
+    pub blame: Vec<String>,
+    pub blame_revision: Option<u64>,
     /// First lines of the folded blocks.
     pub folded: BTreeSet<usize>,
     /// For each line, the last line of the block starting there.
@@ -801,6 +805,25 @@ fn code(
                 message,
                 font.clone(),
                 error.gamma_multiply(0.85),
+            );
+        }
+
+        // Who changed the cursor's line last, faintly at its end, while the text is still
+        // as it was when that was looked up.
+        let line = buf.cursor.line;
+        let blame = st
+            .blame
+            .get(line)
+            .filter(|_| prefs.blame && st.blame_revision == Some(buf.revision))
+            .filter(|_| !st.diags.iter().any(|(l, _)| *l == line) && visible.contains(&line));
+        if let Some(text) = blame {
+            let x = col_x(buf, Pos::new(line, usize::MAX)) + cw * 4.0;
+            painter.text(
+                pos2(x, line_y(st, line) + pad_y),
+                egui::Align2::LEFT_TOP,
+                text,
+                font.clone(),
+                theme::COMMENT().gamma_multiply(0.7),
             );
         }
 

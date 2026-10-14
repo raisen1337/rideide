@@ -25,9 +25,16 @@ pub(super) enum JobKind {
         tool: &'static str,
     },
     GitStatus,
+    /// The branches and stashes.
+    GitRefs,
     /// `git diff -U0` of a tab's file, for the change marks beside the code.
     GitMarks {
         tab_uid: u64,
+    },
+    /// `git blame` of a tab's file as it was at `revision`.
+    GitBlame {
+        tab_uid: u64,
+        revision: u64,
     },
     /// A diff to show in a tab with this title.
     GitShow {

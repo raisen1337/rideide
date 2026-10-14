@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.3.1
+
+- **Branches.** The branch name at the top of the Git tab is now a menu: switch to another branch, check out a remote one, or create a new branch from where you are.
+- **Stash.** A Stashes section in the Git tab puts all your changes aside (new files too) and brings them back with Apply or Pop; Drop asks first.
+- **Blame on the current line.** At the end of the line the cursor is on: who changed it last, how long ago, and the commit's message. Turn it off in Settings → Editor.
+
 ## 0.3.0
 
 - **Code folding.** Arrows beside the line numbers fold a block and open it again; Ctrl+Shift+[ and Ctrl+Shift+] do the same at the cursor, and the palette has Fold all and Unfold all. It works in every language, by indentation.

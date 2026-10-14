@@ -197,7 +197,88 @@ pub(super) struct Git {
     busy: bool,
     /// A file whose discard button was pressed once and waits for the second press.
     confirm_discard: Option<String>,
+    /// Local and remote branches, and the stashes (their name and message).
+    branches: Vec<String>,
+    remote_branches: Vec<String>,
+    stashes: Vec<(String, String)>,
+    /// The name typed for a new branch.
+    new_branch: String,
+    /// A stash whose drop button was pressed once.
+    confirm_drop: Option<String>,
 }
+
+/// "3 days ago", from a number of seconds.
+fn ago(seconds: i64) -> String {
+    let units = [
+        (365 * 86400, "year"),
+        (30 * 86400, "month"),
+        (7 * 86400, "week"),
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
+    ];
+    for (size, name) in units {
+        let n = seconds / size;
+        if n >= 1 {
+            return format!("{n} {name}{} ago", if n == 1 { "" } else { "s" });
+        }
+    }
+    "just now".into()
+}
+
+/// Reads `git blame --line-porcelain`: for each line of the file, "who, when · message".
+fn parse_blame(output: &str, now: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    let (mut author, mut time, mut summary, mut uncommitted) =
+        (String::new(), 0, String::new(), false);
+    for line in output.lines() {
+        if let Some(content) = line.strip_prefix('\t') {
+            let _ = content;
+            lines.push(if uncommitted {
+                "You · not committed yet".to_string()
+            } else {
+                format!("{author}, {} · {summary}", ago(now - time))
+            });
+        } else if let Some(rest) = line.strip_prefix("author ") {
+            author = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("author-time ") {
+            time = rest.trim().parse().unwrap_or(now);
+        } else if let Some(rest) = line.strip_prefix("summary ") {
+            summary = rest.to_string();
+        } else if line.len() >= 40 && line.as_bytes()[..40].iter().all(u8::is_ascii_hexdigit) {
+            uncommitted = line.starts_with("0000000000");
+        }
+    }
+    lines
+}
+
+/// Reads the branches and stashes listed by `GIT_REFS`.
+fn parse_refs(output: &str) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+    let (mut local, mut remote, mut stashes) = (Vec::new(), Vec::new(), Vec::new());
+    let mut part = 0;
+    for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line {
+            "--remote--" => part = 1,
+            "--stash--" => part = 2,
+            _ if line.starts_with("fatal") => {}
+            _ => match part {
+                0 => local.push(line.to_string()),
+                // `origin/HEAD` only points at another branch.
+                1 if !line.ends_with("/HEAD") && line.contains('/') => {
+                    remote.push(line.to_string())
+                }
+                1 => {}
+                _ => {
+                    let (name, message) = line.split_once('\t').unwrap_or((line, ""));
+                    stashes.push((name.to_string(), message.to_string()));
+                }
+            },
+        }
+    }
+    (local, remote, stashes)
+}
+
+const GIT_REFS: &str = "git branch --format='%(refname:short)'; echo --remote--; git branch -r --format='%(refname:short)'; echo --stash--; git stash list --format='%gd%x09%s'";
 
 /// Reads `git rev-parse --show-toplevel` followed by `git status --porcelain=v1 -b`.
 fn parse_status(output: &str) -> Option<(String, String, Vec<GitEntry>)> {
@@ -809,6 +890,7 @@ impl App {
                 JobKind::GitStatus,
                 "git rev-parse --show-toplevel; git status --porcelain=v1 -b".into(),
             );
+            self.start_shell_job(JobKind::GitRefs, GIT_REFS.into());
         }
     }
 
@@ -820,11 +902,28 @@ impl App {
         let Some(tab) = self.tabs.get(index).filter(|t| t.preview.is_none()) else {
             return;
         };
+        // Relative to the open folder (where the command runs), so a folder reached through
+        // a mapped drive or a link still matches the repository's own paths.
+        let path = tab
+            .path
+            .strip_prefix(&format!("{}/", self.root.trim_end_matches('/')))
+            .unwrap_or(&tab.path)
+            .to_string();
         let (kind, command) = (
             JobKind::GitMarks { tab_uid: tab.uid },
-            format!("git diff -U0 -- {}", quote(&tab.path)),
+            format!("git diff -U0 -- {}", quote(&path)),
+        );
+        let blame = (
+            JobKind::GitBlame {
+                tab_uid: tab.uid,
+                revision: tab.buf.revision,
+            },
+            format!("git blame --line-porcelain -- {}", quote(&path)),
         );
         self.start_shell_job(kind, command);
+        if settings::with(|s| s.blame) {
+            self.start_shell_job(blame.0, blame.1);
+        }
     }
 
     fn git_run(&mut self, what: &str, command: String) {
@@ -923,6 +1022,23 @@ impl App {
                 }
                 self.sync_after_claude();
             }
+            JobKind::GitBlame { tab_uid, revision } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.uid == tab_uid) {
+                    // A file git doesn't track has no blame; nothing is shown for it.
+                    tab.view.blame = parse_blame(&output, now);
+                    tab.view.blame_revision = Some(revision);
+                }
+            }
+            JobKind::GitRefs => {
+                (
+                    self.git.branches,
+                    self.git.remote_branches,
+                    self.git.stashes,
+                ) = parse_refs(&output);
+            }
             JobKind::Monitor => {
                 self.monitor.waiting = false;
                 parse_monitor(&mut self.monitor, &output);
@@ -932,16 +1048,27 @@ impl App {
     }
 
     pub(super) fn git_panel(&mut self, ui: &mut Ui) {
+        let mut branch_act: Option<String> = None;
         ui.horizontal(|ui| {
             let branch = if self.git.branch.is_empty() {
-                "git"
+                "git".to_string()
             } else {
-                &self.git.branch
+                self.git.branch.clone()
             };
-            ui.label(pieces(&[
-                (&format!("{}  ", icons::COMMIT), theme::COMMENT()),
-                (branch, theme::STRONG()),
-            ]));
+            let title = pieces(&[
+                (&format!("{}  ", icons::SOURCE_CONTROL), theme::COMMENT()),
+                (&branch, theme::STRONG()),
+                (&format!("  {}", icons::CHEVRON_DOWN), theme::COMMENT()),
+            ]);
+            if !self.git.repo {
+                ui.label(title);
+            } else {
+                ui.menu_button(title, |ui| {
+                    branch_act = self.branch_menu(ui);
+                })
+                .response
+                .on_hover_text("Switch branch, or make a new one");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, icons::REFRESH, "Refresh") {
                     self.git_refresh();
@@ -957,6 +1084,9 @@ impl App {
                 }
             });
         });
+        if let Some(command) = branch_act {
+            self.git_run("Branch", command);
+        }
         if !self.git.repo {
             ui.label(
                 RichText::new("The open folder isn't in a git repository.")
@@ -1006,6 +1136,8 @@ impl App {
             AskDiscard(String),
             Show(String, bool),
             StageAll,
+            /// A stash command: what it is called, and the command.
+            Run((&'static str, String)),
         }
         let mut act = None;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1109,6 +1241,9 @@ impl App {
                         .color(theme::COMMENT()),
                 );
             }
+            if let Some(command) = self.stash_section(ui) {
+                act = Some(Act::Run(command));
+            }
         });
 
         // Paths are from the repository's top, so the commands run there whatever folder is open.
@@ -1117,6 +1252,7 @@ impl App {
         match act {
             Some(Act::Stage(path)) => self.git_run("Stage", format!("git add -- {}", at(&path))),
             Some(Act::StageAll) => self.git_run("Stage", "git add -A".into()),
+            Some(Act::Run((what, command))) => self.git_run(what, command),
             Some(Act::Unstage(path)) => {
                 self.git_run("Unstage", format!("git restore --staged -- {}", at(&path)))
             }
@@ -1147,6 +1283,147 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// The branch menu: a new branch from here, then the local branches and the remote
+    /// ones. Returns the git command chosen.
+    fn branch_menu(&mut self, ui: &mut Ui) -> Option<String> {
+        let mut chosen = None;
+        ui.set_min_width(240.0);
+        ui.label(
+            RichText::new("NEW BRANCH")
+                .small()
+                .strong()
+                .color(theme::COMMENT()),
+        );
+        ui.horizontal(|ui| {
+            let edit = ui.add(
+                TextEdit::singleline(&mut self.git.new_branch)
+                    .desired_width(170.0)
+                    .hint_text("name"),
+            );
+            let name = self.git.new_branch.trim().to_string();
+            let valid = !name.is_empty() && !name.contains(char::is_whitespace);
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if (ui.add_enabled(valid, egui::Button::new("Create")).clicked() || enter) && valid {
+                chosen = Some(format!("git switch -c {}", quote(&name)));
+                self.git.new_branch.clear();
+                ui.close();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("BRANCHES")
+                .small()
+                .strong()
+                .color(theme::COMMENT()),
+        );
+        ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for name in &self.git.branches {
+                let current = *name == self.git.branch;
+                if ui.selectable_label(current, name).clicked() && !current {
+                    chosen = Some(format!("git switch {}", quote(name)));
+                    ui.close();
+                }
+            }
+            if !self.git.remote_branches.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("REMOTE")
+                        .small()
+                        .strong()
+                        .color(theme::COMMENT()),
+                );
+                for name in &self.git.remote_branches {
+                    // Switching to a remote branch makes a local one that follows it.
+                    let local = name.split_once('/').map_or(name.as_str(), |(_, b)| b);
+                    let label = pieces(&[(name, theme::MUTED())]);
+                    if ui.selectable_label(false, label).clicked() {
+                        chosen = Some(if self.git.branches.iter().any(|b| b == local) {
+                            format!("git switch {}", quote(local))
+                        } else {
+                            format!("git switch --track {}", quote(name))
+                        });
+                        ui.close();
+                    }
+                }
+            }
+        });
+        if chosen.is_some() {
+            self.status = "Switching branch…".into();
+        }
+        chosen
+    }
+
+    /// The stashes under the changes: put the changes aside, and take them back.
+    fn stash_section(&mut self, ui: &mut Ui) -> Option<(&'static str, String)> {
+        let mut chosen = None;
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("STASHES  {}", self.git.stashes.len()))
+                    .small()
+                    .strong()
+                    .color(theme::COMMENT()),
+            );
+            if !self.git.entries.is_empty() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let hint = "Put all changes aside, new files included. The commit message, if written, names the stash.";
+                    if icon_button(ui, icons::ARROW_DOWN, hint) {
+                        let message = self.git.message.trim();
+                        let command = if message.is_empty() {
+                            "git stash push -u".to_string()
+                        } else {
+                            format!("git stash push -u -m {}", quote(message))
+                        };
+                        chosen = Some(("Stash", command));
+                    }
+                });
+            }
+        });
+        for (name, message) in &self.git.stashes {
+            ui.horizontal(|ui| {
+                ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if self.git.confirm_drop.as_deref() == Some(name.as_str()) {
+                        if ui
+                            .small_button("Drop?")
+                            .on_hover_text("Throws this stash away for good")
+                            .clicked()
+                        {
+                            chosen =
+                                Some(("Drop stash", format!("git stash drop {}", quote(name))));
+                        }
+                    } else if icon_button(ui, icons::TRASH, "Drop…") {
+                        self.git.confirm_drop = Some(name.clone());
+                    }
+                    if ui
+                        .small_button("Pop")
+                        .on_hover_text("Bring the changes back and remove the stash")
+                        .clicked()
+                    {
+                        chosen = Some(("Pop stash", format!("git stash pop {}", quote(name))));
+                    }
+                    if ui
+                        .small_button("Apply")
+                        .on_hover_text("Bring the changes back and keep the stash")
+                        .clicked()
+                    {
+                        chosen = Some(("Apply stash", format!("git stash apply {}", quote(name))));
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.label(pieces(&[
+                            (&format!("{name}  "), theme::COMMENT()),
+                            (message, theme::TEXT()),
+                        ]));
+                    });
+                });
+            });
+        }
+        if chosen.is_some() {
+            self.git.confirm_drop = None;
+        }
+        chosen
     }
 
     // ---- server monitor ----
@@ -1321,6 +1598,41 @@ mod tests {
         assert!(parse_check("php", "No syntax errors detected in /srv/a.php").is_empty());
         assert!(parse_check("lua", "bash: luac: command not found").is_empty());
         assert!(parse_check("lua", "").is_empty());
+    }
+
+    #[test]
+    fn blame_becomes_a_line_per_line() {
+        let output = "\
+3f2a9c1e5b7d4a6f8e0c2b4d6f8a0c2e4b6d8f0a 1 1 1
+author Ana Pop
+author-time 1000
+summary Add the parser
+filename src/a.rs
+\tfn a() {}
+0000000000000000000000000000000000000000 2 2 1
+author Not Committed Yet
+author-time 5000
+summary Version of src/a.rs from src/a.rs
+filename src/a.rs
+\tfn b() {}
+";
+        let lines = parse_blame(output, 1000 + 3 * 86400);
+        assert_eq!(lines[0], "Ana Pop, 3 days ago · Add the parser");
+        assert_eq!(lines[1], "You · not committed yet");
+        assert_eq!(ago(30), "just now");
+        assert_eq!(ago(3600), "1 hour ago");
+    }
+
+    #[test]
+    fn branches_and_stashes_are_read() {
+        let output = "main\nfeature/x\n--remote--\norigin/HEAD\norigin/main\n--stash--\nstash@{0}\tWIP on main: abc fix\n";
+        let (local, remote, stashes) = parse_refs(output);
+        assert_eq!(local, ["main", "feature/x"]);
+        assert_eq!(remote, ["origin/main"]);
+        assert_eq!(
+            stashes,
+            [("stash@{0}".to_string(), "WIP on main: abc fix".to_string())]
+        );
     }
 
     #[test]

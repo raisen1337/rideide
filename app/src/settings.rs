@@ -93,6 +93,8 @@ pub struct Settings {
     /// Seconds without typing after which an edited file is saved; 0 turns it off.
     pub autosave: f32,
     pub minimap: bool,
+    /// Who last changed the cursor's line, and when, at its end.
+    pub blame: bool,
     /// The file's path and the function the cursor is in, above the code.
     pub breadcrumbs: bool,
     pub format_on_save: bool,
@@ -140,6 +142,7 @@ impl Default for Settings {
             newline_on_save: false,
             autosave: 0.0,
             minimap: true,
+            blame: true,
             breadcrumbs: true,
             format_on_save: false,
             formatters: default_formatters(),
@@ -569,6 +572,12 @@ impl App {
                     "Minimap",
                     "The whole file in miniature at the right; click or drag in it to scroll.",
                     |ui| toggle(ui, &mut s.minimap),
+                );
+                row(
+                    ui,
+                    "Blame on the current line",
+                    "Who last changed the line the cursor is on, when, and the commit's message, faintly at its end.",
+                    |ui| toggle(ui, &mut s.blame),
                 );
                 row(
                     ui,
