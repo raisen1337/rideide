@@ -124,8 +124,109 @@ fn main() -> eframe::Result {
 
 /// The entry in the host list that opens folders on this computer instead of a server.
 const LOCAL: &str = "This computer";
-/// Codicons for replacing one match and all of them.
-const REPLACE_ICON: char = '\u{eb3d}';
+/// What a terminal tab's menu asked for.
+enum TermAct {
+    Rename,
+    /// Back to the title the programs in it set.
+    AutoName,
+    Color(Option<usize>),
+}
+
+/// The colours a terminal can be marked with, as theme terminal colours.
+const TERM_COLORS: [(usize, &str); 6] = [
+    (1, "Red"),
+    (2, "Green"),
+    (3, "Yellow"),
+    (4, "Blue"),
+    (5, "Magenta"),
+    (6, "Cyan"),
+];
+
+/// A terminal's name: the one given by hand, else the title the programs in it set (Claude
+/// Code names it after what it is working on), else its number.
+fn term_title(term: &Terminal, index: usize) -> String {
+    match &term.name {
+        Some(name) => name.clone(),
+        None if term.title.trim().is_empty() => format!("Terminal {}", index + 1),
+        None => term.title.chars().take(40).collect(),
+    }
+}
+
+/// The folder search's boxes: their height, and the size of the toggles inside them.
+const SEARCH_BOX_H: f32 = 26.0;
+const CHIP_W: f32 = 22.0;
+const CHIP_H: f32 = 20.0;
+
+/// A box of the folder search, filling the width it is given; its border lights up while
+/// it has the keyboard.
+fn search_box(ui: &mut Ui, width: f32, focused: bool, add: impl FnOnce(&mut Ui)) {
+    let stroke = if focused {
+        theme::ACCENT().gamma_multiply(0.8)
+    } else {
+        theme::LINE()
+    };
+    Frame::NONE
+        .fill(theme::tint(8))
+        .stroke((1.0, stroke))
+        .corner_radius(5)
+        .inner_margin(Margin {
+            left: 7,
+            right: 2,
+            top: 2,
+            bottom: 2,
+        })
+        .show(ui, |ui| {
+            ui.set_width(width - 11.0);
+            ui.set_min_height(SEARCH_BOX_H - 6.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                add(ui);
+            });
+        });
+}
+
+/// A button inside a search box, drawn at exactly its size: a button sized by its text can
+/// come out wider than asked, and the box with it.
+fn box_button(ui: &mut Ui, text: &str, on: bool, enabled: bool, hint: &str) -> bool {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(CHIP_W, CHIP_H), sense);
+    let fill = if on {
+        theme::ACCENT().gamma_multiply(0.35)
+    } else if resp.hovered() && enabled {
+        theme::tint(14)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    let color = match (enabled, on) {
+        (false, _) => theme::COMMENT().gamma_multiply(0.5),
+        (true, true) => theme::STRONG(),
+        (true, false) => theme::COMMENT(),
+    };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(12.0),
+        color,
+    );
+    resp.on_hover_text(hint).clicked()
+}
+
+/// A toggle inside a search box: match case, regular expression, Claude.
+fn search_chip(ui: &mut Ui, on: &mut bool, text: &str, hint: &str) -> bool {
+    let clicked = box_button(ui, text, *on, true, hint);
+    if clicked {
+        *on = !*on;
+    }
+    clicked
+}
+
+/// The codicon for replacing every match.
 const REPLACE_ALL_ICON: char = '\u{eb3c}';
 
 enum Link {
@@ -273,6 +374,8 @@ enum PromptAction {
     Rename(String),
     /// Save the current agents as a team template under the typed name.
     SaveTeam,
+    /// Give the terminal with this id a name.
+    RenameTerminal(u64),
     /// Rename what is at a place of a tab, with the language server.
     RenameSymbol {
         tab: u64,
@@ -315,6 +418,8 @@ enum TreeAction {
     Refresh(String),
     AddToChat(String),
     Upload(String),
+    /// Copy a path: the full one, or relative to the open folder.
+    CopyPath(String, bool),
 }
 
 struct TreeRow {
@@ -1999,6 +2104,19 @@ impl App {
                     self.show_chat = true;
                     self.chat.open_first_agent();
                 }
+                // RIDE_SEARCH=QUERY[=>REPLACEMENT] searches the folder, to look at the results
+                // (and what the replacement would make of them).
+                if let Ok(spec) = std::env::var("RIDE_SEARCH") {
+                    let (query, with) = match spec.split_once("=>") {
+                        Some((query, with)) => (query.to_string(), Some(with.to_string())),
+                        None => (spec, None),
+                    };
+                    self.search.query = query;
+                    self.search.show_replace = with.is_some();
+                    self.search.replace = with.unwrap_or_default();
+                    self.side = Side::Search;
+                    self.run_search();
+                }
                 if let Ok(text) = std::env::var("RIDE_CHAT_SEND") {
                     self.show_chat = true;
                     self.chat_send(text);
@@ -3214,6 +3332,10 @@ impl App {
     }
 
     fn side_panel(&mut self, ui: &mut Ui) {
+        // The panel takes the size of what is in it; nothing in it may be wider than the
+        // width it was given, or it would grow by itself.
+        let width = ui.available_width();
+        ui.set_max_width(width);
         self.side_title(ui);
         ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
         match self.side {
@@ -3263,6 +3385,18 @@ impl App {
     }
 
     /// Ctrl+Shift+F: the search view, or back to the files from it.
+    /// Puts a file's path on the clipboard: as it is on the host, or from the open folder.
+    fn copy_path(&mut self, ctx: &Context, path: &str, relative: bool) {
+        let prefix = format!("{}/", self.root.trim_end_matches('/'));
+        let text = if relative {
+            path.strip_prefix(&prefix).unwrap_or(path)
+        } else {
+            path
+        };
+        ctx.copy_text(text.to_string());
+        self.status = format!("Copied {text}");
+    }
+
     fn toggle_search(&mut self) {
         if self.side == Side::Search && self.show_side && self.view == View::Code {
             self.side = Side::Files;
@@ -3434,6 +3568,14 @@ impl App {
                             if menu_item(ui, icons::SPARKLE, "Add to chat") {
                                 action = Some(TreeAction::AddToChat(row.path.clone()));
                             }
+                            ui.separator();
+                            if menu_item(ui, icons::COPY, "Copy path") {
+                                action = Some(TreeAction::CopyPath(row.path.clone(), false));
+                            }
+                            if menu_item(ui, icons::COPY, "Copy relative path") {
+                                action = Some(TreeAction::CopyPath(row.path.clone(), true));
+                            }
+                            ui.separator();
                             if menu_item(ui, icons::EDIT, "Rename…") {
                                 let prompt = PromptAction::Rename(row.path.clone());
                                 action =
@@ -3485,103 +3627,107 @@ impl App {
             Some(TreeAction::Refresh(path)) => self.load_dir(&path),
             Some(TreeAction::AddToChat(path)) => self.add_path_to_chat(&path),
             Some(TreeAction::Upload(dir)) => self.pick_and_upload(dir),
+            Some(TreeAction::CopyPath(path, relative)) => self.copy_path(ui.ctx(), &path, relative),
             None => {}
         }
     }
 
     /// The folder search above the file tree: the query box, then its results.
     fn search_section(&mut self, ui: &mut Ui) {
-        fn chip(ui: &mut Ui, on: &mut bool, text: &str, hint: &str) -> bool {
-            let button = egui::Button::selectable(*on, RichText::new(text).small());
-            let clicked = ui.add(button).on_hover_text(hint).clicked();
-            if clicked {
-                *on = !*on;
-            }
-            clicked
-        }
-
         let mut run = false;
         let mut replace_all = false;
-        Frame::NONE
-            .fill(theme::tint(8))
-            .stroke((1.0, theme::LINE()))
-            .corner_radius(8)
-            .inner_margin(Margin {
-                left: 8,
-                right: 4,
-                top: 3,
-                bottom: 3,
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    let arrow = if self.search.show_replace {
-                        icons::CHEVRON_DOWN
-                    } else {
-                        icons::CHEVRON_RIGHT
-                    };
-                    if icon_button(ui, arrow, "Replace (Ctrl+Shift+H)") {
-                        self.search.show_replace = !self.search.show_replace;
-                        self.search.focus_replace = self.search.show_replace;
+        // As in VS Code: the arrow that shows the replacement at the left, then the boxes
+        // one under the other, the same width, each with its buttons inside at the right.
+        ui.visuals_mut().text_cursor.stroke = egui::Stroke::new(2.0, theme::TEXT());
+        let query_id = ui.make_persistent_id("search_query");
+        // Measured here: inside the row the width runs on without end.
+        // Measured here: inside the row the width runs on without end. Every part of the
+        // boxes has an exact size, so they never come out wider than this.
+        let box_width = (ui.available_width() - 30.0).max(120.0);
+        let replace_id = ui.make_persistent_id("search_replace");
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
+            let arrow = if self.search.show_replace {
+                icons::CHEVRON_DOWN
+            } else {
+                icons::CHEVRON_RIGHT
+            };
+            let (rect, toggle) = ui.allocate_exact_size(vec2(18.0, SEARCH_BOX_H), Sense::click());
+            let color = if toggle.hovered() {
+                theme::TEXT()
+            } else {
+                theme::COMMENT()
+            };
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                arrow,
+                egui::FontId::proportional(14.0),
+                color,
+            );
+            if toggle.on_hover_text("Replace (Ctrl+Shift+H)").clicked() {
+                self.search.show_replace = !self.search.show_replace;
+                self.search.focus_replace = self.search.show_replace;
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let focused = ui.memory(|m| m.has_focus(query_id));
+                search_box(ui, box_width, focused, |ui| {
+                    let room = (box_width - 12.0 - 3.0 * (CHIP_W + 2.0)).max(40.0);
+                    let edit = ui.add(
+                        TextEdit::singleline(&mut self.search.query)
+                            .id(query_id)
+                            .frame(Frame::NONE)
+                            .desired_width(room - 8.0)
+                            .hint_text("Search"),
+                    );
+                    if std::mem::take(&mut self.focus_search) {
+                        edit.request_focus();
                     }
-                    ui.label(RichText::new(icons::SEARCH).color(theme::COMMENT()));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let sparkle = icons::SPARKLE.to_string();
-                        chip(
-                            ui,
-                            &mut self.search.ai,
-                            &sparkle,
-                            "Describe what you are looking for and let Claude find it",
-                        );
-                        run |= chip(ui, &mut self.search.regex, ".*", "Regular expression");
-                        run |= chip(ui, &mut self.search.case_sensitive, "Aa", "Match case");
-                        let edit = ui.add(
-                            TextEdit::singleline(&mut self.search.query)
-                                .desired_width(f32::INFINITY)
-                                .frame(Frame::NONE)
-                                .hint_text("Search in folder"),
-                        );
-                        if std::mem::take(&mut self.focus_search) {
-                            edit.request_focus();
-                        }
-                        run |= edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    });
+                    run |= edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    run |= search_chip(ui, &mut self.search.case_sensitive, "Aa", "Match case");
+                    run |= search_chip(ui, &mut self.search.regex, ".*", "Regular expression");
+                    let sparkle = icons::SPARKLE.to_string();
+                    search_chip(
+                        ui,
+                        &mut self.search.ai,
+                        &sparkle,
+                        "Describe what you are looking for and let Claude find it",
+                    );
                 });
                 if self.search.show_replace {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        ui.add_space(22.0);
-                        ui.label(RichText::new(REPLACE_ICON.to_string()).color(theme::COMMENT()));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let can = self.can_replace();
-                            let button = egui::Button::new(
-                                RichText::new(REPLACE_ALL_ICON.to_string()).small(),
-                            );
-                            let hint = if can {
-                                "Replace all"
-                            } else {
-                                "Search first; the results are what gets replaced"
-                            };
-                            if ui.add_enabled(can, button).on_hover_text(hint).clicked() {
-                                replace_all = true;
-                            }
-                            let edit = ui.add(
-                                TextEdit::singleline(&mut self.search.replace)
-                                    .desired_width(f32::INFINITY)
-                                    .frame(Frame::NONE)
-                                    .hint_text(if self.search.regex {
-                                        "Replace with ($1 for a group)"
-                                    } else {
-                                        "Replace with"
-                                    }),
-                            );
-                            if std::mem::take(&mut self.search.focus_replace) {
-                                edit.request_focus();
-                            }
-                        });
+                    let focused = ui.memory(|m| m.has_focus(replace_id));
+                    search_box(ui, box_width, focused, |ui| {
+                        let room = (box_width - 12.0 - (CHIP_W + 2.0)).max(40.0);
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut self.search.replace)
+                                .id(replace_id)
+                                .frame(Frame::NONE)
+                                .desired_width(room - 8.0)
+                                .hint_text(if self.search.regex {
+                                    "Replace ($1 for a group)"
+                                } else {
+                                    "Replace"
+                                }),
+                        );
+                        if std::mem::take(&mut self.search.focus_replace) {
+                            edit.request_focus();
+                        }
+                        let can = self.can_replace();
+                        let hint = if can {
+                            "Replace all"
+                        } else {
+                            "Search first; the results are what gets replaced"
+                        };
+                        let icon = REPLACE_ALL_ICON.to_string();
+                        if box_button(ui, &icon, false, can, hint) {
+                            replace_all = true;
+                        }
                     });
                 }
             });
+        });
+        ui.add_space(4.0);
         if replace_all {
             self.ask_replace_all();
         }
@@ -3729,6 +3875,7 @@ impl App {
 
     fn term_panel(&mut self, ui: &mut Ui) {
         let mut close = None;
+        let mut term_act = None;
         if self.guest() {
             self.panel_tab = chrome::PanelTab::Problems;
         }
@@ -3752,21 +3899,68 @@ impl App {
                     self.panel_tabs(ui);
                     ui.add_space(8.0);
                     for (index, term) in self.terms.iter().enumerate().filter(|_| terminal) {
-                        let title = if term.title.is_empty() {
-                            format!("Terminal {}", index + 1)
-                        } else {
-                            term.title.chars().take(32).collect()
-                        };
+                        let title = term_title(term, index);
+                        let color = term.color.map(|c| theme::ANSI()[c]);
                         let label = pieces(&[
-                            (&format!("{}  ", icons::TERMINAL), theme::COMMENT()),
-                            (&title, theme::TEXT()),
+                            (
+                                &format!("{}  ", icons::TERMINAL),
+                                color.unwrap_or(theme::COMMENT()),
+                            ),
+                            (&title, color.unwrap_or(theme::TEXT())),
                         ]);
-                        if ui
+                        let resp = ui
                             .selectable_label(index == self.active_term, label)
-                            .clicked()
-                        {
+                            .on_hover_text("Double-click to rename; right-click for more");
+                        if let Some(color) = color {
+                            let r = resp.rect;
+                            ui.painter().line_segment(
+                                [
+                                    r.left_bottom() + vec2(4.0, 0.0),
+                                    r.right_bottom() - vec2(4.0, 0.0),
+                                ],
+                                (2.0, color),
+                            );
+                        }
+                        if resp.clicked() {
                             self.active_term = index;
                         }
+                        if resp.double_clicked() {
+                            term_act = Some((index, TermAct::Rename));
+                        }
+                        resp.context_menu(|ui| {
+                            if menu_item(ui, icons::EDIT, "Rename…") {
+                                term_act = Some((index, TermAct::Rename));
+                            }
+                            if term.name.is_some()
+                                && menu_item(ui, icons::REFRESH, "Name it by what runs in it")
+                            {
+                                term_act = Some((index, TermAct::AutoName));
+                            }
+                            ui.menu_button(format!("{}   Colour", icons::PALETTE), |ui| {
+                                for (choice, name) in TERM_COLORS {
+                                    let text = pieces(&[
+                                        (&format!("{}  ", icons::DOT), theme::ANSI()[choice]),
+                                        (name, theme::TEXT()),
+                                    ]);
+                                    if ui
+                                        .selectable_label(term.color == Some(choice), text)
+                                        .clicked()
+                                    {
+                                        term_act = Some((index, TermAct::Color(Some(choice))));
+                                    }
+                                }
+                                if ui.selectable_label(term.color.is_none(), "None").clicked() {
+                                    term_act = Some((index, TermAct::Color(None)));
+                                }
+                            });
+                            ui.separator();
+                            if menu_item(ui, icons::CLOSE, "Close terminal") {
+                                close = Some(index);
+                            }
+                            if term_act.is_some() || close.is_some() {
+                                ui.close();
+                            }
+                        });
                         if icon_button(ui, icons::CLOSE, "Close terminal") {
                             close = Some(index);
                         }
@@ -3832,6 +4026,19 @@ impl App {
                     }
                 }
             });
+        match term_act {
+            Some((index, TermAct::Rename)) => {
+                let term = &self.terms[index];
+                self.dialog = Some(Dialog::Prompt {
+                    title: "Rename terminal".into(),
+                    value: term_title(term, index),
+                    action: PromptAction::RenameTerminal(term.id),
+                });
+            }
+            Some((index, TermAct::AutoName)) => self.terms[index].name = None,
+            Some((index, TermAct::Color(color))) => self.terms[index].color = color,
+            None => {}
+        }
         if let Some(index) = close {
             let id = self.terms.remove(index).id;
             self.request(Request::TermClose { term: id });
@@ -3934,6 +4141,7 @@ impl App {
                                 self.panes.shown.insert(pane, uid);
                             }
                             let mut detach = None;
+                            let mut copy = None;
                             if resp.dragged() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                 // Nothing reaches the window once the cursor is outside it, so keep polling.
@@ -3947,6 +4155,13 @@ impl App {
                                 detach = dragged_outside(ui.ctx());
                             }
                             resp.context_menu(|ui| {
+                                if menu_item(ui, icons::COPY, "Copy path") {
+                                    copy = Some((tab.path.clone(), false));
+                                }
+                                if menu_item(ui, icons::COPY, "Copy relative path") {
+                                    copy = Some((tab.path.clone(), true));
+                                }
+                                ui.separator();
                                 if menu_item(ui, icons::DOCK, "Split right") {
                                     split = Some((index, panes::Zone::Right));
                                 }
@@ -3957,6 +4172,9 @@ impl App {
                                     detach = Some(Pos2::new(160.0, 120.0));
                                 }
                             });
+                            if let Some((path, relative)) = copy {
+                                self.copy_path(ui.ctx(), &path, relative);
+                            }
                             if let Some(pos) = detach {
                                 let tab = &mut self.tabs[index];
                                 tab.detached = true;
@@ -4306,7 +4524,12 @@ impl App {
         match dialog {
             Dialog::Prompt { value, action, .. } => {
                 let name = value.trim();
-                if name.is_empty() || name.contains('/') {
+                // Only a file's name can't hold a slash.
+                let file = matches!(
+                    action,
+                    PromptAction::NewFile(_) | PromptAction::NewDir(_) | PromptAction::Rename(_)
+                );
+                if name.is_empty() || file && name.contains('/') {
                     self.status = "Invalid name".into();
                     return;
                 }
@@ -4341,6 +4564,11 @@ impl App {
                     }
                     PromptAction::SaveTeam => self.save_team(name),
                     PromptAction::RenameSymbol { tab, pos } => self.intel_rename(tab, pos, name),
+                    PromptAction::RenameTerminal(id) => {
+                        if let Some(term) = self.terms.iter_mut().find(|t| t.id == id) {
+                            term.name = Some(name.to_string());
+                        }
+                    }
                 }
             }
             Dialog::ConfirmDelete { path } => {

@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.3
+
+- **A cleaner search.** The search and replace boxes are the same width and line up, with their buttons inside at the right; the box you're typing in is outlined and shows its cursor. The side bar no longer grows wider by itself while the search is open.
+- **Name and colour your terminals.** Double-click a terminal's tab, or right-click it, to rename it. Without a name of yours, a terminal is named by what runs in it (Claude Code names it after what it's working on). Right-click → Colour marks it with a colour.
+- **Copy path** and **Copy relative path** in the right-click menu of the file tree and of the editor's tabs.
+
 ## 0.7.2
 
 - A click on the Terminal or Problems tab no longer moves the panel: it moves only once its bar is dragged some way.

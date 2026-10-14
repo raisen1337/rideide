@@ -45,6 +45,10 @@ impl Dimensions for Size {
 pub struct Terminal {
     pub id: u64,
     pub title: String,
+    /// A name given by hand; it stays instead of the title programs set.
+    pub name: Option<String>,
+    /// A colour picked for it, as an index into the theme's terminal colours.
+    pub color: Option<usize>,
     pub request_focus: bool,
     term: Term<Listener>,
     parser: Processor,
@@ -204,6 +208,8 @@ impl Terminal {
         Self {
             id,
             title: String::new(),
+            name: None,
+            color: None,
             request_focus: true,
             term: Term::new(
                 Config {
