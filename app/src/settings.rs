@@ -638,7 +638,14 @@ impl App {
                     "Releases",
                     "What changed in each version, and the setup program for another computer.",
                     |ui| {
-                        ui.hyperlink_to("GitHub", update::RELEASES_URL);
+                        // egui's own links don't reach the browser in this build.
+                        if ui
+                            .link("GitHub")
+                            .on_hover_text(update::RELEASES_URL)
+                            .clicked()
+                        {
+                            tools::open_in_browser(update::RELEASES_URL);
+                        }
                     },
                 );
             }

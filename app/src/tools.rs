@@ -451,7 +451,7 @@ fn url_path(path: &str) -> String {
     }
 }
 
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     // Handed over as one argument, with no shell in between to read anything into it.
     #[cfg(windows)]
     let _ = std::process::Command::new("rundll32")
