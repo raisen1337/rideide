@@ -3735,6 +3735,13 @@ impl App {
                 bottom: 2,
             })
             .show(ui, |ui| {
+                // The bar is the handle for moving the panel. It is claimed before the tabs
+                // and buttons on it, so a click on those goes to them and not to the handle.
+                let bar = egui::Rect::from_min_size(
+                    ui.max_rect().min,
+                    vec2(ui.available_width(), ui.spacing().interact_size.y),
+                );
+                let drag = ui.interact(bar, ui.id().with("terminal_drag"), Sense::drag());
                 ui.horizontal(|ui| {
                     self.panel_tabs(ui);
                     ui.add_space(8.0);
@@ -3779,8 +3786,6 @@ impl App {
                     });
                 });
                 // The bar itself is the handle: drag it toward an edge of the editor area.
-                let bar = ui.min_rect();
-                let drag = ui.interact(bar, ui.id().with("terminal_drag"), Sense::drag());
                 let pointer = ui.input(|i| i.pointer.interact_pos());
                 if let (true, Some(pointer)) = (drag.dragged() || drag.drag_stopped(), pointer) {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -4537,7 +4542,7 @@ impl App {
             Panel::left("agents")
                 .resizable(true)
                 .default_size(300.0)
-                .size_range(200.0..=(size.x * 0.45).max(200.0))
+                .size_range(250.0..=(size.x * 0.45).max(250.0))
                 .show_separator_line(true)
                 .frame(theme::card(theme::glass()))
                 .show(ui, |ui| self.agents_panel(ui));
@@ -4546,7 +4551,7 @@ impl App {
             Panel::left("side")
                 .resizable(true)
                 .default_size(280.0)
-                .size_range(160.0..=(size.x * 0.45).max(160.0))
+                .size_range(240.0..=(size.x * 0.45).max(240.0))
                 .show_separator_line(true)
                 .frame(theme::card(theme::glass()))
                 .show(ui, |ui| self.side_panel(ui));
@@ -4555,7 +4560,7 @@ impl App {
             Panel::right("chat")
                 .resizable(true)
                 .default_size(400.0)
-                .size_range(300.0..=(size.x * 0.5).max(300.0))
+                .size_range(320.0..=(size.x * 0.5).max(320.0))
                 .show_separator_line(true)
                 .frame(theme::card(theme::glass()).inner_margin(Margin::same(10)))
                 .show(ui, |ui| self.chat_ui(ui, false));
@@ -4579,10 +4584,10 @@ impl App {
                     .size_range(100.0..=tall),
                 TermDock::Left => Panel::left("terminal_left")
                     .default_size(520.0)
-                    .size_range(120.0..=wide),
+                    .size_range(240.0..=wide.max(240.0)),
                 TermDock::Right => Panel::right("terminal_right")
                     .default_size(520.0)
-                    .size_range(120.0..=wide),
+                    .size_range(240.0..=wide.max(240.0)),
             };
             // What is left for the editor and the terminal together, before the terminal takes its part.
             self.work_area = ui.available_rect_before_wrap();

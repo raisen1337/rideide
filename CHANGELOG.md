@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.1
+
+- The Terminal and Problems tabs at the top of the panel can be clicked again; before, a click there started moving the panel.
+- Side bars can't be made narrower than their contents any more (the branch menu ran into the pull and push buttons). A very long branch name is cut short.
+
 ## 0.7.0
 
 - **Language servers.** ride now understands your code the way VS Code does, with the same programs, run on the server next to it:

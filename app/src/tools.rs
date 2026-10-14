@@ -1055,6 +1055,8 @@ impl App {
         ui.horizontal(|ui| {
             let branch = if self.git.branch.is_empty() {
                 "git".to_string()
+            } else if self.git.branch.chars().count() > 22 {
+                format!("{}…", self.git.branch.chars().take(21).collect::<String>())
             } else {
                 self.git.branch.clone()
             };
