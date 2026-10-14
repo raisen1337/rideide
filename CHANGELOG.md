@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.6
+
+- **Ctrl+ and Ctrl- zoom the window again** (Ctrl+0 goes back to 100%). The zoom stays where you leave it and matches the slider in Settings → Appearance.
+- A long message in the Claude chat wraps inside its bubble instead of pushing the whole conversation off the left edge of the panel. Short messages keep a bubble as wide as their text.
+
 ## 0.6.5
 
 - **Write to Claude while it works.** In the Claude chat you can send more messages before it has finished: press Enter, or the arrow next to Stop. The message goes out at once and shows as queued under the answer. Claude takes it in as soon as it's done with what it is doing, and it joins the conversation there.

@@ -1494,7 +1494,9 @@ impl Chat {
                                 .stroke(Stroke::new(1.0, theme::LINE()))
                                 .corner_radius(8)
                                 .inner_margin(Margin::symmetric(11, 7))
-                                .show(ui, |ui| ui.label(text));
+                                .show(ui, |ui| {
+                                    bubble_text(ui, RichText::new(text.as_str()))
+                                });
                             glow(ui, &bubble.response, 8);
                         });
                         if checkpoint.is_none() || !idle {
@@ -1631,7 +1633,7 @@ impl Chat {
                             .corner_radius(8)
                             .inner_margin(Margin::symmetric(11, 7))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(&queued.text).color(theme::COMMENT()));
+                                bubble_text(ui, RichText::new(&queued.text).color(theme::COMMENT()));
                             });
                         let note = match queued.images.len() {
                             0 => "queued: Claude reads it once it's done with this step".to_string(),
@@ -2301,7 +2303,10 @@ mod tests {
                 _ => "other".into(),
             })
             .collect();
-        assert_eq!(tail, ["user end with BANANA", "checkpoint m2", "claude BANANA"]);
+        assert_eq!(
+            tail,
+            ["user end with BANANA", "checkpoint m2", "claude BANANA"]
+        );
 
         // Stopped with messages waiting: they come back to the input box.
         chat.begin_turn("one more", None);
@@ -2371,4 +2376,20 @@ fn ago(secs: u64) -> String {
         3600..=86_399 => format!("{} h ago", secs / 3600),
         _ => format!("{} days ago", secs / 86_400),
     }
+}
+
+/// A message bubble's text: as wide as its longest line, up to the room there is, wrapped
+/// beyond that, and read from the left even in a bubble placed at the right.
+fn bubble_text(ui: &mut Ui, text: RichText) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let natural = ui
+        .painter()
+        .layout_no_wrap(text.text().to_string(), font, Color32::WHITE)
+        .size()
+        .x;
+    let width = (natural + 1.0).min(ui.available_width());
+    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.set_max_width(width);
+        ui.add(egui::Label::new(text).wrap());
+    });
 }

@@ -316,9 +316,20 @@ fn pick_text(ui: &mut Ui, salt: &str, value: &mut String, options: &[(&str, &str
 impl App {
     /// Applies what the settings ask of the window itself. Called every frame; cheap when nothing changed.
     pub(super) fn apply_settings(&mut self, ctx: &Context) {
-        let zoom = with(|s| s.zoom);
-        if (ctx.zoom_factor() - zoom).abs() > 0.001 {
-            ctx.set_zoom_factor(zoom);
+        let wanted = with(|s| s.zoom);
+        let shown = ctx.zoom_factor();
+        if (wanted - self.applied_zoom).abs() > 0.001 {
+            // Changed in Settings (or the first frame): put on the window.
+            ctx.set_zoom_factor(wanted);
+            self.applied_zoom = wanted;
+        } else if (shown - self.applied_zoom).abs() > 0.001 {
+            // Ctrl+ / Ctrl- / Ctrl+0 changed it: kept, and remembered for next time.
+            let zoom = shown.clamp(0.7, 2.0);
+            if (zoom - shown).abs() > 0.001 {
+                ctx.set_zoom_factor(zoom);
+            }
+            change(|s| s.zoom = zoom);
+            self.applied_zoom = zoom;
         }
     }
 

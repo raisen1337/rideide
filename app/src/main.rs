@@ -587,6 +587,8 @@ struct App {
     themes: themes::Themes,
     palette: palette::Palette,
     settings_section: usize,
+    /// The zoom last put on the window, to tell a change in Settings from Ctrl+/Ctrl-.
+    applied_zoom: f32,
     git: tools::Git,
     monitor: tools::Monitor,
     /// Ports of the host made reachable on this computer.
@@ -1339,6 +1341,7 @@ impl App {
             themes: themes::Themes::default(),
             palette: palette::Palette::default(),
             settings_section: 0,
+            applied_zoom: 0.0,
             git: tools::Git::default(),
             monitor: tools::Monitor::default(),
             forwards: Vec::new(),
