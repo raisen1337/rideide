@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["proto", "agent", "app", "installer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+# The UI is unusable at opt-level 0, so keep dependencies optimized in dev builds.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,13 @@
+[package]
+name = "ride-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ride-proto = { path = "../proto" }
+portable-pty = "0.9"
+ignore = "0.4"
+regex = "1"
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+serde_json = "1"

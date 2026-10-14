@@ -1,0 +1,13 @@
+[package]
+name = "ride-setup"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+flate2 = "1"
+rfd = "0.17"
+
+[build-dependencies]
+winresource = "0.1"
+flate2 = "1"

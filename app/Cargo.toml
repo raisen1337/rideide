@@ -1,0 +1,30 @@
+[package]
+name = "ride"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ride-proto = { path = "../proto" }
+# The same backend the remote host runs, used in-process for folders on this computer.
+ride-agent = { path = "../agent" }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "persistence"] }
+alacritty_terminal = "0.26"
+rfd = "0.17"
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+serde = { workspace = true }
+serde_json = "1"
+rodio = "0.23.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+ureq = "3.4.2"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+raw-window-handle = "0.6"
+# Reads a picture from the clipboard, for pasting one into a chat.
+arboard = "3"
+resvg = { version = "0.48", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
+
+[build-dependencies]
+winresource = "0.1"
