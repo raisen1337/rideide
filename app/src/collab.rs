@@ -104,7 +104,7 @@ impl App {
         }
         if self.live.proc.is_none() {
             let proc = self.request(Request::ProcOpen {
-                command: "exec \"$HOME/.cache/ride/ride-agent\" collab".into(),
+                command: share::COLLAB.into(),
                 cwd: self.root.clone(),
             });
             self.live.proc = Some(proc);

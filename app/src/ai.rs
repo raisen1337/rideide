@@ -168,7 +168,7 @@ impl App {
         } else {
             ""
         };
-        if !self.online() {
+        if !self.online() || self.guest() {
             return;
         }
         // Default permission mode: it can read and search, but not change anything.
@@ -196,7 +196,8 @@ impl App {
     /// Runs a command on the host; its output goes to the job's handler. The process id,
     /// for feeding it input.
     pub(super) fn start_shell_job(&mut self, kind: JobKind, command: String) -> Option<u64> {
-        if !self.online() {
+        // A guest of a live session can't run anything on the host's server.
+        if !self.online() || self.guest() {
             return None;
         }
         let proc = self.request(Request::ProcOpen {

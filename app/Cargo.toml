@@ -19,6 +19,10 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # platform-verifier and win-system-proxy: updates still download behind a company proxy.
 ureq = { version = "3.4.2", features = ["platform-verifier", "win-system-proxy"] }
 sha2 = "0.10"
+# Live sessions: the two copies of ride meet directly, over QUIC.
+iroh = "1.3.0"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
+postcard = { workspace = true }
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 raw-window-handle = "0.6"
 # Reads a picture from the clipboard, for pasting one into a chat.

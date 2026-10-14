@@ -243,6 +243,16 @@ impl Conn {
         })
     }
 
+    /// A link made of two channels: requests go out on `tx`, answers come in on `events`.
+    /// It ends when the `Conn` is dropped, which drops `tx`.
+    pub fn from_channels(tx: Sender<ClientMsg>, events: Receiver<ConnEvent>) -> Conn {
+        Conn {
+            child: None,
+            tx,
+            events,
+        }
+    }
+
     /// Sends a request and returns the id its responses will carry.
     pub fn request(&mut self, req: Request) -> u64 {
         // One counter for all connections: with several open at once, an id then names

@@ -3,6 +3,14 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.0
+
+- **Live sessions.** Share the folder you have open with people who can't get onto the server. Start one from the connection menu at the top ("Share this folder in a live session") or from Ctrl+Shift+P. You get a session ID to send them.
+- To join, paste the ID where you'd type a host, or use "Join a live session…". The host sees your name and picture and lets you in or not.
+- Guests see the shared folder and edit its files together with the host, cursors and all. They can't use the terminal, Git, Claude or anything outside that folder: their requests pass through the host's ride, which checks each one.
+- The host can remove someone, or stop the session, which sends everyone out. A new session gets a new ID.
+- The two copies of ride connect directly, encrypted. When no direct path can be found, the traffic goes through a public relay, still encrypted.
+
 ## 0.5.1
 
 - **Chats from the terminal in History.** The chat's History now also lists the conversations you had with Claude Code in a terminal, in the open folder. Open one to read it, and send a message to carry on with it.

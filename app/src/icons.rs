@@ -25,6 +25,8 @@ pub const PLUG: char = '\u{eb2d}';
 pub const DISCONNECT: char = '\u{ead0}';
 pub const TOOLS: char = '\u{eb6d}';
 pub const STOP: char = '\u{ead7}';
+/// A live session.
+pub const BROADCAST: char = '\u{eac2}';
 pub const SIGN_IN: char = '\u{ea6f}';
 pub const ATTACH: char = '\u{ec34}';
 pub const ARROW_UP: char = '\u{eaa1}';

@@ -42,6 +42,10 @@ enum Command {
     CompareWith,
     /// Turns the palette into a search of the Marketplace.
     SearchMarketplace,
+    /// Starts a live session on the folder open, or shows the one on.
+    ShareSession,
+    StopSession,
+    JoinSession,
     Compare(String),
 }
 
@@ -283,6 +287,35 @@ impl App {
                 Command::Disconnect,
             );
         }
+        if online && !self.guest() && !chat::local_shell() {
+            if self.share.is_some() {
+                add(
+                    icons::BROADCAST,
+                    "Live: Show the session",
+                    "",
+                    Command::ShareSession,
+                );
+                add(
+                    icons::BROADCAST,
+                    "Live: Stop the session",
+                    "",
+                    Command::StopSession,
+                );
+            } else {
+                add(
+                    icons::BROADCAST,
+                    "Live: Share this folder in a live session",
+                    "",
+                    Command::ShareSession,
+                );
+            }
+        }
+        add(
+            icons::BROADCAST,
+            "Live: Join a live session…",
+            "",
+            Command::JoinSession,
+        );
         add(
             icons::PALETTE,
             "Appearance: Toggle glass window",
@@ -413,6 +446,9 @@ impl App {
                 }
             }
             Command::GoToSymbol => return self.open_palette_with("@"),
+            Command::ShareSession => self.share_start(ctx),
+            Command::StopSession => self.share_stop(),
+            Command::JoinSession => self.join_input = Some(String::new()),
             Command::SearchMarketplace => {
                 self.open_palette(false);
                 self.palette.market_mode = true;

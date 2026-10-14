@@ -8,7 +8,7 @@ use super::*;
 /// Everything that belongs to one connection.
 pub(super) struct Session {
     pub(super) uid: u64,
-    link: Link,
+    pub(super) link: Link,
     pub(super) host: String,
     saved: Option<(String, String)>,
     open_on_connect: Option<String>,
@@ -159,6 +159,7 @@ impl App {
         swap(&mut self.restore_active, &mut other.restore_active);
         swap(&mut self.restore_host, &mut other.restore_host);
         chat::set_local_shell(self.host.trim() == LOCAL);
+        share::set_guest(share::is_session_id(&self.host));
     }
 
     /// Runs `work` with one of the waiting connections in the app's place.
@@ -578,12 +579,13 @@ impl App {
                 .strong()
                 .color(theme::COMMENT()),
         );
-        let _ = ui.selectable_label(true, format!("{}   {}", icons::REMOTE, self.host.trim()));
+        let shown = |host: &str| share::label(host).unwrap_or_else(|| host.trim().to_string());
+        let _ = ui.selectable_label(true, format!("{}   {}", icons::REMOTE, shown(&self.host)));
         for (index, session) in self.sessions.iter().enumerate() {
             if ui
                 .selectable_label(
                     false,
-                    format!("{}   {}", icons::REMOTE, session.host.trim()),
+                    format!("{}   {}", icons::REMOTE, shown(&session.host)),
                 )
                 .clicked()
             {
@@ -605,11 +607,27 @@ impl App {
             self.side = Side::Files;
             self.show_side = true;
         }
+        let (mut host_session, mut join) = (false, false);
+        if !self.guest() && !chat::local_shell() {
+            let label = if self.share.is_some() {
+                "Show the live session"
+            } else {
+                "Share this folder in a live session"
+            };
+            host_session = menu_item(ui, icons::BROADCAST, label);
+        }
+        join = menu_item(ui, icons::BROADCAST, "Join a live session…") || join;
         if menu_item(ui, icons::DISCONNECT, "Close this connection") {
             close = true;
         }
-        if switch.is_some() || add.is_some() || close {
+        if switch.is_some() || add.is_some() || close || host_session || join {
             ui.close();
+        }
+        if host_session {
+            self.share_start(ui.ctx());
+        }
+        if join {
+            self.join_input = Some(String::new());
         }
         if let Some(index) = switch {
             self.switch_session(index);

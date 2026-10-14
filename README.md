@@ -68,8 +68,20 @@ There is no API key to paste into ride.
   on the server (`luac`, `node`, `python3`, `php`, `bash`).
 - Compare any two files side by side.
 - `.env` files open as a table, with the values hidden until you show them.
-- The Command Palette (Ctrl+Shift+P) also searches the VS Code Marketplace for themes and file icons,
+- The Command Palette (Ctrl+Shift+P) can search the VS Code Marketplace for themes and file icons,
   and previews them before you install one.
+
+## Working together
+
+- **Live sessions.** Share the folder you have open with people who have no access to the server.
+  You get a session ID to send them; they paste it into ride, you let each one in, and you edit
+  the files together. Their requests go through your ride, which only lets them reach files in
+  that folder: no terminal, Git or Claude. Stop the session and everyone is out.
+- The two copies of ride connect directly to each other over an encrypted link
+  ([iroh](https://github.com/n0-computer/iroh)). When no direct path can be found, the traffic
+  goes through a public relay, still encrypted end to end.
+- People who log in to the same server with the same account edit together without a session.
+- Signing in with GitHub (Settings → Account) puts your name and picture on your cursor.
 
 ## Git, server and databases
 

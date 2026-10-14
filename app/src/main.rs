@@ -21,6 +21,7 @@ mod panes;
 mod preview;
 mod sessions;
 mod settings;
+mod share;
 mod splash;
 mod term;
 mod theme;
@@ -479,6 +480,9 @@ fn link_request(link: &mut Link, req: Request) -> u64 {
 
 /// Makes sure the chat has a `claude` process running with its current settings.
 fn ensure_proc(link: &mut Link, cwd: &str, chat: &mut Chat, started_with: &mut Option<String>) {
+    if share::guest() {
+        return;
+    }
     let config = chat.config();
     if let Some(proc) = chat.proc.filter(|_| started_with.as_ref() != Some(&config)) {
         link_request(link, Request::ProcClose { proc });
@@ -572,6 +576,10 @@ struct App {
     outline_filter: String,
     db: db::Db,
     github: github::GitHub,
+    /// The live session hosted here, if one is on.
+    share: Option<share::Share>,
+    /// The box for joining a session, while it is open.
+    join_input: Option<String>,
     live: collab::Live,
     /// The app's clock (seconds), as of this frame.
     now: f64,
@@ -1316,6 +1324,8 @@ impl App {
             outline_filter: String::new(),
             db: db::Db::default(),
             github: github::GitHub::load(),
+            share: None,
+            join_input: None,
             live: collab::Live::default(),
             now: 0.0,
             whats_new: {
@@ -1617,12 +1627,26 @@ impl App {
         }
         self.disconnect();
         chat::set_local_shell(host == LOCAL);
+        share::set_guest(share::is_session_id(&host));
+        let identity = if share::is_session_id(&host) {
+            match self.join_identity() {
+                Ok(peer) => Some(peer),
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let (tx, rx) = channel();
         let status = Arc::new(Mutex::new(String::new()));
         let (ctx, thread_status) = (ctx.clone(), status.clone());
         thread::spawn(move || {
             let wake = ctx.clone();
-            let result = if host == LOCAL {
+            let result = if let Some(me) = identity {
+                share::join(&host, me, &thread_status, move || wake.request_repaint())
+            } else if host == LOCAL {
                 Conn::connect_local(move || wake.request_repaint())
             } else {
                 Conn::connect(&host, &thread_status, move || wake.request_repaint())
@@ -1661,6 +1685,7 @@ impl App {
         self.poll_link(ctx);
         self.poll_uploads(ctx);
         self.poll_sessions(ctx);
+        self.share_tick(ctx);
         self.session_hooks(ctx);
         self.flush_chats();
         self.schedule_tick(ctx);
@@ -1696,7 +1721,12 @@ impl App {
         }
         for event in events {
             match event {
-                ConnEvent::Msg(msg) => self.handle(msg, ctx),
+                ConnEvent::Msg(msg) => {
+                    // Answers for a live session's guests go to them.
+                    if let Some(msg) = self.share_take(msg) {
+                        self.handle(msg, ctx);
+                    }
+                }
                 ConnEvent::Closed(reason) => {
                     self.disconnect();
                     self.status = format!("Disconnected: {reason}");
@@ -1827,10 +1857,18 @@ impl App {
                     _ => home,
                 };
                 self.open_root(root);
-                self.set_up_host();
+                if !self.guest() {
+                    self.set_up_host();
+                }
                 match self.open_on_connect.take() {
                     // Asked to open a particular file: straight to it.
                     Some(file) => self.open_file(file, None),
+                    // A guest starts with the host's folder as it is, and without the
+                    // chat or terminal, which a guest has no use of.
+                    None if self.guest() => {
+                        self.show_chat = false;
+                        self.show_term = false;
+                    }
                     None => {
                         self.restore_session();
                         self.daily_catchup();
@@ -2199,6 +2237,9 @@ impl App {
         if !self.online() {
             return;
         }
+        if self.guest() {
+            return;
+        }
         let (cols, rows) = self.terms.first().map_or((100, 24), |t| t.size());
         let id = self.request(Request::TermOpen {
             cols,
@@ -2259,7 +2300,7 @@ impl App {
 
     /// Starts the side chat's process, if it isn't running with the current settings.
     fn chat_wake(&mut self) {
-        if !self.online() {
+        if !self.online() || self.guest() {
             return;
         }
         // Mode, model and effort are fixed when the process starts.
@@ -2279,6 +2320,12 @@ impl App {
 
     fn chat_send(&mut self, text: String) {
         if !self.online() {
+            return;
+        }
+        if self.guest() {
+            self.chat.note_error(
+                "Claude isn't available to guests of a live session: it would run on the host's account.",
+            );
             return;
         }
         self.chat_wake();
@@ -2923,7 +2970,7 @@ impl App {
                         let edit = ui.add(
                             TextEdit::singleline(&mut self.host)
                                 .desired_width(room)
-                                .hint_text("host or user@host"),
+                                .hint_text("host, user@host or session ID"),
                         );
                         let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                         if !self.hosts.is_empty() {
@@ -2948,7 +2995,8 @@ impl App {
                     }
                     Link::Connecting { status, .. } => {
                         ui.spinner();
-                        let text = format!("{}: {}", self.host, status.lock().unwrap());
+                        let shown = share::label(&self.host).unwrap_or_else(|| self.host.clone());
+                        let text = format!("{shown}: {}", status.lock().unwrap());
                         ui.add(egui::Label::new(text).truncate());
                         if ui.button("Cancel").clicked() {
                             self.disconnect();
@@ -2959,9 +3007,11 @@ impl App {
                             0 => String::new(),
                             n => format!("  +{n}"),
                         };
+                        let shown = share::label(&self.host)
+                            .unwrap_or_else(|| self.host.trim().to_string());
                         let name = pieces(&[
                             (&format!("{}  ", icons::REMOTE), theme::STRING()),
-                            (self.host.trim(), theme::TEXT()),
+                            (&shown, theme::TEXT()),
                             (&more, theme::COMMENT()),
                         ]);
                         let chip = egui::Button::new(name)
@@ -3136,6 +3186,7 @@ impl App {
                     }
                     ui.add_space(8.0);
                 }
+                self.share_pill(ui);
                 if let Some(version) = self.updater.ready().map(str::to_string) {
                     let text = format!("{}  Restart to update to {version}", icons::REFRESH);
                     let label = RichText::new(text).small().color(theme::ACCENT());
@@ -3248,6 +3299,15 @@ impl App {
                 self.tree_drag(ui);
             }
             Side::Changes => self.changes_panel(ui),
+            Side::Git | Side::Server | Side::Database if self.guest() => {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Not available in a live session: only the files of the shared folder are.",
+                    )
+                    .color(theme::COMMENT()),
+                );
+            }
             Side::Git => self.git_panel(ui),
             Side::Server => self.monitor_panel(ui),
             Side::Outline => self.outline_panel(ui),
@@ -4376,6 +4436,8 @@ impl eframe::App for App {
             self.detached_windows(&ctx);
             self.dialogs(&ctx);
             self.agents_widget(&ctx);
+            self.share_window(&ctx);
+            self.join_window(&ctx);
             self.palette_window(&ctx);
             resize_edges(&ctx);
             return;
@@ -4456,6 +4518,8 @@ impl eframe::App for App {
         if !agents_view {
             self.agents_widget(&ctx);
         }
+        self.share_window(&ctx);
+        self.join_window(&ctx);
         self.palette_window(&ctx);
         resize_edges(&ctx);
     }
@@ -4483,14 +4547,17 @@ impl eframe::App for App {
         storage.set_string("win_max", self.maximized.to_string());
         // The window state an older version stored; ride keeps its own now (above).
         storage.remove_string("window");
-        storage.set_string("host", self.host.trim().to_string());
-        storage.set_string("root", self.root.clone());
+        // A live session joined isn't somewhere to go back to: the last real host stays.
+        if !self.guest() {
+            storage.set_string("host", self.host.trim().to_string());
+            storage.set_string("root", self.root.clone());
+            storage.set_string("connected", self.online().to_string());
+        }
         storage.set_string("show_chat", self.show_chat.to_string());
         storage.set_string("theme", self.themes.current.clone());
         storage.set_string("glass", self.themes.glass.to_string());
         storage.set_string("icon_set", self.icon_sets.current.clone());
         storage.set_string("term_dock", self.term_dock.name().to_string());
-        storage.set_string("connected", self.online().to_string());
         storage.set_string("catchup_day", self.catchup_day.to_string());
         // Seen once it has been closed; until then it shows again at the next start.
         if self.whats_new.is_empty() {
