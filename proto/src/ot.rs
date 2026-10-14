@@ -82,9 +82,22 @@ impl TextOp {
     /// The operation turning `old` into `new`: what lies between their common start and
     /// common end is replaced.
     pub fn diff(old: &str, new: &str) -> Self {
+        Self::diff_near(old, new, usize::MAX)
+    }
+
+    /// The same, with the change placed no later than `near` where it could have been made
+    /// in more than one place: a letter typed next to the same letter, an indented line
+    /// added above another. Given where the cursor was, the change is where it was typed,
+    /// so a cursor carried along by it lands where the typing did.
+    pub fn diff_near(old: &str, new: &str, near: usize) -> Self {
         let a: Vec<char> = old.chars().collect();
         let b: Vec<char> = new.chars().collect();
-        let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        let prefix = a
+            .iter()
+            .zip(&b)
+            .take_while(|(x, y)| x == y)
+            .count()
+            .min(near);
         let max_suffix = a.len().min(b.len()) - prefix;
         let suffix = a
             .iter()
@@ -310,6 +323,13 @@ impl Client {
         self.outstanding.clone().map(|op| (self.revision, op))
     }
 
+    /// A place in the broker's text (after every edit it has passed on) as a place in the
+    /// text here, which also has this side's edits not yet taken in.
+    pub fn to_local(&self, at: usize) -> usize {
+        let at = self.outstanding.as_ref().map_or(at, |op| op.map(at, false));
+        self.buffer.as_ref().map_or(at, |op| op.map(at, false))
+    }
+
     /// An edit from someone else. Returns it as it applies to the text here.
     pub fn remote(&mut self, op: TextOp) -> Result<TextOp, String> {
         self.revision += 1;
@@ -353,6 +373,10 @@ pub enum ToBroker {
         doc: String,
         rev: u64,
         op: TextOp,
+        /// The sender's cursor and selection end in the text the edit makes, so the others
+        /// see the cursor move with the text, in one step.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<(usize, usize)>,
     },
     Cursor {
         doc: String,
@@ -381,6 +405,11 @@ pub enum FromBroker {
     Op {
         doc: String,
         op: TextOp,
+        /// Who made it, and where their cursor is after it (in the broker's text).
+        #[serde(default)]
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<(usize, usize)>,
     },
     Joined {
         doc: String,
@@ -406,6 +435,112 @@ pub enum FromBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A types quickly while edits are still on their way (acknowledgements come late);
+    /// B watches. A's cursor, as B places it from each edit, only ever moves forward and
+    /// ends where A's is — however many letters repeat.
+    #[test]
+    fn a_cursor_carried_with_the_edits_never_steps_back() {
+        let start = "    hello\n    world\n";
+        let mut a_text = start.to_string();
+        let mut a_cursor = 9; // after "    hello"
+        let mut a = Client::new(0);
+        let mut b = Client::new(0);
+        let mut b_text = start.to_string();
+        let mut b_sees = a_cursor;
+        // What the broker passes on to B, and the acks owed to A, in order.
+        let (mut history, mut server) = (Vec::<TextOp>::new(), start.to_string());
+        let mut to_b: Vec<(TextOp, (usize, usize))> = Vec::new();
+        let mut acks = 0;
+        let mut in_flight: Vec<(u64, TextOp, (usize, usize))> = Vec::new();
+        let typed = ["o", "o", "\n", " ", " ", " ", " ", "l", "l", "o", "\n"];
+        for (step, piece) in typed.iter().enumerate() {
+            let old = a_text.clone();
+            let mut chars: Vec<char> = a_text.chars().collect();
+            for (i, c) in piece.chars().enumerate() {
+                chars.insert(a_cursor + i, c);
+            }
+            a_text = chars.into_iter().collect();
+            let near = a_cursor;
+            a_cursor += piece.chars().count();
+            let op = TextOp::diff_near(&old, &a_text, near);
+            if let Some((rev, op)) = a.local(op).unwrap() {
+                in_flight.push((rev, op, (a_cursor, a_cursor)));
+            }
+            // Every other keystroke, the broker catches up with what A sent.
+            if step % 2 == 1 {
+                for (rev, op, at) in in_flight.drain(..) {
+                    let mut op = op;
+                    let mut at = at;
+                    for done in &history[rev as usize..] {
+                        let (mine, theirs) = TextOp::transform(&op, done).unwrap();
+                        op = mine;
+                        at = (theirs.map(at.0, false), theirs.map(at.1, false));
+                    }
+                    server = op.apply(&server).unwrap();
+                    history.push(op.clone());
+                    to_b.push((op, at));
+                    acks += 1;
+                }
+                // B takes in what reached it.
+                for (op, at) in to_b.drain(..) {
+                    let op = b.remote(op).unwrap();
+                    b_text = op.apply(&b_text).unwrap();
+                    let placed = b.to_local(at.0);
+                    // Carried along by the edit alone, the cursor lands there too: the edit
+                    // was placed where it was typed.
+                    assert_eq!(op.map(b_sees, false), placed);
+                    assert!(
+                        placed >= b_sees,
+                        "A's cursor stepped back: {b_sees} → {placed}"
+                    );
+                    b_sees = placed;
+                }
+                // A hears its edits were taken in; the next waiting one goes out.
+                for _ in 0..std::mem::take(&mut acks) {
+                    if let Some((rev, op)) = a.ack() {
+                        in_flight.push((rev, op, (a_cursor, a_cursor)));
+                    }
+                }
+            }
+        }
+        // The rest goes through.
+        while !in_flight.is_empty() {
+            for (rev, op, at) in in_flight.drain(..).collect::<Vec<_>>() {
+                assert_eq!(rev as usize, history.len());
+                server = op.apply(&server).unwrap();
+                history.push(op.clone());
+                let op = b.remote(op).unwrap();
+                b_text = op.apply(&b_text).unwrap();
+                let placed = b.to_local(at.0);
+                assert!(placed >= b_sees);
+                b_sees = placed;
+                if let Some((rev, op)) = a.ack() {
+                    in_flight.push((rev, op, (a_cursor, a_cursor)));
+                }
+            }
+        }
+        assert_eq!(b_text, a_text);
+        assert_eq!(server, a_text);
+        assert_eq!(b_sees, a_cursor);
+    }
+
+    #[test]
+    fn a_letter_typed_next_to_the_same_letter_is_where_it_was_typed() {
+        // "hel|lo" + 'l': plain diff puts the new 'l' after both, diff_near at the cursor.
+        let op = TextOp::diff_near("hello", "helllo", 3);
+        assert_eq!(op.apply("hello").unwrap(), "helllo");
+        assert_eq!(op.map(3, false), 4);
+        // Enter on an indented line above another indented line.
+        let (old, new) = ("    a\n    b", "    a\n    \n    b");
+        let op = TextOp::diff_near(old, new, 5);
+        assert_eq!(op.apply(old).unwrap(), new);
+        assert_eq!(op.map(5, false), 10);
+        // Backspace over the first of two equal letters.
+        let op = TextOp::diff_near("xaay", "xay", 1);
+        assert_eq!(op.apply("xaay").unwrap(), "xay");
+        assert_eq!(op.map(2, false), 1);
+    }
 
     #[test]
     fn a_diff_turns_one_text_into_the_other() {

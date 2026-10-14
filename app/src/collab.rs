@@ -38,6 +38,8 @@ struct Doc {
     cursor_sent: (usize, usize),
     /// When the cursor was last sent; it goes at most every `CURSOR_EVERY`.
     cursor_time: Option<std::time::Instant>,
+    /// The cursor and selection end at the last look, for placing the next edit.
+    cursor_seen: (usize, usize),
 }
 
 /// Cursor moves are sent this often at most: smooth enough to watch, without a message
@@ -153,6 +155,7 @@ impl App {
                     revision_seen: revision,
                     cursor_sent: (usize::MAX, usize::MAX),
                     cursor_time: None,
+                    cursor_seen: (0, 0),
                 },
             );
             self.live_send(&ToBroker::Join {
@@ -203,11 +206,18 @@ impl App {
         };
         let mut out = Vec::new();
         let mut rejoin = false;
+        let cursor = (
+            tab.buf.offset_of(tab.buf.cursor),
+            tab.buf.offset_of(tab.buf.anchor),
+        );
         if doc.revision_seen != tab.buf.revision {
             doc.revision_seen = tab.buf.revision;
             let text = tab.buf.plain_text();
             if text != doc.shadow {
-                let op = TextOp::diff(&doc.shadow, &text);
+                // Placed where the cursor was or is, whichever comes first: where the
+                // typing happened, even next to the same letters.
+                let near = doc.cursor_seen.0.min(doc.cursor_seen.1).min(cursor.0);
+                let op = TextOp::diff_near(&doc.shadow, &text, near);
                 doc.shadow = text;
                 // The others' cursors move with what was typed here, as they would on
                 // their own screens, rather than waiting for them to say where they are.
@@ -218,16 +228,21 @@ impl App {
                     }
                 }
                 match doc.client.local(op) {
-                    Ok(Some((rev, op))) => out.push(ToBroker::Op {
-                        doc: tab.path.clone(),
-                        rev,
-                        op,
-                    }),
+                    Ok(Some((rev, op))) => {
+                        out.push(ToBroker::Op {
+                            doc: tab.path.clone(),
+                            rev,
+                            op,
+                            at: Some(cursor),
+                        });
+                        doc.cursor_sent = cursor;
+                    }
                     Ok(None) => {}
                     Err(_) => rejoin = true,
                 }
             }
         }
+        doc.cursor_seen = cursor;
         if rejoin {
             out.push(self.live_rejoin_msg(index));
         }
@@ -343,14 +358,22 @@ impl App {
             }
             FromBroker::Ack { .. } => {
                 if let Some((rev, op)) = doc.client.ack() {
+                    // Everything typed is in the text sent now, so the cursor here is
+                    // where it will be in the text this edit makes.
+                    let cursor = (
+                        tab.buf.offset_of(tab.buf.cursor),
+                        tab.buf.offset_of(tab.buf.anchor),
+                    );
+                    doc.cursor_sent = cursor;
                     send.push(ToBroker::Op {
                         doc: path.clone(),
                         rev,
                         op,
+                        at: Some(cursor),
                     });
                 }
             }
-            FromBroker::Op { op, .. } => {
+            FromBroker::Op { op, id, at, .. } => {
                 let applied = doc
                     .client
                     .remote(op)
@@ -365,6 +388,11 @@ impl App {
                                 *at = op.map(*at, false);
                                 *anchor = op.map(*anchor, false);
                             }
+                        }
+                        // The one who made it says where their cursor is now, in the same
+                        // step as their text.
+                        if let (Some((a, b)), Some(other)) = (at, doc.others.get_mut(&id)) {
+                            other.at = Some((doc.client.to_local(a), doc.client.to_local(b)));
                         }
                     }
                     Err(_) => {
@@ -391,8 +419,10 @@ impl App {
                 doc.others.remove(&id);
             }
             FromBroker::Cursor { id, at, anchor, .. } => {
+                // A place in the shared text, which here also has what was typed and isn't
+                // taken in yet.
                 if let Some(other) = doc.others.get_mut(&id) {
-                    other.at = Some((at, anchor));
+                    other.at = Some((doc.client.to_local(at), doc.client.to_local(anchor)));
                 }
             }
             FromBroker::Saved { id, .. } => {

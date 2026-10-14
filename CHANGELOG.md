@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.3
+
+- **Live cursors move with the typing.** Someone's cursor no longer steps back and then forward while they type. Each edit now carries the typist's cursor, so it moves in the same step as their text.
+- Typing next to the same character (spaces in an indent, a doubled letter, Enter above an indented line) is placed where it was typed, so everyone else's cursors stay where they should.
+- Both people need this version: ride on the server switches to the new way of sharing edits.
+
 ## 0.6.2
 
 - **Steadier cursors in live editing.** Someone else's cursor no longer jumps back and forth while they type or move around: a cursor is sent only once the text it points into has reached the others, the others' cursors move with what you type, and cursor moves go out at most 25 times a second. A file open in two tabs no longer makes your cursor flicker between them for the others.

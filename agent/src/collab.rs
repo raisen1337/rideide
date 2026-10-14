@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 /// Versioned, so ride versions that speak differently never share a broker.
 fn socket_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cache/ride/collab-v1.sock"))
+    Some(PathBuf::from(home).join(".cache/ride/collab-v2.sock"))
 }
 
 /// `ride-agent collab`: the app's line to the broker.
@@ -177,7 +177,7 @@ impl State {
                 );
             }
             ToBroker::Leave { doc } => self.leave(&doc, id),
-            ToBroker::Op { doc, rev, op } => {
+            ToBroker::Op { doc, rev, op, at } => {
                 let Some(d) = self
                     .docs
                     .get_mut(&doc)
@@ -186,12 +186,17 @@ impl State {
                     return;
                 };
                 // Past the edits it didn't know of, then onto the text.
-                let mut op = op;
+                let (mut op, mut at) = (op, at);
                 let mut ok = rev as usize <= d.history.len();
                 if ok {
                     for done in &d.history[rev as usize..] {
                         match TextOp::transform(&op, done) {
-                            Ok((mine, _)) => op = mine,
+                            Ok((mine, theirs)) => {
+                                op = mine;
+                                // The cursor was in the sender's text; the edit it didn't
+                                // know of moves it along like the rest of that text.
+                                at = at.map(|(a, b)| (theirs.map(a, false), theirs.map(b, false)));
+                            }
                             Err(_) => {
                                 ok = false;
                                 break;
@@ -211,6 +216,8 @@ impl State {
                             &FromBroker::Op {
                                 doc: doc.clone(),
                                 op,
+                                id,
+                                at,
                             },
                         );
                     }
@@ -392,6 +399,7 @@ mod tests {
                 doc: "/f".into(),
                 rev: 0,
                 op: TextOp::diff("one", "one!"),
+                at: Some((4, 4)),
             },
         );
         s.handle(
@@ -400,12 +408,20 @@ mod tests {
                 doc: "/f".into(),
                 rev: 0,
                 op: TextOp::diff("one", "the one"),
+                at: Some((4, 4)),
             },
         );
         assert_eq!(s.docs["/f"].text, "the one!");
+        // B's cursor, after "the " in its text, is still there in the shared one.
         assert!(matches!(
             &read(&rx_a)[..],
-            [FromBroker::Ack { .. }, FromBroker::Op { .. }]
+            [
+                FromBroker::Ack { .. },
+                FromBroker::Op {
+                    at: Some((4, 4)),
+                    ..
+                }
+            ]
         ));
         assert!(matches!(
             &read(&rx_b)[..],
