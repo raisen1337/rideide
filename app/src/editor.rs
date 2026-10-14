@@ -45,6 +45,11 @@ pub struct EditorState {
     /// at `blame_revision`.
     pub blame: Vec<String>,
     pub blame_revision: Option<u64>,
+    /// A `.env` file shown as plain text rather than as its table; values shown in the
+    /// table, all of them or by row.
+    pub env_as_text: bool,
+    pub env_show_all: bool,
+    pub env_revealed: BTreeSet<usize>,
     /// First lines of the folded blocks.
     pub folded: BTreeSet<usize>,
     /// For each line, the last line of the block starting there.

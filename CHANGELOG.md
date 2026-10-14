@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.3.2
+
+- **.env editor.** A `.env` file (also `.env.local`, `production.env` and the like) opens as a table of keys and values. The values stay hidden until you show one, or all of them. You can add and remove variables, and comments and order are kept. "Edit as text" switches to the plain file and back.
+- Opening the same file twice in quick succession no longer gives it two tabs.
+
 ## 0.3.1
 
 - **Branches.** The branch name at the top of the Git tab is now a menu: switch to another branch, check out a remote one, or create a new branch from where you are.

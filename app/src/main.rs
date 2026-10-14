@@ -6,6 +6,7 @@ mod chat;
 mod conn;
 mod diff;
 mod editor;
+mod envfile;
 mod extras;
 mod highlight;
 mod icons;
@@ -2009,6 +2010,14 @@ impl App {
                 file_name(&path),
                 human_size(size)
             );
+            return;
+        }
+        // Already on its way (opened twice before it arrived): one tab is enough.
+        let loading = self
+            .pending
+            .values()
+            .any(|p| matches!(p, Pending::Open { path: p, .. } if *p == path));
+        if loading {
             return;
         }
         self.request_then(
@@ -4083,6 +4092,21 @@ impl App {
 
 /// A tab's content: the editor for text, a preview for everything else.
 fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
+    if tab.preview.is_none() && envfile::is_env_file(&tab.path) {
+        if !tab.view.env_as_text {
+            envfile::show(ui, tab);
+            return None;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            if ui
+                .small_button(format!("{}  Edit as table", icons::KEY))
+                .clicked()
+            {
+                tab.view.env_as_text = false;
+            }
+        });
+    }
     if tab.preview.is_none() && settings::with(|s| s.breadcrumbs) {
         nav::breadcrumbs(ui, tab, root);
     }
