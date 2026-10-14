@@ -14,6 +14,7 @@ mod github;
 mod highlight;
 mod icons;
 mod iconsets;
+mod markdown;
 mod nav;
 mod outline;
 mod palette;
@@ -1418,6 +1419,7 @@ impl App {
         match std::env::var("RIDE_START_VIEW").as_deref() {
             Ok("themes") => app.view = View::Themes,
             Ok("settings") => app.view = View::Settings,
+            Ok("agents") => app.view = View::Agents,
             _ => {}
         }
         // RIDE_HOST and RIDE_ROOT pick the host and folder, RIDE_SIDE the side panel.

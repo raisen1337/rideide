@@ -3,8 +3,8 @@
 
 use crate::{diff, icons, theme};
 use eframe::egui::{
-    self, text::LayoutJob, Align, Color32, FontId, Frame, Key, Layout, Margin, Modifiers, Pos2,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat, TextWrapMode, Ui,
+    self, Align, Color32, FontId, Frame, Key, Layout, Margin, Modifiers, Pos2, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, TextWrapMode, Ui,
 };
 use serde_json::{json, Value};
 
@@ -2282,34 +2282,7 @@ pub(crate) fn markdown(ui: &mut Ui, text: &str, salt: usize) {
     }
     let text = &text[..prose_end.unwrap_or(text.len())];
 
-    let mut prose = String::new();
-    let mut code = String::new();
-    let mut in_code = false;
-    let mut blocks = 0;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            if in_code {
-                code_block(ui, &code, (salt, blocks));
-                blocks += 1;
-                code.clear();
-            } else {
-                paragraph(ui, &prose);
-                prose.clear();
-            }
-            in_code = !in_code;
-        } else if in_code {
-            code.push_str(line);
-            code.push('\n');
-        } else {
-            prose.push_str(line);
-            prose.push('\n');
-        }
-    }
-    paragraph(ui, &prose);
-    // An unterminated fence: the block is still streaming in.
-    if in_code {
-        code_block(ui, &code, (salt, blocks));
-    }
+    ui.vertical(|ui| crate::markdown::render(ui, text, salt, &code_block));
     for directive in directives {
         delegation_chip(ui, directive);
     }
@@ -2385,76 +2358,6 @@ fn code_block(ui: &mut Ui, code: &str, salt: (usize, usize)) {
     if button.clicked() {
         ui.ctx().copy_text(code.trim_end().to_string());
     }
-}
-
-fn paragraph(ui: &mut Ui, text: &str) {
-    let text = text.trim_matches('\n');
-    if text.trim().is_empty() {
-        return;
-    }
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
-    let plain = |size: f32, color: Color32| TextFormat::simple(FontId::proportional(size), color);
-
-    for (n, raw) in text.lines().enumerate() {
-        if n > 0 {
-            job.append("\n", 0.0, plain(14.0, theme::TEXT()));
-        }
-        let heading = raw.starts_with('#');
-        // A message to a teammate; see the team prompt in main.rs.
-        let directive = raw.starts_with("@@");
-        let line = if heading {
-            raw.trim_start_matches('#').trim_start()
-        } else {
-            raw
-        };
-        let indent = line.len() - line.trim_start().len();
-        let line = match line
-            .trim_start()
-            .strip_prefix("- ")
-            .or(line.trim_start().strip_prefix("* "))
-        {
-            Some(rest) => format!("{}•  {rest}", " ".repeat(indent)),
-            None => line.to_string(),
-        };
-
-        let (mut bold, mut code) = (heading, false);
-        let mut run = String::new();
-        let flush = |run: &mut String, bold: bool, code: bool, job: &mut LayoutJob| {
-            if run.is_empty() {
-                return;
-            }
-            let format = if directive {
-                TextFormat::simple(FontId::monospace(12.5), theme::CLAUDE())
-            } else if code {
-                TextFormat {
-                    background: theme::tint(20),
-                    ..TextFormat::simple(FontId::monospace(13.0), theme::TYPE())
-                }
-            } else if bold {
-                plain(if heading { 16.0 } else { 14.0 }, theme::STRONG())
-            } else {
-                plain(14.0, theme::TEXT())
-            };
-            job.append(run, 0.0, format);
-            run.clear();
-        };
-        let mut chars = line.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '`' {
-                flush(&mut run, bold, code, &mut job);
-                code = !code;
-            } else if c == '*' && chars.peek() == Some(&'*') && !code {
-                chars.next();
-                flush(&mut run, bold, code, &mut job);
-                bold = !bold;
-            } else {
-                run.push(c);
-            }
-        }
-        flush(&mut run, bold, code, &mut job);
-    }
-    ui.label(job);
 }
 
 #[cfg(test)]

@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.8
+
+- **Full Markdown in the Claude chat and the Agents view.** Tables, numbered and nested lists, checklists, italic and struck-through text, links (a click opens them in the browser), quotes, horizontal rules and headings of every level now show formatted, instead of as raw symbols.
+
 ## 0.6.7
 
 - **Subagents in the Claude chat.** When Claude starts subagents, each one shows as a card in the conversation, with its kind, what it was asked to do, and whether it's still working or done.

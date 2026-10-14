@@ -28,6 +28,7 @@ raw-window-handle = "0.6"
 # Reads a picture from the clipboard, for pasting one into a chat.
 arboard = "3"
 resvg = { version = "0.48", default-features = false }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"
