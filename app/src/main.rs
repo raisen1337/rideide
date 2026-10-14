@@ -546,6 +546,8 @@ struct App {
     forwards: Vec<tools::Forward>,
     panes: panes::Panes,
     updater: update::Updater,
+    /// Changelog entries to show once after an update: (version, text).
+    whats_new: Vec<(String, String)>,
     /// The other connections that are open, besides the one shown.
     sessions: Vec<sessions::Session>,
     /// Which connection the one shown is.
@@ -1282,6 +1284,16 @@ impl App {
             forwards: Vec::new(),
             panes: panes::Panes::default(),
             updater: update::Updater::new(),
+            whats_new: {
+                // Nothing stored: a fresh install has nothing to catch up on, while a ride
+                // from before this screen existed was 0.1.0.
+                let seen = match stored("seen_version") {
+                    seen if !seen.is_empty() => seen,
+                    _ if stored("host").is_empty() => update::VERSION.to_string(),
+                    _ => "0.1.0".to_string(),
+                };
+                update::changes_since(&seen)
+            },
             sessions: Vec::new(),
             session_uid: 0,
             background: false,
@@ -4104,6 +4116,16 @@ impl eframe::App for App {
         if let Some(line) = self.updater.tick(&ctx) {
             self.status = line;
         }
+        // An update found as ride opened: restart into it now. The tabs and chats are
+        // saved on the way out and come back.
+        if std::mem::take(&mut self.updater.apply_now) && self.updater.install(true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // After an update, what changed comes before anything else.
+        if !self.whats_new.is_empty() {
+            self.whats_new_screen(ui);
+            return;
+        }
         // The catch-up screen covers everything until it is read or skipped.
         if self.catching_up() {
             self.catchup_screen(ui);
@@ -4267,6 +4289,10 @@ impl eframe::App for App {
         storage.set_string("term_dock", self.term_dock.name().to_string());
         storage.set_string("connected", self.online().to_string());
         storage.set_string("catchup_day", self.catchup_day.to_string());
+        // Seen once it has been closed; until then it shows again at the next start.
+        if self.whats_new.is_empty() {
+            storage.set_string("seen_version", update::VERSION.to_string());
+        }
         storage.set_string("glass_opacity", self.themes.opacity.to_string());
         self.write_state();
         let dir = self

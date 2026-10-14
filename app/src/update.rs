@@ -57,7 +57,14 @@ pub struct Updater {
     /// Whether the check was asked for by hand, so its outcome is worth a word.
     by_hand: bool,
     next_check: Option<SystemTime>,
+    started: SystemTime,
+    /// Set when an update got ready right after ride opened: ride restarts into it at once.
+    pub apply_now: bool,
 }
+
+/// An update that is ready within this long of ride opening is put in straight away,
+/// before any real work has started; a later one waits for ride to close.
+const AT_OPEN: Duration = Duration::from_secs(90);
 
 /// Where downloaded setups and the time of the last check are kept.
 fn folder() -> PathBuf {
@@ -178,24 +185,21 @@ impl Updater {
             let name = entry.file_name().to_string_lossy().into_owned();
             let version = name
                 .strip_prefix("ride-setup-")
-                .and_then(|rest| rest.strip_suffix(".exe").or(rest.strip_suffix(".part")));
+                .and_then(|rest| rest.strip_suffix(".exe").or(rest.strip_suffix(".part")))
+                .or(name.strip_prefix("tried-"));
             if version.is_some_and(|v| !is_newer(v, VERSION)) || name.ends_with(".part") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
-        let last = std::fs::read_to_string(dir.join("last-check"))
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(0);
-        // A first check shortly after start when the last one is a day old; never at the
-        // very start, which belongs to connecting.
-        let due = (last + DAY).max(now() + 20);
+        // Every start checks; it is one small file. While ride stays open, once a day.
         Self {
             state: State::Idle,
             rx: None,
             downloading: None,
             by_hand: false,
-            next_check: Some(UNIX_EPOCH + Duration::from_secs(due)),
+            next_check: Some(SystemTime::now()),
+            started: SystemTime::now(),
+            apply_now: false,
         }
     }
 
@@ -255,7 +259,19 @@ impl Updater {
                     by_hand.then(|| format!("ride {VERSION} is the newest version."))
                 }
                 Done::Ready(version, setup) => {
-                    let line = format!("ride {version} is ready; it installs when you close ride.");
+                    let early = self.started.elapsed().is_ok_and(|age| age < AT_OPEN);
+                    // Tried once at an opening already and still here: that install failed,
+                    // so it waits for ride to close rather than restarting it again and again.
+                    let tried = folder().join(format!("tried-{version}"));
+                    self.apply_now = early && settings::with(|s| s.auto_update) && !tried.exists();
+                    if self.apply_now {
+                        let _ = std::fs::write(&tried, "");
+                    }
+                    let line = if self.apply_now {
+                        format!("Updating to ride {version}…")
+                    } else {
+                        format!("ride {version} is ready; it installs when you close ride.")
+                    };
                     self.state = State::Ready { version, setup };
                     Some(line)
                 }
@@ -318,6 +334,121 @@ impl Updater {
     }
 }
 
+static CHANGELOG: &str = include_str!("../../CHANGELOG.md");
+
+/// The changelog entries after `seen` up to this version, newest first.
+pub fn changes_since(seen: &str) -> Vec<(String, String)> {
+    CHANGELOG
+        .split("\n## ")
+        .skip(1)
+        .filter_map(|entry| {
+            let (version, body) = entry.split_once('\n')?;
+            let version = version.trim().to_string();
+            let wanted = is_newer(&version, seen) && !is_newer(&version, VERSION);
+            wanted.then(|| (version, body.trim().to_string()))
+        })
+        .collect()
+}
+
+impl App {
+    /// The "What's new" screen, once after an update, before anything else.
+    /// Like the catch-up screen, it takes the whole window.
+    pub(super) fn whats_new_screen(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, theme::EDITOR_BG());
+        Panel::top("whats_new_title")
+            .frame(Frame::NONE.inner_margin(Margin {
+                left: 14,
+                right: 0,
+                top: 3,
+                bottom: 3,
+            }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                title_drag(ui);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new("ride").strong().color(theme::COMMENT()))
+                            .selectable(false),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        window_buttons(ui)
+                    });
+                });
+            });
+
+        let mut close = ctx.input_mut(|i| {
+            i.consume_key(Modifiers::NONE, Key::Escape)
+                || i.consume_key(Modifiers::NONE, Key::Enter)
+        });
+        Panel::bottom("whats_new_buttons")
+            .frame(Frame::NONE.inner_margin(Margin {
+                left: 24,
+                right: 24,
+                top: 10,
+                bottom: 22,
+            }))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    let button = egui::Button::new(
+                        RichText::new("Continue")
+                            .size(15.0)
+                            .color(theme::EDITOR_BG()),
+                    )
+                    .fill(theme::TEXT())
+                    .corner_radius(8)
+                    .min_size(vec2(150.0, 36.0));
+                    close |= ui.add(button).on_hover_text("Enter").clicked();
+                });
+            });
+
+        let entries = self.whats_new.clone();
+        CentralPanel::default_margins()
+            .frame(Frame::NONE)
+            .show(ui, |ui| {
+                ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                    let width = (ui.available_width() - 48.0).min(640.0);
+                    let side = ((ui.available_width() - width) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(side);
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            ui.add_space((ui.ctx().content_rect().height() * 0.07).max(12.0));
+                            ui.label(
+                                RichText::new("What's new")
+                                    .size(32.0)
+                                    .color(theme::STRONG()),
+                            );
+                            ui.label(
+                                RichText::new(format!("ride is now {VERSION}"))
+                                    .color(theme::COMMENT()),
+                            );
+                            for (version, body) in &entries {
+                                ui.add_space(22.0);
+                                ui.label(
+                                    RichText::new(version)
+                                        .small()
+                                        .strong()
+                                        .color(theme::COMMENT()),
+                                );
+                                ui.add_space(6.0);
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                chat::markdown(ui, body, usize::MAX);
+                            }
+                            ui.add_space(24.0);
+                        });
+                    });
+                });
+            });
+        resize_edges(&ctx);
+        if close {
+            self.whats_new.clear();
+        }
+    }
+}
+
 /// Starts a program that outlives ride: outside any job ride itself was started in
 /// (where Windows allows that), and without a console window.
 fn spawn_detached(command: &mut Command) -> bool {
@@ -350,6 +481,18 @@ mod tests {
         assert!(!is_newer("0.1.0-beta", "0.1.0"));
         assert!(!is_newer("0.0.9", "0.1.0"));
         assert!(!is_newer("garbage", "0.1.0"));
+    }
+
+    #[test]
+    fn the_changelog_lists_what_is_newer_than_seen() {
+        let all = changes_since("0.0.0");
+        assert!(!all.is_empty());
+        assert_eq!(
+            all[0].0, VERSION,
+            "CHANGELOG.md needs an entry for {VERSION}"
+        );
+        assert!(all.iter().all(|(_, body)| !body.is_empty()));
+        assert!(changes_since(VERSION).is_empty());
     }
 
     #[test]
