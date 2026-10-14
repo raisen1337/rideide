@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.6.5
+
+- **Write to Claude while it works.** In the Claude chat you can send more messages before it has finished: press Enter, or the arrow next to Stop. The message goes out at once and shows as queued under the answer. Claude takes it in as soon as it's done with what it is doing, and it joins the conversation there.
+- Stopping Claude with messages still queued puts them back in the input box, so nothing you typed is lost.
+
 ## 0.6.4
 
 - **Nobody can push your cursor any more.** Text someone else types right where your cursor is (their Enter at the end of your line, say) now goes after your cursor instead of carrying it along.

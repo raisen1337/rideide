@@ -87,6 +87,12 @@ struct Attached {
     texture: egui::TextureHandle,
 }
 
+/// A message sent while Claude was still at work on the one before.
+struct Queued {
+    text: String,
+    images: Vec<(String, egui::TextureHandle)>,
+}
+
 /// Claude looks at images at about this size at most; anything larger only costs more.
 const IMAGE_SIDE: u32 = 1568;
 const IMAGE_LIMIT: usize = 6;
@@ -191,6 +197,9 @@ pub struct Chat {
     /// A request that just arrived, until the app has told the user about it.
     new_ask: Option<String>,
     images: Vec<Attached>,
+    /// Messages sent while Claude was busy, in order: Claude Code takes each in once it's
+    /// done with what it is doing, and they join the transcript then.
+    queued: Vec<Queued>,
     /// The next replayed user message is the one just sent, and names its checkpoint.
     expect_checkpoint: bool,
     /// The user message whose restore button was pressed and waits to be confirmed.
@@ -330,6 +339,7 @@ impl Default for Chat {
             allow_edits: false,
             new_ask: None,
             images: Vec::new(),
+            queued: Vec::new(),
             expect_checkpoint: false,
             confirm_rewind: None,
             rewinding: false,
@@ -435,24 +445,38 @@ impl Chat {
     /// Records the user's turn and returns the line to write to the process.
     /// `context` is extra information for Claude that isn't shown in the transcript.
     pub fn begin_turn(&mut self, text: &str, context: Option<String>) -> Vec<u8> {
+        // Sent while Claude is still at it: it goes out now and Claude Code takes it in
+        // as soon as it's done with what it is doing; until then it shows as waiting.
+        let queue = self.busy;
         let mut pictures = Vec::new();
+        let mut shown = Vec::new();
         for image in std::mem::take(&mut self.images) {
             pictures.push(json!({
                 "type": "image",
                 "source": { "type": "base64", "media_type": "image/png", "data": base64(&image.png) },
             }));
-            self.items.push(Item::Image {
-                name: image.name,
-                texture: Some(image.texture),
-            });
+            shown.push((image.name, image.texture));
         }
-        self.items.push(Item::User(text.to_string()));
-        self.expect_checkpoint = true;
-        self.confirm_rewind = None;
-        self.busy = true;
-        self.needs_login = false;
-        self.streaming = false;
-        self.stderr.clear();
+        if queue {
+            self.queued.push(Queued {
+                text: text.to_string(),
+                images: shown,
+            });
+        } else {
+            for (name, texture) in shown {
+                self.items.push(Item::Image {
+                    name,
+                    texture: Some(texture),
+                });
+            }
+            self.items.push(Item::User(text.to_string()));
+            self.expect_checkpoint = true;
+            self.confirm_rewind = None;
+            self.busy = true;
+            self.needs_login = false;
+            self.streaming = false;
+            self.stderr.clear();
+        }
         let text = match context {
             Some(context) => format!("{context}\n\n{text}"),
             None => text.to_string(),
@@ -1058,7 +1082,22 @@ impl Chat {
     }
 
     /// The process is gone because we stopped it; the session can still be resumed.
+    /// Messages that were waiting when Claude stopped go back to the input box, so
+    /// nothing typed is lost.
+    fn unqueue(&mut self) {
+        let queued = std::mem::take(&mut self.queued);
+        if queued.is_empty() {
+            return;
+        }
+        let mut text: Vec<String> = queued.iter().map(|q| q.text.clone()).collect();
+        if !self.input.trim().is_empty() {
+            text.push(std::mem::take(&mut self.input));
+        }
+        self.input = text.join("\n\n");
+    }
+
     pub fn stopped(&mut self) {
+        self.unqueue();
         self.past_cost += std::mem::take(&mut self.proc_cost);
         self.proc = None;
         self.busy = false;
@@ -1189,12 +1228,33 @@ impl Chat {
             // Tool results: an edit counts as made only once its tool reports success.
             "user" => {
                 // The message just sent comes back with its id, which is its checkpoint.
+                let typed = v["message"]["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "text"))
+                    || v["message"]["content"].is_string();
                 if v["isReplay"] == true && std::mem::take(&mut self.expect_checkpoint) {
                     let user = self.items.iter().rposition(|i| matches!(i, Item::User(_)));
                     if let (Some(index), Some(id)) = (user, v["uuid"].as_str()) {
                         self.items
                             .insert(index + 1, Item::Checkpoint(id.to_string()));
                     }
+                } else if v["isReplay"] == true && typed && !self.queued.is_empty() {
+                    // Claude Code took in a message that was waiting: it joins the
+                    // transcript here, where Claude starts on it.
+                    let queued = self.queued.remove(0);
+                    for (name, texture) in queued.images {
+                        self.items.push(Item::Image {
+                            name,
+                            texture: Some(texture),
+                        });
+                    }
+                    self.items.push(Item::User(queued.text));
+                    if let Some(id) = v["uuid"].as_str() {
+                        self.items.push(Item::Checkpoint(id.to_string()));
+                    }
+                    self.busy = true;
+                    self.streaming = false;
+                    self.got_delta = false;
                 }
                 for block in v["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] != "tool_result" {
@@ -1218,7 +1278,8 @@ impl Chat {
                 if let Some(cost) = v["total_cost_usd"].as_f64() {
                     self.proc_cost = cost;
                 }
-                self.busy = false;
+                // With messages still waiting, Claude goes straight on to the next one.
+                self.busy = !self.queued.is_empty();
                 self.streaming = false;
                 self.last_result = v["result"].as_str().map(str::to_string);
                 if v["is_error"].as_bool().unwrap_or(false) {
@@ -1237,6 +1298,7 @@ impl Chat {
     }
 
     pub fn on_exit(&mut self, code: Option<i32>) {
+        self.unqueue();
         self.past_cost += std::mem::take(&mut self.proc_cost);
         self.proc = None;
         self.partial.clear();
@@ -1559,6 +1621,26 @@ impl Chat {
                     ui.label(RichText::new("Working…").color(theme::COMMENT()));
                 });
             }
+            for queued in &self.queued {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    ui.set_max_width(width * 0.88);
+                    ui.vertical(|ui| {
+                        Frame::NONE
+                            .fill(theme::tint(6))
+                            .stroke(Stroke::new(1.0, theme::tint(12)))
+                            .corner_radius(8)
+                            .inner_margin(Margin::symmetric(11, 7))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(&queued.text).color(theme::COMMENT()));
+                            });
+                        let note = match queued.images.len() {
+                            0 => "queued: Claude reads it once it's done with this step".to_string(),
+                            n => format!("queued, with {n} image(s): Claude reads it once it's done with this step"),
+                        };
+                        ui.label(RichText::new(note).small().color(theme::COMMENT()));
+                    });
+                });
+            }
             ui.add_space(4.0);
         });
         self.confirm_rewind = confirm;
@@ -1762,6 +1844,7 @@ impl Chat {
                             action = Some(Action::Restart);
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let ready = !self.input.trim().is_empty() || !self.images.is_empty();
                             if self.busy {
                                 let stop = egui::Button::new(
                                     RichText::new(icons::STOP).color(Color32::WHITE),
@@ -1770,6 +1853,20 @@ impl Chat {
                                 .corner_radius(14);
                                 if ui.add(stop).on_hover_text("Stop").clicked() {
                                     action = Some(Action::Stop);
+                                }
+                                // Still at work: a message goes out now and waits its turn.
+                                if ready {
+                                    let send = egui::Button::new(
+                                        RichText::new(icons::ARROW_UP).color(theme::EDITOR_BG()),
+                                    )
+                                    .fill(theme::TEXT())
+                                    .corner_radius(14);
+                                    let hint = "Send now (Enter): Claude reads it as soon as it's done with this step";
+                                    if ui.add(send).on_hover_text(hint).clicked() || enter {
+                                        action = Some(Action::Send(
+                                            std::mem::take(&mut self.input).trim().to_string(),
+                                        ));
+                                    }
                                 }
                             } else {
                                 let ready =
@@ -2167,6 +2264,51 @@ mod tests {
         assert_eq!(restored.changes.len(), 1);
         assert_eq!(restored.model_choice, "haiku");
         assert!(restored.mode == Mode::Edit && !restored.busy && restored.proc.is_none());
+    }
+
+    /// A message sent while Claude is still answering waits, joins the transcript when
+    /// Claude Code takes it in, and keeps Claude busy until it has been answered too.
+    #[test]
+    fn a_message_sent_while_busy_waits_its_turn() {
+        let mut chat = Chat::default();
+        chat.begin_turn("write about the sea", None);
+        chat.on_stdout(br#"{"type":"user","uuid":"m1","isReplay":true,"message":{"content":[{"type":"text","text":"write about the sea"}]}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"The sea"}}}
+"#);
+        let line = chat.begin_turn("end with BANANA", None);
+        assert!(!line.is_empty(), "it goes out at once");
+        assert_eq!(chat.queued.len(), 1);
+        assert!(
+            matches!(chat.items.last(), Some(Item::Text(t)) if t == "The sea"),
+            "the answer under way isn't split"
+        );
+        chat.on_stdout(br#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" is calm."}}}
+{"type":"result","result":"The sea is calm."}
+"#);
+        assert!(chat.busy, "the waiting message is next");
+        assert!(matches!(chat.items.last(), Some(Item::Text(t)) if t == "The sea is calm."));
+        chat.on_stdout(br#"{"type":"user","uuid":"m2","isReplay":true,"message":{"content":[{"type":"text","text":"end with BANANA"}]}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"BANANA"}}}
+{"type":"result","result":"BANANA"}
+"#);
+        assert!(chat.queued.is_empty() && !chat.busy);
+        let tail: Vec<String> = chat.items[chat.items.len() - 3..]
+            .iter()
+            .map(|item| match item {
+                Item::User(t) => format!("user {t}"),
+                Item::Checkpoint(id) => format!("checkpoint {id}"),
+                Item::Text(t) => format!("claude {t}"),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(tail, ["user end with BANANA", "checkpoint m2", "claude BANANA"]);
+
+        // Stopped with messages waiting: they come back to the input box.
+        chat.begin_turn("one more", None);
+        chat.begin_turn("and another", None);
+        chat.stopped();
+        assert!(chat.queued.is_empty());
+        assert_eq!(chat.input, "and another");
     }
 
     #[test]
