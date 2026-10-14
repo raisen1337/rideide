@@ -98,6 +98,7 @@ pub enum Request {
         command: String,
         cwd: String,
     },
+    /// Writes to the process's input; empty data closes it.
     ProcInput {
         proc: u64,
         data: Vec<u8>,

@@ -29,6 +29,18 @@ enum Command {
     InstallExtension(String, bool),
     ToggleGlass,
     Disconnect,
+    FormatDocument,
+    ToggleFormatOnSave,
+    FoldAll,
+    UnfoldAll,
+    ToggleMinimap,
+    ToggleBreadcrumbs,
+    /// Lists the open file's symbols (the palette with `@`).
+    GoToSymbol,
+    GoToLine(usize),
+    /// Picks a second file to compare the open one with.
+    CompareWith,
+    Compare(String),
 }
 
 /// One row of the palette.
@@ -69,6 +81,8 @@ pub(super) struct Palette {
     resting: (usize, f64),
     /// A row to highlight once the list is that long (RIDE_PALETTE_ROW).
     want_row: Option<usize>,
+    /// Picking the file to compare this one with, rather than one to open.
+    compare: Option<String>,
 }
 
 impl App {
@@ -79,6 +93,12 @@ impl App {
             focus: true,
             ..Palette::default()
         };
+    }
+
+    /// Opens the command palette with some text already typed (`@` for symbols).
+    pub(super) fn open_palette_with(&mut self, text: &str) {
+        self.open_palette(false);
+        self.palette.query = text.to_string();
     }
 
     /// RIDE_PALETTE=TEXT opens the command palette with that text typed, and
@@ -138,7 +158,60 @@ impl App {
                 "Ctrl+K",
                 Command::InlineEdit,
             );
+            add(
+                icons::EDIT,
+                "Editor: Format document",
+                "Shift+Alt+F",
+                Command::FormatDocument,
+            );
+            add(
+                icons::METHOD,
+                "Go to symbol in file…",
+                "Ctrl+Shift+O",
+                Command::GoToSymbol,
+            );
+            add(
+                icons::CHEVRON_RIGHT,
+                "Editor: Fold all",
+                "",
+                Command::FoldAll,
+            );
+            add(
+                icons::CHEVRON_DOWN,
+                "Editor: Unfold all",
+                "",
+                Command::UnfoldAll,
+            );
+            if online {
+                add(
+                    icons::COMPARE,
+                    "File: Compare with another file…",
+                    "",
+                    Command::CompareWith,
+                );
+            }
         }
+        let on_off = |on: bool| if on { "off" } else { "on" };
+        let (format, minimap, crumbs) =
+            settings::with(|s| (s.format_on_save, s.minimap, s.breadcrumbs));
+        add(
+            icons::EDIT,
+            &format!("Editor: Turn format on save {}", on_off(format)),
+            "",
+            Command::ToggleFormatOnSave,
+        );
+        add(
+            icons::EYE,
+            &format!("View: Turn the minimap {}", on_off(minimap)),
+            "",
+            Command::ToggleMinimap,
+        );
+        add(
+            icons::EYE,
+            &format!("View: Turn breadcrumbs {}", on_off(crumbs)),
+            "",
+            Command::ToggleBreadcrumbs,
+        );
         if online {
             add(
                 icons::SEARCH,
@@ -300,11 +373,105 @@ impl App {
             }
             Command::ToggleGlass => self.themes.glass = !self.themes.glass,
             Command::Disconnect => self.disconnect(),
+            Command::FormatDocument => {
+                if let Some(index) = self.docked_active() {
+                    self.format_document(index);
+                }
+            }
+            Command::ToggleFormatOnSave => {
+                settings::change(|s| s.format_on_save = !s.format_on_save);
+                let on = settings::with(|s| s.format_on_save);
+                self.status = format!("Format on save is {}", if on { "on" } else { "off" });
+            }
+            Command::ToggleMinimap => settings::change(|s| s.minimap = !s.minimap),
+            Command::ToggleBreadcrumbs => settings::change(|s| s.breadcrumbs = !s.breadcrumbs),
+            Command::FoldAll | Command::UnfoldAll => {
+                if let Some(index) = self.docked_active() {
+                    let view = &mut self.tabs[index].view;
+                    if matches!(command, Command::FoldAll) {
+                        view.fold_all();
+                    } else {
+                        view.unfold_all();
+                    }
+                }
+            }
+            Command::GoToSymbol => return self.open_palette_with("@"),
+            Command::GoToLine(line) => {
+                if let Some(index) = self.docked_active() {
+                    nav::jump(&mut self.tabs[index], line);
+                }
+            }
+            Command::CompareWith => {
+                if let Some(index) = self.docked_active() {
+                    let left = self.tabs[index].path.clone();
+                    self.open_palette(true);
+                    self.palette.compare = Some(left);
+                }
+                return;
+            }
+            Command::Compare(right) => {
+                let left = self.palette.compare.take().unwrap_or_default();
+                // The open text, unsaved edits included, is what is compared.
+                let left_text = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.path == left)
+                    .map(|t| t.buf.text())
+                    .unwrap_or_default();
+                self.request_then(
+                    Request::ReadFile {
+                        path: right.clone(),
+                    },
+                    Pending::Compare {
+                        left,
+                        left_text,
+                        right,
+                    },
+                );
+            }
         }
         self.palette.open = false;
         // A preview ends with the palette; a chosen theme is already the current one.
         self.end_icon_preview();
         self.preview_theme(ctx, None);
+    }
+
+    /// With `@` typed first, the open file's functions and types, narrowed by what
+    /// follows; otherwise `None`.
+    fn symbol_entries(&self) -> Option<Vec<Entry>> {
+        let wanted = self.palette.query.strip_prefix('@')?;
+        if self.palette.files_mode {
+            return None;
+        }
+        let words: Vec<String> = wanted
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let Some(index) = self.docked_active() else {
+            return Some(Vec::new());
+        };
+        let entries = self.tabs[index]
+            .view
+            .symbols
+            .iter()
+            .filter(|s| {
+                let name = s.name.to_lowercase();
+                words.iter().all(|w| name.contains(w))
+            })
+            .map(|s| {
+                let (icon, icon_color) = nav::symbol_icon(s.kind);
+                Entry {
+                    icon,
+                    icon_color,
+                    label: s.name.clone(),
+                    keys: "",
+                    detail: format!("line {}", s.line + 1),
+                    command: Command::GoToLine(s.line),
+                }
+            })
+            .collect();
+        Some(entries)
     }
 
     /// Asks the Marketplace about the palette's text once typing has paused, and takes in
@@ -411,7 +578,9 @@ impl App {
             self.request_then(request, Pending::PaletteFiles { query });
         }
 
-        let entries: Vec<Entry> = if self.palette.files_mode {
+        let entries: Vec<Entry> = if let Some(found) = self.symbol_entries() {
+            found
+        } else if self.palette.files_mode {
             let root = self.root.clone();
             self.palette
                 .files
@@ -424,7 +593,10 @@ impl App {
                         label: file.clone(),
                         keys: "",
                         detail: String::new(),
-                        command: Command::OpenFile(join(&root, file)),
+                        command: match self.palette.compare {
+                            Some(_) => Command::Compare(join(&root, file)),
+                            None => Command::OpenFile(join(&root, file)),
+                        },
                     }
                 })
                 .collect()
@@ -574,7 +746,9 @@ impl App {
                             .size(16.0)
                             .color(theme::COMMENT()),
                     );
-                    let hint = if self.palette.files_mode {
+                    let hint = if self.palette.compare.is_some() {
+                        "Compare with: type part of a file's name"
+                    } else if self.palette.files_mode {
                         "Go to file: type part of its name"
                     } else {
                         "Type a command"

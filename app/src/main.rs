@@ -10,6 +10,8 @@ mod extras;
 mod highlight;
 mod icons;
 mod iconsets;
+mod nav;
+mod outline;
 mod palette;
 mod panes;
 mod preview;
@@ -110,6 +112,12 @@ enum Pending {
         dest: String,
     },
     Hello,
+    /// The second file of a comparison; the first one's text is already in hand.
+    Compare {
+        left: String,
+        left_text: String,
+        right: String,
+    },
     ListDir(String),
     Open {
         path: String,
@@ -487,6 +495,7 @@ enum Side {
     Changes,
     Git,
     Server,
+    Outline,
 }
 
 struct App {
@@ -550,6 +559,8 @@ struct App {
     forwards: Vec<tools::Forward>,
     panes: panes::Panes,
     updater: update::Updater,
+    /// What the outline side tab is narrowed to.
+    outline_filter: String,
     /// Changelog entries to show once after an update: (version, text).
     whats_new: Vec<(String, String)>,
     /// The other connections that are open, besides the one shown.
@@ -1288,6 +1299,7 @@ impl App {
             forwards: Vec::new(),
             panes: panes::Panes::default(),
             updater: update::Updater::new(),
+            outline_filter: String::new(),
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
                 // from before this screen existed was 0.1.0.
@@ -1363,6 +1375,7 @@ impl App {
         match std::env::var("RIDE_SIDE").as_deref() {
             Ok("git") => app.side = Side::Git,
             Ok("server") => app.side = Side::Server,
+            Ok("outline") => app.side = Side::Outline,
             _ => {}
         }
         app.refresh_themes();
@@ -1796,12 +1809,18 @@ impl App {
                         self.daily_catchup();
                     }
                 }
-                // RIDE_OPEN names more files to open, separated by semicolons.
-                for path in std::env::var("RIDE_OPEN")
+                // RIDE_OPEN names more files to open, separated by semicolons; `path@LINE`
+                // puts the cursor on a line.
+                for item in std::env::var("RIDE_OPEN")
                     .iter()
                     .flat_map(|list| list.split(';'))
                 {
-                    self.open_file(path.replace('\\', "/"), None);
+                    let (path, line) = match item.rsplit_once('@') {
+                        Some((path, line)) => (path, line.parse::<usize>().ok()),
+                        None => (item, None),
+                    };
+                    let goto = line.map(|l| Pos::new(l.saturating_sub(1), 0));
+                    self.open_file(path.replace('\\', "/"), goto);
                 }
                 // RIDE_CHAT_SEND sends a first message to the side chat, to look at its answer.
                 // RIDE_NO_TERM starts with the terminal hidden, for screenshots.
@@ -1903,6 +1922,19 @@ impl App {
                 self.palette_files_found(&query, paths)
             }
             (Pending::PaletteFiles { .. }, _) => {}
+            (
+                Pending::Compare {
+                    left,
+                    left_text,
+                    right,
+                },
+                Response::File { data },
+            ) => {
+                let right_text = String::from_utf8_lossy(&data);
+                let lines = diff::lines(&left_text, &right_text);
+                let title = format!("{} ↔ {}", file_name(&left), file_name(&right));
+                self.push_preview_tab(title, preview::Preview::Diff(lines));
+            }
             (Pending::Revert { change }, Response::File { data }) => {
                 self.apply_revert(change, data)
             }
@@ -1987,6 +2019,15 @@ impl App {
 
     fn save_tab(&mut self, index: usize) {
         self.tidy_before_save(index);
+        // With format on save, the formatter's answer is what gets saved.
+        if settings::with(|s| s.format_on_save) && self.format_tab(index, true) {
+            return;
+        }
+        self.write_tab(index);
+    }
+
+    /// Writes a tab's text to its file as it is.
+    fn write_tab(&mut self, index: usize) {
         let Some(tab) = self.tabs.get(index).filter(|t| t.preview.is_none()) else {
             return;
         };
@@ -2754,6 +2795,14 @@ impl App {
             self.open_palette(true);
         }
         let active = self.docked_active();
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
+            self.open_palette_with("@");
+        }
+        if pressed(Modifiers::SHIFT | Modifiers::ALT, Key::F) {
+            if let Some(index) = active {
+                self.format_document(index);
+            }
+        }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
             self.toggle_search();
         } else if pressed(Modifiers::COMMAND, Key::F) {
@@ -3047,6 +3096,14 @@ impl App {
             ) {
                 self.side = Side::Server;
             }
+            if icon_toggle(
+                ui,
+                self.side == Side::Outline,
+                icons::METHOD,
+                "Outline: functions and types in this file (Ctrl+Shift+O)",
+            ) {
+                self.side = Side::Outline;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_toggle(
                     ui,
@@ -3081,6 +3138,7 @@ impl App {
             Side::Changes => self.changes_panel(ui),
             Side::Git => self.git_panel(ui),
             Side::Server => self.monitor_panel(ui),
+            Side::Outline => self.outline_panel(ui),
         }
     }
 
@@ -3763,6 +3821,7 @@ impl App {
         if focused {
             self.inline_bar(ui, active);
         }
+        let root = self.root.clone();
         let tab = &mut self.tabs[active];
         let action = Frame::NONE
             .inner_margin(Margin {
@@ -3771,7 +3830,7 @@ impl App {
                 top: 0,
                 bottom: 6,
             })
-            .show(ui, |ui| tab_body(ui, tab))
+            .show(ui, |ui| tab_body(ui, tab, &root))
             .inner;
         if let Some(action) = action {
             self.editor_action(active, action);
@@ -3788,6 +3847,7 @@ impl App {
                 continue;
             }
             any = true;
+            let root = self.root.clone();
             let tab = &mut self.tabs[index];
             let name = file_name(&tab.path).to_string();
             let mut builder = ViewportBuilder::default()
@@ -3828,7 +3888,7 @@ impl App {
                         top: 2,
                         bottom: 4,
                     }))
-                    .show(ui, |ui| editor_action = tab_body(ui, tab));
+                    .show(ui, |ui| editor_action = tab_body(ui, tab, &root));
                 resize_edges(&ctx);
             });
             if save {
@@ -4022,7 +4082,10 @@ impl App {
 }
 
 /// A tab's content: the editor for text, a preview for everything else.
-fn tab_body(ui: &mut Ui, tab: &mut Tab) -> Option<editor::Action> {
+fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
+    if tab.preview.is_none() && settings::with(|s| s.breadcrumbs) {
+        nav::breadcrumbs(ui, tab, root);
+    }
     match &mut tab.preview {
         Some(preview) => {
             preview::show(ui, preview, file_name(&tab.path));

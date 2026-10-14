@@ -3,6 +3,15 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.3.0
+
+- **Code folding.** Arrows beside the line numbers fold a block and open it again; Ctrl+Shift+[ and Ctrl+Shift+] do the same at the cursor, and the palette has Fold all and Unfold all. It works in every language, by indentation.
+- **Minimap.** The whole file in miniature at the right of the editor; click or drag in it to scroll.
+- **Breadcrumbs.** Above the code: the file's folders and the function or class the cursor is in. Click one for a list of everything in the file.
+- **Outline.** A new side tab lists the file's functions, classes and types, nested as in the code, with a filter. Ctrl+Shift+O (or `@` in the command palette) jumps to one by name.
+- **Format on save.** Each kind of file can have a formatter that runs on the host. Prettier and StyLua work out of the box through npx, and you can change or add others in Settings → Editor. Turn it on there or from the palette; Shift+Alt+F formats without saving.
+- **Compare two files.** "File: Compare with another file…" in the palette shows the open file (unsaved changes included) against any other, side by side.
+
 ## 0.2.4
 
 - While ride stays open it looks for updates every hour instead of once a day, so a new version published while you work installs the next time you close ride.

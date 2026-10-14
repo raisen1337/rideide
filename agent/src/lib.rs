@@ -34,7 +34,8 @@ struct Term {
 }
 
 struct Proc {
-    stdin: ChildStdin,
+    /// Closed (taken) when the app sends empty input, so the program sees the end of it.
+    stdin: Option<ChildStdin>,
     child: Arc<Mutex<Child>>,
 }
 
@@ -181,7 +182,11 @@ pub fn serve(mut input: impl Read, mut out: impl Write + Send + 'static) {
             },
             Request::ProcInput { proc, data } => {
                 if let Some(p) = procs.get_mut(&proc) {
-                    let _ = p.stdin.write_all(&data).and_then(|_| p.stdin.flush());
+                    if data.is_empty() {
+                        p.stdin = None;
+                    } else if let Some(stdin) = p.stdin.as_mut() {
+                        let _ = stdin.write_all(&data).and_then(|_| stdin.flush());
+                    }
                 }
             }
             Request::ProcClose { proc } => {
@@ -553,5 +558,8 @@ fn open_proc(id: u64, command: &str, cwd: &str, tx: &Out) -> io::Result<Proc> {
         });
     });
 
-    Ok(Proc { stdin, child })
+    Ok(Proc {
+        stdin: Some(stdin),
+        child,
+    })
 }

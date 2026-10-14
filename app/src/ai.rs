@@ -38,6 +38,12 @@ pub(super) enum JobKind {
         what: String,
     },
     Monitor,
+    /// A formatter given a tab's text; with save, the tab is saved after.
+    Format {
+        tab_uid: u64,
+        revision: u64,
+        save: bool,
+    },
     /// A command run for what it does; its output isn't looked at.
     Quiet,
 }
@@ -178,9 +184,11 @@ impl App {
         });
     }
 
-    pub(super) fn start_shell_job(&mut self, kind: JobKind, command: String) {
+    /// Runs a command on the host; its output goes to the job's handler. The process id,
+    /// for feeding it input.
+    pub(super) fn start_shell_job(&mut self, kind: JobKind, command: String) -> Option<u64> {
         if !self.online() {
-            return;
+            return None;
         }
         let proc = self.request(Request::ProcOpen {
             command,
@@ -193,6 +201,7 @@ impl App {
             err: String::new(),
             claude: false,
         });
+        Some(proc)
     }
 
     /// Feeds a process message to the job it belongs to. False if it isn't a job's.
@@ -228,6 +237,17 @@ impl App {
                 }
             }
             Response::ProcStderr { data } => job.err.push_str(&String::from_utf8_lossy(data)),
+            // A formatter that fails says why on its error stream; its output is no use.
+            Response::ProcExit { code }
+                if matches!(job.kind, JobKind::Format { .. }) && *code != Some(0) =>
+            {
+                let error = job.err.trim();
+                outcome = Some(Err(if error.is_empty() {
+                    format!("exited with code {}", code.unwrap_or(-1))
+                } else {
+                    error.to_string()
+                }));
+            }
             Response::ProcExit { .. } if job.claude => {
                 let error = job.err.trim();
                 let error = if error.is_empty() {
@@ -351,6 +371,14 @@ impl App {
             (JobKind::GitDiff | JobKind::CommitMessage, Err(error)) => {
                 self.status = format!("Commit message failed: {error}");
             }
+            (
+                JobKind::Format {
+                    tab_uid,
+                    revision,
+                    save,
+                },
+                outcome,
+            ) => self.format_done(tab_uid, revision, save, outcome),
             (kind, outcome) => self.tool_job_done(kind, outcome.unwrap_or_else(|error| error)),
         }
     }

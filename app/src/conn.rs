@@ -338,6 +338,39 @@ mod tests {
         );
         assert!(matches!(ask(Request::Delete { path: file }), Response::Ok));
         let _ = std::fs::remove_dir_all(dir);
+
+        // A program reading its input to the end (as a formatter does) finishes once
+        // empty input closes it.
+        let proc = conn.request(Request::ProcOpen {
+            command: "$input | Sort-Object".into(),
+            cwd: root.clone(),
+        });
+        conn.request(Request::ProcInput {
+            proc,
+            data: b"pear\napple\n".to_vec(),
+        });
+        conn.request(Request::ProcInput {
+            proc,
+            data: Vec::new(),
+        });
+        let mut out = Vec::new();
+        loop {
+            match conn
+                .events
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the program ends")
+            {
+                ConnEvent::Msg(msg) if msg.id == proc => match msg.resp {
+                    Response::ProcOutput { data } => out.extend(data),
+                    Response::ProcExit { .. } => break,
+                    _ => {}
+                },
+                ConnEvent::Msg(_) => continue,
+                ConnEvent::Closed(reason) => panic!("link closed: {reason}"),
+            }
+        }
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.find("apple") < out.find("pear"), "{out:?}");
     }
 
     /// A terminal on this computer starts a shell and its output comes back.

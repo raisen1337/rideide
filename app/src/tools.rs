@@ -728,6 +728,79 @@ impl App {
         self.git_marks(index);
     }
 
+    // ---- formatting ----
+
+    /// Formats a tab's text with its formatter, on the host. With `save` it is saved
+    /// afterwards, formatted or, if formatting failed, as it was. False when the file has
+    /// no formatter, so nothing was started.
+    pub(super) fn format_tab(&mut self, index: usize, save: bool) -> bool {
+        let Some(tab) = self.tabs.get(index).filter(|t| t.preview.is_none()) else {
+            return false;
+        };
+        let Some(command) = settings::formatter_for(&tab.path) else {
+            return false;
+        };
+        let kind = JobKind::Format {
+            tab_uid: tab.uid,
+            revision: tab.buf.revision,
+            save,
+        };
+        let text = tab.buf.text().into_bytes();
+        let Some(proc) = self.start_shell_job(kind, command) else {
+            return false;
+        };
+        self.request(Request::ProcInput { proc, data: text });
+        // Empty input closes the formatter's input, so it knows the text is complete.
+        self.request(Request::ProcInput {
+            proc,
+            data: Vec::new(),
+        });
+        true
+    }
+
+    /// Shift+Alt+F: formats without saving.
+    pub(super) fn format_document(&mut self, index: usize) {
+        if !self.format_tab(index, false) {
+            self.status =
+                "No formatter is set for this kind of file; add one in Settings → Editor".into();
+        }
+    }
+
+    pub(super) fn format_done(
+        &mut self,
+        tab_uid: u64,
+        revision: u64,
+        save: bool,
+        outcome: Result<String, String>,
+    ) {
+        let Some(index) = self.tabs.iter().position(|t| t.uid == tab_uid) else {
+            return;
+        };
+        match outcome {
+            Ok(text) if self.tabs[index].buf.revision == revision => {
+                let buf = &mut self.tabs[index].buf;
+                if !text.trim().is_empty() && text != buf.text() {
+                    // One edit, so a single undo takes the formatting back.
+                    let cursor = buf.cursor;
+                    buf.select_all();
+                    buf.insert(&text);
+                    buf.set_cursor(cursor, false);
+                }
+            }
+            Ok(_) => {
+                self.status =
+                    "The file changed while it was being formatted, so it was left as it was".into()
+            }
+            Err(error) => {
+                let first = error.lines().next().unwrap_or("").trim();
+                self.status = format!("Couldn't format: {first}");
+            }
+        }
+        if save {
+            self.write_tab(index);
+        }
+    }
+
     // ---- git ----
 
     pub(super) fn git_refresh(&mut self) {

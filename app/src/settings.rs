@@ -20,6 +20,56 @@ pub enum CatchUp {
     EveryConnect,
 }
 
+/// A formatter: the file extensions it is for (space-separated) and its command, in
+/// which `{file}` stands for the file's path.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Formatter {
+    pub exts: String,
+    pub command: String,
+}
+
+pub fn default_formatters() -> Vec<Formatter> {
+    [
+        (
+            "js jsx ts tsx mjs cjs json css scss less html vue md yaml yml",
+            // Through npx, so it works wherever Node is, and uses a project's own copy first.
+            "npx --yes prettier --stdin-filepath {file}",
+        ),
+        ("lua", "npx --yes @johnnymorganz/stylua-bin -"),
+        ("py", "black -q -"),
+        ("rs", "rustfmt --edition 2021 --emit stdout"),
+        ("go", "gofmt"),
+        ("sh bash", "shfmt"),
+        (
+            "c h cpp hpp cc cs java",
+            "clang-format --assume-filename={file}",
+        ),
+    ]
+    .into_iter()
+    .map(|(exts, command)| Formatter {
+        exts: exts.into(),
+        command: command.into(),
+    })
+    .collect()
+}
+
+/// The formatter command for a file, with its path filled in.
+pub fn formatter_for(path: &str) -> Option<String> {
+    let ext = path.rsplit_once('.')?.1.to_lowercase();
+    with(|s| {
+        s.formatters
+            .iter()
+            .find(|f| {
+                f.exts
+                    .split_whitespace()
+                    .any(|e| e.trim_start_matches('.') == ext)
+            })
+            .filter(|f| !f.command.trim().is_empty())
+            .map(|f| f.command.replace("{file}", &crate::tools::quote(path)))
+    })
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -42,6 +92,12 @@ pub struct Settings {
     pub newline_on_save: bool,
     /// Seconds without typing after which an edited file is saved; 0 turns it off.
     pub autosave: f32,
+    pub minimap: bool,
+    /// The file's path and the function the cursor is in, above the code.
+    pub breadcrumbs: bool,
+    pub format_on_save: bool,
+    /// Which program formats which files; run on the host, text in on stdin, out on stdout.
+    pub formatters: Vec<Formatter>,
     // Files
     pub confirm_delete: bool,
     /// Files above this size, in megabytes, aren't opened.
@@ -83,6 +139,10 @@ impl Default for Settings {
             trim_on_save: false,
             newline_on_save: false,
             autosave: 0.0,
+            minimap: true,
+            breadcrumbs: true,
+            format_on_save: false,
+            formatters: default_formatters(),
             confirm_delete: true,
             max_open_mb: 64,
             scrollback: 10_000,
@@ -116,6 +176,16 @@ pub fn get() -> Settings {
 
 fn set(settings: Settings) {
     CURRENT.with(|current| *current.borrow_mut() = settings);
+}
+
+/// Changes a setting from elsewhere than the settings page (the command palette), and
+/// stores it.
+pub fn change(edit: impl FnOnce(&mut Settings)) {
+    let mut settings = get();
+    edit(&mut settings);
+    let settings = sane(settings);
+    let _ = save(&settings);
+    set(settings);
 }
 
 fn path() -> Option<PathBuf> {
@@ -494,6 +564,66 @@ impl App {
                         );
                     },
                 );
+                row(
+                    ui,
+                    "Minimap",
+                    "The whole file in miniature at the right; click or drag in it to scroll.",
+                    |ui| toggle(ui, &mut s.minimap),
+                );
+                row(
+                    ui,
+                    "Breadcrumbs",
+                    "The file's folders and the function you are in, above the code. Click one to jump.",
+                    |ui| toggle(ui, &mut s.breadcrumbs),
+                );
+                row(
+                    ui,
+                    "Format on save",
+                    "Runs the file's formatter before saving. Shift+Alt+F formats without saving.",
+                    |ui| toggle(ui, &mut s.format_on_save),
+                );
+                ui.add_space(4.0);
+                ui.label(RichText::new("Formatters").color(theme::STRONG()));
+                ui.label(
+                    RichText::new(
+                        "Run on the host: the text goes in on stdin and the formatted text comes out on stdout. {file} is the file's path. A formatter that isn't installed there leaves the file as it is.",
+                    )
+                    .small()
+                    .color(theme::COMMENT()),
+                );
+                ui.add_space(6.0);
+                let mut remove = None;
+                for (index, formatter) in s.formatters.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut formatter.exts)
+                                .desired_width(170.0)
+                                .hint_text("extensions")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut formatter.command)
+                                .desired_width((ui.available_width() - 40.0).max(120.0))
+                                .hint_text("command")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if icon_button(ui, icons::CLOSE, "Remove") {
+                            remove = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove {
+                    s.formatters.remove(index);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Add a formatter").clicked() {
+                        s.formatters.push(Formatter::default());
+                    }
+                    if ui.button("Restore the defaults").clicked() {
+                        s.formatters = default_formatters();
+                    }
+                });
+                ui.add_space(10.0);
             }
             2 => {
                 row(
