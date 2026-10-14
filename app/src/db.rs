@@ -111,6 +111,25 @@ impl Conn {
         }
     }
 
+    /// A table's columns, with what the table view needs: type, key, nullable, default,
+    /// and whether the database fills it in.
+    fn table_columns_sql(&self, table: &str) -> String {
+        let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        match self.engine {
+            Engine::MySql => format!(
+                "SELECT column_name, column_type, column_key, is_nullable, column_default, extra FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = {} ORDER BY ordinal_position;",
+                lit(table)
+            ),
+            Engine::Postgres => {
+                let (schema, name) = table.split_once('.').unwrap_or(("public", table));
+                let (schema, name) = (lit(schema), lit(name));
+                format!(
+                    "SELECT c.column_name, c.data_type, CASE WHEN k.column_name IS NULL THEN '' ELSE 'PRI' END, c.is_nullable, c.column_default, c.is_identity FROM information_schema.columns c LEFT JOIN (SELECT u.column_name FROM information_schema.table_constraints t JOIN information_schema.key_column_usage u ON t.constraint_name = u.constraint_name AND t.table_schema = u.table_schema AND t.table_name = u.table_name WHERE t.constraint_type = 'PRIMARY KEY' AND t.table_schema = {schema} AND t.table_name = {name}) k ON k.column_name = c.column_name WHERE c.table_schema = {schema} AND c.table_name = {name} ORDER BY c.ordinal_position;"
+                )
+            }
+        }
+    }
+
     fn browse_sql(&self, table: &str) -> String {
         match self.engine {
             Engine::MySql => format!("SELECT * FROM `{}` LIMIT 200;", table.replace('`', "``")),
@@ -392,18 +411,31 @@ pub(super) enum Job {
         tab_uid: u64,
         engine: Engine,
     },
+    /// Something a table tab asked for.
+    Table {
+        tab_uid: u64,
+        what: TableJob,
+    },
+}
+
+/// What a table tab's command was for.
+pub(super) enum TableJob {
+    Columns,
+    Page,
+    Count,
+    Save,
 }
 
 /// A query tab: its connection, its SQL, and what the last run gave.
 pub(super) struct QueryTab {
     conn: usize,
     pub(super) sql: String,
-    result: Option<Result<Grid, String>>,
+    result: Option<Result<(), String>>,
+    /// The rows of the last run, to look at, sort and copy.
+    view: Option<Box<table::TableView>>,
     running: bool,
     started: f64,
     took: f64,
-    /// Column widths, measured when a result arrives.
-    widths: Vec<f32>,
 }
 
 pub(super) struct Db {
@@ -440,12 +472,6 @@ impl Default for Db {
 /// The query tab: the SQL, Run, and the result grid. True when Run was asked for.
 pub(super) fn query_tab(ui: &mut Ui, tab: &mut QueryTab) -> bool {
     let mut run = false;
-    // Column widths are measured once per result, from its first rows.
-    if let Some(Ok(grid)) = &tab.result {
-        if tab.widths.len() != grid.columns.len() {
-            tab.widths = measure(ui, grid);
-        }
-    }
     Frame::NONE
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
@@ -460,9 +486,9 @@ pub(super) fn query_tab(ui: &mut Ui, tab: &mut QueryTab) -> bool {
                 edit.has_focus() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
             ui.horizontal(|ui| {
                 let button = egui::Button::new(
-                    RichText::new(format!("{}  Run", icons::PLAY)).color(theme::EDITOR_BG()),
+                    RichText::new(format!("{}  Run", icons::PLAY)).color(Color32::WHITE),
                 )
-                .fill(theme::TEXT());
+                .fill(theme::ACCENT().gamma_multiply(0.85));
                 run |= ui
                     .add_enabled(!tab.running && !tab.sql.trim().is_empty(), button)
                     .on_hover_text("Ctrl+Enter")
@@ -470,156 +496,29 @@ pub(super) fn query_tab(ui: &mut Ui, tab: &mut QueryTab) -> bool {
                 if tab.running {
                     ui.spinner();
                     ui.label(RichText::new("Running…").small().color(theme::COMMENT()));
-                }
-                match &tab.result {
-                    Some(Ok(grid)) if !tab.running => {
-                        let rows = grid.rows.len();
-                        let note = if grid.columns.is_empty() || grid.columns == [""] {
-                            format!("Done in {:.0} ms", tab.took * 1000.0)
-                        } else {
-                            format!(
-                                "{rows}{} row{} in {:.0} ms",
-                                if grid.cut { "+" } else { "" },
-                                if rows == 1 { "" } else { "s" },
-                                tab.took * 1000.0
-                            )
-                        };
-                        ui.label(RichText::new(note).small().color(theme::COMMENT()));
-                    }
-                    _ => {}
+                } else if matches!(tab.result, Some(Ok(()))) {
+                    ui.label(
+                        RichText::new(format!("Done in {:.0} ms", tab.took * 1000.0))
+                            .small()
+                            .color(theme::COMMENT()),
+                    );
                 }
             });
         });
-    match &tab.result {
-        Some(Err(error)) => {
+    match (&tab.result, &mut tab.view) {
+        (Some(Err(error)), _) => {
             Frame::NONE
                 .inner_margin(Margin::symmetric(12, 4))
                 .show(ui, |ui| {
                     ui.label(RichText::new(error).monospace().color(theme::ANSI()[1]));
                 });
         }
-        Some(Ok(grid)) if !grid.columns.is_empty() && grid.columns != [""] => {
-            grid_ui(ui, grid, &tab.widths);
+        (Some(Ok(())), Some(view)) => {
+            table::show(ui, view);
         }
         _ => {}
     }
     run
-}
-
-fn measure(ui: &Ui, grid: &Grid) -> Vec<f32> {
-    let font = FontId::monospace(12.5);
-    let cw = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'm'));
-    (0..grid.columns.len())
-        .map(|c| {
-            let longest = grid
-                .rows
-                .iter()
-                .take(200)
-                .map(|r| {
-                    r.get(c)
-                        .and_then(|v| v.as_deref())
-                        .map_or(4, |v| v.chars().count())
-                })
-                .chain(std::iter::once(grid.columns[c].chars().count()))
-                .max()
-                .unwrap_or(4);
-            (longest.min(48) as f32 * cw + 18.0).max(60.0)
-        })
-        .collect()
-}
-
-/// Rows of a result, the header staying on top while they scroll; a click copies a cell.
-fn grid_ui(ui: &mut Ui, grid: &Grid, widths: &[f32]) {
-    let font = FontId::monospace(12.5);
-    let row_h = ui.ctx().fonts_mut(|f| f.row_height(&font)) + 8.0;
-    let total: f32 = widths.iter().sum::<f32>() + 48.0;
-    ScrollArea::horizontal()
-        .id_salt("grid_h")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            ui.set_min_width(total);
-            let cell = |ui: &mut Ui, width: f32, text: RichText, fill: Option<Color32>| {
-                let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
-                if let Some(fill) = fill {
-                    ui.painter().rect_filled(rect, 0.0, fill);
-                }
-                let galley = egui::WidgetText::from(text).into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Truncate),
-                    width - 12.0,
-                    egui::TextStyle::Monospace,
-                );
-                ui.painter().galley(
-                    rect.left_center() + vec2(6.0, -galley.size().y / 2.0),
-                    galley,
-                    theme::TEXT(),
-                );
-                resp
-            };
-            // The header.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                cell(
-                    ui,
-                    48.0,
-                    RichText::new("#")
-                        .font(font.clone())
-                        .color(theme::COMMENT()),
-                    Some(theme::tint(10)),
-                );
-                for (name, width) in grid.columns.iter().zip(widths) {
-                    cell(
-                        ui,
-                        *width,
-                        RichText::new(name)
-                            .font(font.clone())
-                            .strong()
-                            .color(theme::STRONG()),
-                        Some(theme::tint(10)),
-                    );
-                }
-            });
-            ScrollArea::vertical()
-                .id_salt("grid_v")
-                .auto_shrink(false)
-                .show_rows(ui, row_h, grid.rows.len(), |ui, range| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for index in range {
-                        let row = &grid.rows[index];
-                        let stripe = (index % 2 == 1).then(|| theme::tint(4));
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            cell(
-                                ui,
-                                48.0,
-                                RichText::new((index + 1).to_string())
-                                    .font(font.clone())
-                                    .color(theme::COMMENT()),
-                                stripe,
-                            );
-                            for (c, width) in widths.iter().enumerate() {
-                                let value = row.get(c).cloned().flatten();
-                                let text = match &value {
-                                    None => RichText::new("NULL")
-                                        .font(font.clone())
-                                        .italics()
-                                        .color(theme::COMMENT()),
-                                    Some(v) => RichText::new(v.replace('\n', "⏎"))
-                                        .font(font.clone())
-                                        .color(theme::TEXT()),
-                                };
-                                let resp = cell(ui, *width, text, stripe);
-                                if let Some(v) = &value {
-                                    let resp = resp.on_hover_text(v.as_str());
-                                    if resp.clicked() {
-                                        ui.ctx().copy_text(v.clone());
-                                    }
-                                }
-                            }
-                        });
-                    }
-                });
-        });
 }
 
 impl App {
@@ -675,7 +574,7 @@ impl App {
             running: false,
             started: 0.0,
             took: 0.0,
-            widths: Vec::new(),
+            view: None,
         };
         self.push_preview_tab(title.clone(), preview::Preview::Query(Box::new(query)));
         if run {
@@ -703,14 +602,35 @@ impl App {
                 i % 28 + 1
             ));
         }
+        // RIDE_DB_GRID=table opens it as a table with some changes made, to look at editing.
+        if std::env::var("RIDE_DB_GRID").as_deref() == Ok("table") {
+            let mut view = table::TableView::new(0, Engine::MySql, "users".into());
+            view.wants.clear();
+            view.set_columns(vec![table::Column {
+                name: "id".into(),
+                kind: "int(11)".into(),
+                key: true,
+                auto: true,
+                ..table::Column::default()
+            }]);
+            view.set_page(parse_mysql(&sample));
+            view.total = Some(1234);
+            view.set(1, 1, Some("Changed name".into()));
+            view.set(3, 4, None);
+            self.push_preview_tab(
+                "users — demo".into(),
+                preview::Preview::Table(Box::new(view)),
+            );
+            return;
+        }
         let query = QueryTab {
             conn: 0,
             sql: "SELECT * FROM `users` LIMIT 200;".into(),
-            result: Some(Ok(parse_mysql(&sample))),
+            result: Some(Ok(())),
+            view: Some(Box::new(table::TableView::result(parse_mysql(&sample)))),
             running: false,
             started: 0.0,
             took: 0.012,
-            widths: Vec::new(),
         };
         self.push_preview_tab(
             "SQL 1 — demo".into(),
@@ -719,6 +639,10 @@ impl App {
     }
 
     pub(super) fn run_query(&mut self, index: usize) {
+        if matches!(self.tabs[index].preview, Some(preview::Preview::Table(_))) {
+            self.table_wants(index);
+            return;
+        }
         let uid = self.tabs[index].uid;
         let Some(preview::Preview::Query(query)) = &mut self.tabs[index].preview else {
             return;
@@ -791,11 +715,151 @@ impl App {
                 };
                 query.running = false;
                 query.took = now - query.started;
-                query.result = Some(match outcome {
-                    Ok(output) => Ok(parse(engine, &output)),
-                    Err(error) => Err(error.trim().to_string()),
-                });
-                query.widths.clear();
+                match outcome {
+                    Ok(output) => {
+                        let grid = parse(engine, &output);
+                        let rows = !grid.columns.is_empty() && grid.columns != [""];
+                        query.view = rows.then(|| {
+                            let mut view = table::TableView::result(grid);
+                            view.engine = engine;
+                            Box::new(view)
+                        });
+                        query.result = Some(Ok(()));
+                    }
+                    Err(error) => {
+                        query.view = None;
+                        query.result = Some(Err(error.trim().to_string()));
+                    }
+                }
+            }
+            Job::Table { tab_uid, what } => self.table_done(tab_uid, what, outcome),
+        }
+    }
+
+    /// Opens a table in a tab of its own, to browse and edit.
+    fn db_open_table(&mut self, table: String) {
+        let Some(index) = self.db.selected else {
+            return;
+        };
+        let conn = &self.db.conns[index];
+        let title = format!("{table} — {}", conn.title());
+        if let Some(open) = self.tabs.iter().position(|t| t.path == title) {
+            self.active = open;
+            return;
+        }
+        let view = table::TableView::new(index, conn.engine, table);
+        self.push_preview_tab(title.clone(), preview::Preview::Table(Box::new(view)));
+        if let Some(open) = self.tabs.iter().position(|t| t.path == title) {
+            self.table_wants(open);
+        }
+    }
+
+    /// Runs what a table tab asked for.
+    fn table_wants(&mut self, index: usize) {
+        let uid = self.tabs[index].uid;
+        let Some(preview::Preview::Table(view)) = &mut self.tabs[index].preview else {
+            return;
+        };
+        let wants = std::mem::take(&mut view.wants);
+        let Some(conn) = self.db.conns.get(view.conn).cloned() else {
+            view.error = Some("The connection of this table is gone".into());
+            view.loading = false;
+            view.saving = false;
+            return;
+        };
+        let mut jobs = Vec::new();
+        for want in wants {
+            let (sql, what) = match want {
+                table::Want::Columns => (conn.table_columns_sql(&view.table), TableJob::Columns),
+                table::Want::Page => {
+                    view.loading = true;
+                    view.started = self.now;
+                    (view.page_sql(), TableJob::Page)
+                }
+                table::Want::Count => (view.count_sql(), TableJob::Count),
+                table::Want::Save(sql) => (sql, TableJob::Save),
+            };
+            // A page asked for twice in a frame is read once.
+            if !jobs.iter().any(|(s, _): &(String, TableJob)| *s == sql) {
+                jobs.push((sql, what));
+            }
+        }
+        for (sql, what) in jobs {
+            let job = Job::Table { tab_uid: uid, what };
+            if !self.db_run(&conn, &sql, job) {
+                let error = self.db.error.clone();
+                if let Some(preview::Preview::Table(view)) = &mut self.tabs[index].preview {
+                    view.error = Some(error);
+                    view.loading = false;
+                    view.saving = false;
+                }
+                return;
+            }
+        }
+    }
+
+    fn table_done(&mut self, uid: u64, what: TableJob, outcome: Result<String, String>) {
+        let now = self.now;
+        let Some(index) = self.tabs.iter().position(|t| t.uid == uid) else {
+            return;
+        };
+        let Some(preview::Preview::Table(view)) = &mut self.tabs[index].preview else {
+            return;
+        };
+        let engine = view.engine;
+        match (what, outcome) {
+            (TableJob::Columns, Ok(output)) => {
+                let columns = parse(engine, &output)
+                    .rows
+                    .into_iter()
+                    .map(|r| {
+                        let at = |i: usize| r.get(i).cloned().flatten();
+                        let default = at(4);
+                        let extra = at(5).unwrap_or_default().to_lowercase();
+                        table::Column {
+                            name: at(0).unwrap_or_default(),
+                            kind: at(1).unwrap_or_default(),
+                            key: at(2).unwrap_or_default() == "PRI",
+                            nullable: at(3).unwrap_or_default() == "YES",
+                            auto: extra.contains("auto_increment")
+                                || extra == "yes"
+                                || default
+                                    .as_deref()
+                                    .is_some_and(|d| d.starts_with("nextval(")),
+                            default,
+                        }
+                    })
+                    .collect();
+                view.set_columns(columns);
+            }
+            (TableJob::Page, Ok(output)) => {
+                let mut grid = parse(engine, &output);
+                // A page with no rows still has its columns.
+                if grid.columns.is_empty() || grid.columns == [""] {
+                    grid.columns = view.columns.iter().map(|c| c.name.clone()).collect();
+                }
+                view.set_page(grid);
+                view.took = now - view.started;
+                view.error = None;
+            }
+            (TableJob::Count, Ok(output)) => {
+                view.total = parse(engine, &output)
+                    .rows
+                    .first()
+                    .and_then(|r| r.first().cloned().flatten())
+                    .and_then(|n| n.trim().parse().ok());
+            }
+            (TableJob::Save, Ok(_)) => {
+                view.saved();
+                self.table_wants(index);
+            }
+            (TableJob::Save, Err(error)) => {
+                view.saving = false;
+                view.error = Some(format!("Nothing was saved: {}", error.trim()));
+            }
+            (_, Err(error)) => {
+                view.loading = false;
+                view.error = Some(error.trim().to_string());
             }
         }
     }
@@ -927,6 +991,7 @@ impl App {
         let filter = self.db.filter.to_lowercase();
         let conn = self.db.conns[selected].clone();
         let mut browse = None;
+        let mut open_table = None;
         let mut toggle = None;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -956,13 +1021,23 @@ impl App {
                         (name, theme::TEXT()),
                         (&format!("  {kind}"), theme::COMMENT()),
                     ]);
-                    if ui
+                    let row = ui
                         .selectable_label(false, label)
-                        .on_hover_text("Show the first 200 rows")
-                        .clicked()
-                    {
-                        browse = Some(name.clone());
+                        .on_hover_text("Open the table: browse, sort, filter and edit its rows");
+                    if row.clicked() {
+                        open_table = Some(name.clone());
                     }
+                    row.context_menu(|ui| {
+                        if menu_item(ui, icons::DATABASE, "Open") {
+                            open_table = Some(name.clone());
+                        }
+                        if menu_item(ui, icons::PLAY, "Query its first 200 rows") {
+                            browse = Some(name.clone());
+                        }
+                        if menu_item(ui, icons::COPY, "Copy name") {
+                            ui.ctx().copy_text(name.clone());
+                        }
+                    });
                 });
                 if open {
                     match self.db.columns.get(name) {
@@ -1004,6 +1079,9 @@ impl App {
         }
         if let Some(table) = browse {
             self.db_query_tab(conn.browse_sql(&table), true);
+        }
+        if let Some(table) = open_table {
+            self.db_open_table(table);
         }
     }
 

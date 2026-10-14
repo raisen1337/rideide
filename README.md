@@ -97,8 +97,11 @@ There is no API key to paste into ride.
 - A Git panel: stage, unstage, discard, commit, pull and push, with changed lines marked in the
   gutter. Switch, check out and create branches, stash changes, and see who last changed the
   line you're on. Claude can write the commit message.
-- A database explorer for MySQL, MariaDB and PostgreSQL on the server: tables, columns, and a
-  query tab with a result grid. It can take the connection from your `.env`.
+- A database explorer for MySQL, MariaDB and PostgreSQL on the server. Open a table to page
+  through it, sort by any column, search every column or filter with a WHERE, and edit it in
+  place: double-click a cell, add, duplicate and delete rows, then save it all as one
+  transaction. Select rows and cells as in a spreadsheet and copy or export them as CSV, JSON
+  or SQL. Query tabs run any SQL. It can take the connection from your `.env`.
 - A server panel with CPU, memory, disk, PM2 processes and listening ports; forward any port to
   `localhost` in one click.
 - Open several connections at once and drag files and folders from one server's tree to another's.

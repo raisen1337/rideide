@@ -28,6 +28,7 @@ mod sessions;
 mod settings;
 mod share;
 mod splash;
+mod table;
 mod term;
 mod theme;
 mod themes;
@@ -2408,6 +2409,12 @@ impl App {
     }
 
     fn save_tab(&mut self, index: usize) {
+        // Ctrl+S on a table saves the changes made in it.
+        if let Some(preview::Preview::Table(view)) = &mut self.tabs[index].preview {
+            view.request_save();
+            self.run_query(index);
+            return;
+        }
         self.tidy_before_save(index);
         // With format on save, the formatter's answer is what gets saved.
         if settings::with(|s| s.format_on_save) && self.format_tab(index, true) {
@@ -4738,6 +4745,9 @@ impl App {
 fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
     if let Some(preview::Preview::Query(query)) = &mut tab.preview {
         return db::query_tab(ui, query).then_some(editor::Action::RunQuery);
+    }
+    if let Some(preview::Preview::Table(view)) = &mut tab.preview {
+        return table::show(ui, view).then_some(editor::Action::RunQuery);
     }
     if tab.preview.is_none() && envfile::is_env_file(&tab.path) {
         if !tab.view.env_as_text {

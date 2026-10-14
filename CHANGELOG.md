@@ -3,6 +3,23 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.5
+
+- **A full table editor in the database explorer.** Click a table to open it in a tab of its own:
+  - its rows a page at a time (50 to 1000 per page), with the total count and Next/Previous;
+  - click a column's heading to sort by it, again to reverse, a third time for no order;
+  - search every column at once, or filter with a WHERE condition;
+  - double-click a cell to edit it (Enter keeps it, Escape drops it, Tab goes on to the next cell); long values open in a larger box; right-click sets a cell to NULL;
+  - add a row (it starts with the columns' defaults), duplicate one, or delete the selected rows with Delete;
+  - changed cells are marked yellow, new rows green, deleted rows red, until you save; Save (Ctrl+S) makes all of it as one transaction, so nothing goes in unless everything does, and Discard drops it;
+  - rows are found by their primary key; a table without one is matched by all of its values;
+  - click row numbers to select rows (Shift and Ctrl as usual, Ctrl+A for all), move with the arrow keys, and Ctrl+C copies the rows or the cell;
+  - copy or save the page, or the selected rows, as CSV, JSON, SQL INSERTs or tab-separated text;
+  - drag a heading's edge to make a column wider; the heading shows the primary key, and its tooltip the type, default and whether it may be NULL;
+  - right-click a value to filter by it.
+- A table's right-click menu in the explorer can still query its first 200 rows, or copy its name.
+- Query results use the same grid: sort them by a column, select rows, and copy or save them.
+
 ## 0.7.4
 
 - **Terminals side by side.** Drag a terminal's tab onto the edge of a terminal to put it beside or under it, as with the editor's tabs, or use the split button next to +. The line between two columns can be dragged. With several, the one you're typing in is marked with its colour.
