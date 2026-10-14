@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.7.2
+
+- A click on the Terminal or Problems tab no longer moves the panel: it moves only once its bar is dragged some way.
+- The panel keeps the height you gave it when you switch between Terminal and Problems, and the side bar keeps its width when you switch views.
+
 ## 0.7.1
 
 - The Terminal and Problems tabs at the top of the panel can be clicked again; before, a click there started moving the panel.

@@ -602,6 +602,8 @@ struct App {
     /// The box for opening another folder is shown in the explorer, and wants the keyboard.
     root_edit: bool,
     root_focus: bool,
+    /// The panel's bar is being dragged far enough to move the panel.
+    panel_moving: bool,
     find: Option<String>,
     focus_find: bool,
     terms: Vec<Terminal>,
@@ -1350,6 +1352,7 @@ impl App {
             panel_tab: chrome::PanelTab::Terminal,
             root_edit: false,
             root_focus: false,
+            panel_moving: false,
             find: None,
             focus_find: false,
             terms: Vec::new(),
@@ -3244,6 +3247,9 @@ impl App {
             Side::Outline => self.outline_panel(ui),
             Side::Database => self.database_panel(ui),
         }
+        // The panel keeps the size of what is in it: a narrow view filling it keeps the
+        // width it was given.
+        ui.allocate_space(ui.available_size());
     }
 
     /// Whether the results are a search's that can be replaced (not references, nor
@@ -3786,8 +3792,26 @@ impl App {
                     });
                 });
                 // The bar itself is the handle: drag it toward an edge of the editor area.
-                let pointer = ui.input(|i| i.pointer.interact_pos());
-                if let (true, Some(pointer)) = (drag.dragged() || drag.drag_stopped(), pointer) {
+                // It counts as a move only once the pointer has gone some way, so a click
+                // on a tab that slips a little doesn't move the panel.
+                let (pointer, far) = ui.input(|i| {
+                    let far = i
+                        .pointer
+                        .press_origin()
+                        .zip(i.pointer.interact_pos())
+                        .is_some_and(|(from, to)| from.distance(to) > 12.0);
+                    (i.pointer.interact_pos(), far)
+                });
+                if drag.dragged() && far {
+                    self.panel_moving = true;
+                }
+                let moving = self.panel_moving;
+                if drag.drag_stopped() || !drag.dragged() {
+                    self.panel_moving = false;
+                }
+                if let (true, Some(pointer)) =
+                    (moving && (drag.dragged() || drag.drag_stopped()), pointer)
+                {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                     if let Some((dock, zone)) = TermDock::zone_at(self.work_area, pointer) {
                         let layer = egui::LayerId::new(
@@ -3818,6 +3842,9 @@ impl App {
             Frame::NONE
                 .inner_margin(Margin::symmetric(12, 4))
                 .show(ui, |ui| self.problems_panel(ui));
+            // The panel keeps the size of what is in it: the problems fill it, so it stays as
+            // tall as the terminal had it.
+            ui.allocate_space(ui.available_size());
             return;
         }
         if self.terms.is_empty() {
