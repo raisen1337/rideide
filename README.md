@@ -60,15 +60,29 @@ There is no API key to paste into ride.
 ## Editor
 
 - Split the editor into columns and rows by dragging a tab to the edge of another pane.
+- Code folding, a minimap, breadcrumbs, and an outline of the file's functions and types
+  (Ctrl+Shift+O to jump to one).
+- Format on save, with the formatter of your choice per file type, run on the server. Prettier
+  and StyLua work out of the box through npx.
 - Errors on open and save, for Lua, JavaScript, Python, PHP, shell and JSON, using the checkers already
   on the server (`luac`, `node`, `python3`, `php`, `bash`).
+- Compare any two files side by side.
+- `.env` files open as a table, with the values hidden until you show them.
+- The Command Palette (Ctrl+Shift+P) also searches the VS Code Marketplace for themes and file icons,
+  and previews them before you install one.
+
+## Git, server and databases
+
 - A Git panel: stage, unstage, discard, commit, pull and push, with changed lines marked in the
-  gutter. Claude can write the commit message.
+  gutter. Switch, check out and create branches, stash changes, and see who last changed the
+  line you're on. Claude can write the commit message.
+- A database explorer for MySQL, MariaDB and PostgreSQL on the server: tables, columns, and a
+  query tab with a result grid. It can take the connection from your `.env`.
 - A server panel with CPU, memory, disk, PM2 processes and listening ports; forward any port to
   `localhost` in one click.
 - Open several connections at once and drag files and folders from one server's tree to another's.
 - The folder and open tabs, unsaved changes included, come back the next time you open ride.
-- Themes and VS Code icon themes.
+- Themes and VS Code icon themes, and ride updates itself from this repository's releases.
 
 ## Building from source
 

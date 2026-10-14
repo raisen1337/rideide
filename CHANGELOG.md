@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.4.0
+
+- **Database explorer.** A new side tab for MySQL, MariaDB and PostgreSQL databases on the server you're connected to. Add a connection, or fill it in from the folder's `.env`. Browse the tables and their columns, open the first 200 rows of a table with a click, and run any SQL in a query tab with Ctrl+Enter. Results show in a grid, and clicking a cell copies it.
+- The queries run through the `mysql`/`mariadb` or `psql` client on the server, so nothing new has to be opened to the internet. Passwords are kept only for this session, unless you choose to remember them.
+
 ## 0.3.2
 
 - **.env editor.** A `.env` file (also `.env.local`, `production.env` and the like) opens as a table of keys and values. The values stay hidden until you show one, or all of them. You can add and remove variables, and comments and order are kept. "Edit as text" switches to the plain file and back.

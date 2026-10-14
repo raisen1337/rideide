@@ -4,6 +4,7 @@ mod ai;
 mod buffer;
 mod chat;
 mod conn;
+mod db;
 mod diff;
 mod editor;
 mod envfile;
@@ -113,6 +114,8 @@ enum Pending {
         dest: String,
     },
     Hello,
+    /// The open folder's .env, read to fill in a database connection.
+    DbEnv,
     /// The second file of a comparison; the first one's text is already in hand.
     Compare {
         left: String,
@@ -497,6 +500,7 @@ enum Side {
     Git,
     Server,
     Outline,
+    Database,
 }
 
 struct App {
@@ -562,6 +566,9 @@ struct App {
     updater: update::Updater,
     /// What the outline side tab is narrowed to.
     outline_filter: String,
+    db: db::Db,
+    /// The app's clock (seconds), as of this frame.
+    now: f64,
     /// Changelog entries to show once after an update: (version, text).
     whats_new: Vec<(String, String)>,
     /// The other connections that are open, besides the one shown.
@@ -1301,6 +1308,8 @@ impl App {
             panes: panes::Panes::default(),
             updater: update::Updater::new(),
             outline_filter: String::new(),
+            db: db::Db::default(),
+            now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
                 // from before this screen existed was 0.1.0.
@@ -1377,6 +1386,7 @@ impl App {
             Ok("git") => app.side = Side::Git,
             Ok("server") => app.side = Side::Server,
             Ok("outline") => app.side = Side::Outline,
+            Ok("database") => app.side = Side::Database,
             _ => {}
         }
         app.refresh_themes();
@@ -1423,6 +1433,7 @@ impl App {
             app.themes.opacity = opacity.clamp(0.3, 0.97);
         }
         app.palette_from_env();
+        app.db_grid_from_env();
         if let Some(error) = update::Updater::take_last_error() {
             app.status = format!("The last update didn't install: {error}");
         }
@@ -1923,6 +1934,7 @@ impl App {
                 self.palette_files_found(&query, paths)
             }
             (Pending::PaletteFiles { .. }, _) => {}
+            (Pending::DbEnv, Response::File { data }) => self.db_env_read(&data),
             (
                 Pending::Compare {
                     left,
@@ -3113,6 +3125,14 @@ impl App {
             ) {
                 self.side = Side::Outline;
             }
+            if icon_toggle(
+                ui,
+                self.side == Side::Database,
+                icons::DATABASE,
+                "Databases",
+            ) {
+                self.side = Side::Database;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_toggle(
                     ui,
@@ -3148,6 +3168,7 @@ impl App {
             Side::Git => self.git_panel(ui),
             Side::Server => self.monitor_panel(ui),
             Side::Outline => self.outline_panel(ui),
+            Side::Database => self.database_panel(ui),
         }
     }
 
@@ -4092,6 +4113,9 @@ impl App {
 
 /// A tab's content: the editor for text, a preview for everything else.
 fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
+    if let Some(preview::Preview::Query(query)) = &mut tab.preview {
+        return db::query_tab(ui, query).then_some(editor::Action::RunQuery);
+    }
     if tab.preview.is_none() && envfile::is_env_file(&tab.path) {
         if !tab.view.env_as_text {
             envfile::show(ui, tab);
@@ -4151,6 +4175,7 @@ fn dir_menu(ui: &mut Ui, dir: &str, action: &mut Option<TreeAction>) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.now = ctx.input(|i| i.time);
         self.poll(&ctx);
         self.shortcuts(&ctx);
         self.sync_glass(frame);

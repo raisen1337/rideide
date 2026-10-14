@@ -29,6 +29,8 @@ pub enum Preview {
     },
     /// One edit Claude made, as removed and added lines.
     Diff(Vec<crate::diff::Line>),
+    /// SQL and its results, shown by the database explorer rather than here.
+    Query(Box<crate::db::QueryTab>),
 }
 
 pub enum Loaded {
@@ -311,6 +313,8 @@ pub fn show(ui: &mut Ui, preview: &mut Preview, name: &str) {
                     });
             });
         }
+        // Drawn by the database explorer (see `db::query_tab`).
+        Preview::Query(_) => {}
         Preview::Diff(lines) => {
             ui.add_space(6.0);
             crate::diff::show(ui, lines, "diff_tab", f32::INFINITY);

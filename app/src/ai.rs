@@ -45,7 +45,9 @@ pub(super) enum JobKind {
         what: String,
     },
     Monitor,
-    /// A formatter given a tab's text; with save, the tab is saved after.
+    /// A database command of the explorer.
+    Db(db::Job),
+    /// A formatter given a tab's text; with `save`, the tab is saved after.
     Format {
         tab_uid: u64,
         revision: u64,
@@ -246,7 +248,8 @@ impl App {
             Response::ProcStderr { data } => job.err.push_str(&String::from_utf8_lossy(data)),
             // A formatter that fails says why on its error stream; its output is no use.
             Response::ProcExit { code }
-                if matches!(job.kind, JobKind::Format { .. }) && *code != Some(0) =>
+                if matches!(job.kind, JobKind::Format { .. } | JobKind::Db(_))
+                    && *code != Some(0) =>
             {
                 let error = job.err.trim();
                 outcome = Some(Err(if error.is_empty() {
@@ -386,6 +389,7 @@ impl App {
                 },
                 outcome,
             ) => self.format_done(tab_uid, revision, save, outcome),
+            (JobKind::Db(job), outcome) => self.db_done(job, outcome),
             (kind, outcome) => self.tool_job_done(kind, outcome.unwrap_or_else(|error| error)),
         }
     }
@@ -405,6 +409,7 @@ impl App {
 
     pub(super) fn editor_action(&mut self, index: usize, action: editor::Action) {
         match action {
+            editor::Action::RunQuery => self.run_query(index),
             editor::Action::InlineEdit if self.tabs[index].detached => {
                 self.status = "Dock this tab into the main window to edit it with Claude".into();
             }

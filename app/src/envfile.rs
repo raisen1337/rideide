@@ -61,6 +61,17 @@ fn parse(text: &str) -> Vec<Line> {
         .collect()
 }
 
+/// The variables of a dotenv file, values unquoted.
+pub(super) fn pairs(text: &str) -> Vec<(String, String)> {
+    parse(text)
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Entry { key, value, .. } => Some((key, value)),
+            Line::Other(_) => None,
+        })
+        .collect()
+}
+
 fn write(lines: &[Line]) -> String {
     lines
         .iter()

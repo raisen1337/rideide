@@ -27,6 +27,8 @@ pub enum Action {
     InlineEdit,
     Explain,
     AddToChat,
+    /// Run a query tab's SQL.
+    RunQuery,
 }
 
 #[derive(Default)]
