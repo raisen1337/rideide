@@ -1,4 +1,4 @@
-//! Updates. Once a day ride reads `latest.json` from the newest GitHub release of the
+//! Updates. When it opens, and every hour while it is open, ride reads `latest.json` from the newest GitHub release of the
 //! project, and when it names a newer version, downloads that release's setup program in
 //! the background and checks it against the SHA-256 the manifest gives. The setup then
 //! runs when ride closes, or at once from the status bar: it waits for ride to exit,
@@ -17,7 +17,8 @@ const MANIFEST_URL: &str =
     "https://github.com/raisen1337/rideide/releases/latest/download/latest.json";
 pub const RELEASES_URL: &str = "https://github.com/raisen1337/rideide/releases";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-const DAY: u64 = 24 * 60 * 60;
+/// How often ride looks again while it stays open.
+const RECHECK: u64 = 60 * 60;
 /// A setup program is a few tens of megabytes; anything far bigger is not one.
 const MAX_SETUP: u64 = 400 * 1024 * 1024;
 
@@ -191,7 +192,7 @@ impl Updater {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
-        // Every start checks; it is one small file. While ride stays open, once a day.
+        // Every start checks; it is one small file. While ride stays open, every hour.
         Self {
             state: State::Idle,
             rx: None,
@@ -252,7 +253,7 @@ impl Updater {
             self.rx = None;
             self.downloading = None;
             let by_hand = std::mem::take(&mut self.by_hand);
-            self.next_check = Some(SystemTime::now() + Duration::from_secs(DAY));
+            self.next_check = Some(SystemTime::now() + Duration::from_secs(RECHECK));
             return match done {
                 Done::UpToDate => {
                     self.state = State::UpToDate;

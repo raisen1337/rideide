@@ -612,7 +612,7 @@ impl App {
                 row(
                     ui,
                     "Update automatically",
-                    "Checks GitHub when ride opens and restarts into a new version right away; one found later installs when you close ride. Tabs and chats come back.",
+                    "Checks GitHub when ride opens, and every hour after, and restarts into a new version right away; one found while you work installs when you close ride. Tabs and chats come back.",
                     |ui| toggle(ui, &mut s.auto_update),
                 );
                 let state = match &self.updater.state {
