@@ -1781,6 +1781,10 @@ impl App {
                     self.open_file(path.replace('\\', "/"), None);
                 }
                 // RIDE_CHAT_SEND sends a first message to the side chat, to look at its answer.
+                // RIDE_NO_TERM starts with the terminal hidden, for screenshots.
+                if std::env::var_os("RIDE_NO_TERM").is_some() {
+                    self.show_term = false;
+                }
                 if let Ok(text) = std::env::var("RIDE_CHAT_SEND") {
                     self.show_chat = true;
                     self.chat_send(text);
