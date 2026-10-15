@@ -407,7 +407,7 @@ enum Dialog {
         action: PromptAction,
     },
     ConfirmDelete {
-        path: String,
+        paths: Vec<String>,
     },
     ConfirmClose(usize),
     /// Replace the folder search's matches in these files; `lines` is how many lines matched.
@@ -431,12 +431,20 @@ enum TreeAction {
     Open(String),
     Download(String, bool),
     Prompt(&'static str, String, PromptAction),
-    Delete(String),
+    Delete(Vec<String>),
     Refresh(String),
-    AddToChat(String),
+    AddToChat(Vec<String>),
     Upload(String),
-    /// Copy a path: the full one, or relative to the open folder.
-    CopyPath(String, bool),
+    /// Copy paths: the full ones, or relative to the open folder.
+    CopyPath(Vec<String>, bool),
+}
+
+/// Rows picked in the file tree with Ctrl or Shift held, to act on together.
+#[derive(Default)]
+struct TreeSel {
+    paths: Vec<String>,
+    /// Where a Shift+click range starts: the row clicked last without Shift.
+    anchor: Option<String>,
 }
 
 struct TreeRow {
@@ -713,6 +721,7 @@ struct App {
     pending: HashMap<u64, Pending>,
     tree: HashMap<String, DirState>,
     expanded: HashSet<String>,
+    tree_sel: TreeSel,
     tabs: Vec<Tab>,
     active: usize,
     next_uid: u64,
@@ -1615,6 +1624,7 @@ impl App {
             pending: HashMap::new(),
             tree: HashMap::new(),
             expanded: HashSet::new(),
+            tree_sel: TreeSel::default(),
             tabs: Vec::new(),
             active: 0,
             next_uid: 1,
@@ -2333,7 +2343,7 @@ impl App {
                 match std::env::var("RIDE_DIALOG").as_deref() {
                     Ok("delete") => {
                         self.dialog = Some(Dialog::ConfirmDelete {
-                            path: join(&self.root, "tsconfig.json"),
+                            paths: vec![join(&self.root, "tsconfig.json")],
                         })
                     }
                     Ok("rename") => {
@@ -3662,16 +3672,75 @@ impl App {
     }
 
     /// Ctrl+Shift+F: the search view, or back to the files from it.
-    /// Puts a file's path on the clipboard: as it is on the host, or from the open folder.
-    fn copy_path(&mut self, ctx: &Context, path: &str, relative: bool) {
+    /// Puts paths on the clipboard, one a line: as they are on the host, or from the open folder.
+    fn copy_paths(&mut self, ctx: &Context, paths: &[String], relative: bool) {
         let prefix = format!("{}/", self.root.trim_end_matches('/'));
-        let text = if relative {
-            path.strip_prefix(&prefix).unwrap_or(path)
-        } else {
-            path
+        let text = paths
+            .iter()
+            .map(|path| match relative {
+                true => path.strip_prefix(&prefix).unwrap_or(path),
+                false => path,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.status = match paths.len() {
+            1 => format!("Copied {text}"),
+            n => format!("Copied {n} paths"),
         };
-        ctx.copy_text(text.to_string());
-        self.status = format!("Copied {text}");
+        ctx.copy_text(text);
+    }
+
+    /// Ctrl+click adds a row to the picked ones or takes it out; Shift+click picks every row
+    /// from the anchor to it. The first pick keeps the row clicked before, as in VS Code.
+    fn pick_rows(&mut self, rows: &[TreeRow], path: String, shift: bool) {
+        let at = |p: &str| rows.iter().position(|r| !r.note && r.path == p);
+        let active = self.docked_active().map(|i| self.tabs[i].path.clone());
+        let start = self
+            .tree_sel
+            .anchor
+            .clone()
+            .filter(|a| at(a).is_some())
+            .or(active.filter(|a| at(a).is_some()));
+        let sel = &mut self.tree_sel;
+        if shift {
+            sel.paths = match (start.as_deref().and_then(at), at(&path)) {
+                (Some(a), Some(b)) => rows[a.min(b)..=a.max(b)]
+                    .iter()
+                    .filter(|r| !r.note)
+                    .map(|r| r.path.clone())
+                    .collect(),
+                _ => vec![path.clone()],
+            };
+            if sel.anchor.is_none() {
+                sel.anchor = start.or(Some(path));
+            }
+            return;
+        }
+        if sel.paths.is_empty() {
+            sel.paths.extend(start.filter(|s| *s != path));
+        }
+        match sel.paths.iter().position(|p| *p == path) {
+            Some(i) => {
+                sel.paths.remove(i);
+            }
+            None => sel.paths.push(path.clone()),
+        }
+        sel.anchor = Some(path);
+    }
+
+    /// Deletes files and folders; one inside another that goes too isn't asked for again.
+    fn delete_paths(&mut self, paths: Vec<String>) {
+        let inside = |p: &str| {
+            paths
+                .iter()
+                .any(|other| p.len() > other.len() && p.starts_with(&format!("{other}/")))
+        };
+        let outer: Vec<String> = paths.iter().filter(|p| !inside(p)).cloned().collect();
+        for path in outer {
+            let refresh = parent(&path).to_string();
+            self.request_then(Request::Delete { path }, Pending::FsOp { refresh });
+        }
+        self.tree_sel.paths.clear();
     }
 
     fn toggle_search(&mut self) {
@@ -3758,6 +3827,10 @@ impl App {
         let mut targets = Vec::new();
         let mut dragged = None;
         let active_path = self.docked_active().map(|i| self.tabs[i].path.as_str());
+        // Once rows are picked with Ctrl or Shift, they are what shows as selected.
+        let picked: HashSet<&str> = self.tree_sel.paths.iter().map(String::as_str).collect();
+        let picking = !picked.is_empty();
+        let (mut plain_click, mut pick, mut unpick) = (None, None, false);
         let row_height = ui.text_style_height(&egui::TextStyle::Button) + 4.0;
         ui.spacing_mut().item_spacing.y = 0.0;
         ui.spacing_mut().button_padding = vec2(6.0, 2.0);
@@ -3794,7 +3867,11 @@ impl App {
                             (&format!("{icon}  "), icon_color),
                             (&row.name, name_color),
                         ]);
-                        let selected = active_path == Some(row.path.as_str());
+                        let selected = if picking {
+                            picked.contains(row.path.as_str())
+                        } else {
+                            active_path == Some(row.path.as_str())
+                        };
                         // An installed icon theme supplies an image; otherwise the glyph in `label`.
                         let resp = match self.entry_icon(ui.ctx(), &row.name, row.is_dir, open) {
                             Some(texture) => {
@@ -3814,11 +3891,22 @@ impl App {
                             resp
                         };
                         if resp.clicked() {
-                            action = Some(if row.is_dir {
-                                TreeAction::Toggle(row.path.clone())
+                            let mods = ui.input(|i| i.modifiers);
+                            if mods.command || mods.shift {
+                                pick = Some((row.path.clone(), mods.shift));
                             } else {
-                                TreeAction::Open(row.path.clone())
-                            });
+                                plain_click = Some(row.path.clone());
+                                action = Some(if row.is_dir {
+                                    TreeAction::Toggle(row.path.clone())
+                                } else {
+                                    TreeAction::Open(row.path.clone())
+                                });
+                            }
+                        }
+                        // A right click on a picked row acts on all of them; on another, on it.
+                        let group = picked.len() > 1 && picked.contains(row.path.as_str());
+                        if resp.secondary_clicked() && !group {
+                            unpick = true;
                         }
                         // Files dropped on a row go into its folder: from another
                         // connection's tree, or from Explorer.
@@ -3838,6 +3926,11 @@ impl App {
                             }
                         }
                         resp.context_menu(|ui| {
+                            if group {
+                                let paths = &self.tree_sel.paths;
+                                group_menu(ui, paths, &mut action);
+                                return;
+                            }
                             if row.is_dir {
                                 dir_menu(ui, &row.path, &mut action);
                                 ui.separator();
@@ -3845,14 +3938,14 @@ impl App {
                                 action = Some(TreeAction::Download(row.path.clone(), false));
                             }
                             if menu_item(ui, icons::SPARKLE, "Add to chat") {
-                                action = Some(TreeAction::AddToChat(row.path.clone()));
+                                action = Some(TreeAction::AddToChat(vec![row.path.clone()]));
                             }
                             ui.separator();
                             if menu_item(ui, icons::COPY, "Copy path") {
-                                action = Some(TreeAction::CopyPath(row.path.clone(), false));
+                                action = Some(TreeAction::CopyPath(vec![row.path.clone()], false));
                             }
                             if menu_item(ui, icons::COPY, "Copy relative path") {
-                                action = Some(TreeAction::CopyPath(row.path.clone(), true));
+                                action = Some(TreeAction::CopyPath(vec![row.path.clone()], true));
                             }
                             ui.separator();
                             if menu_item(ui, icons::EDIT, "Rename…") {
@@ -3861,7 +3954,7 @@ impl App {
                                     Some(TreeAction::Prompt("Rename", row.name.clone(), prompt));
                             }
                             if menu_item(ui, icons::TRASH, "Delete…") {
-                                action = Some(TreeAction::Delete(row.path.clone()));
+                                action = Some(TreeAction::Delete(vec![row.path.clone()]));
                             }
                         });
                     });
@@ -3871,6 +3964,22 @@ impl App {
         // Let go over the empty part of the tree, a file lands in the open folder.
         targets.push((tree_area.inner_rect, here, root.clone()));
         self.drop_targets.extend(targets);
+        if let Some(path) = plain_click {
+            self.tree_sel = TreeSel {
+                paths: Vec::new(),
+                anchor: Some(path),
+            };
+        }
+        if unpick {
+            self.tree_sel.paths.clear();
+        }
+        if let Some((path, shift)) = pick {
+            self.pick_rows(&rows, path, shift);
+        }
+        let escape = ui.input(|i| i.key_pressed(Key::Escape));
+        if escape && ui.memory(|m| m.focused().is_none()) {
+            self.tree_sel.paths.clear();
+        }
         if several && dragged.is_some() {
             self.drag_file = dragged;
         }
@@ -3891,17 +4000,20 @@ impl App {
                     action,
                 });
             }
-            Some(TreeAction::Delete(path)) if settings::with(|s| s.confirm_delete) => {
-                self.dialog = Some(Dialog::ConfirmDelete { path });
+            Some(TreeAction::Delete(paths)) if settings::with(|s| s.confirm_delete) => {
+                self.dialog = Some(Dialog::ConfirmDelete { paths });
             }
-            Some(TreeAction::Delete(path)) => {
-                let refresh = parent(&path).to_string();
-                self.request_then(Request::Delete { path }, Pending::FsOp { refresh });
-            }
+            Some(TreeAction::Delete(paths)) => self.delete_paths(paths),
             Some(TreeAction::Refresh(path)) => self.load_dir(&path),
-            Some(TreeAction::AddToChat(path)) => self.add_path_to_chat(&path),
+            Some(TreeAction::AddToChat(paths)) => {
+                for path in paths {
+                    self.add_path_to_chat(&path);
+                }
+            }
             Some(TreeAction::Upload(dir)) => self.pick_and_upload(dir),
-            Some(TreeAction::CopyPath(path, relative)) => self.copy_path(ui.ctx(), &path, relative),
+            Some(TreeAction::CopyPath(paths, relative)) => {
+                self.copy_paths(ui.ctx(), &paths, relative)
+            }
             None => {}
         }
     }
@@ -4493,7 +4605,7 @@ impl App {
                                 }
                             });
                             if let Some((path, relative)) = copy {
-                                self.copy_path(ui.ctx(), &path, relative);
+                                self.copy_paths(ui.ctx(), &[path], relative);
                             }
                             if let Some(pos) = detach {
                                 let tab = &mut self.tabs[index];
@@ -4764,8 +4876,11 @@ impl App {
         use chrome::{field, note, Answer, Tone};
         let (title, confirm_label, tone, width) = match &dialog {
             Dialog::Prompt { title, .. } => (title.clone(), "OK", Tone::Normal, 380.0),
-            Dialog::ConfirmDelete { path } => (
-                format!("Delete {}?", file_name(path)),
+            Dialog::ConfirmDelete { paths } => (
+                match paths.as_slice() {
+                    [path] => format!("Delete {}?", file_name(path)),
+                    _ => format!("Delete {} items?", paths.len()),
+                },
                 "Delete",
                 Tone::Danger,
                 400.0,
@@ -4808,12 +4923,21 @@ impl App {
                         }
                         edit.lost_focus() && enter
                     }
-                    Dialog::ConfirmDelete { path } => {
+                    Dialog::ConfirmDelete { paths } => {
+                        // A long list shows its start and how many more there are.
+                        const SHOWN: usize = 8;
+                        let mut list = paths
+                            .iter()
+                            .take(SHOWN)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if paths.len() > SHOWN {
+                            list += &format!("\nand {} more", paths.len() - SHOWN);
+                        }
                         ui.add(
-                            egui::Label::new(
-                                RichText::new(path.as_str()).small().color(theme::COMMENT()),
-                            )
-                            .wrap(),
+                            egui::Label::new(RichText::new(list).small().color(theme::COMMENT()))
+                                .wrap(),
                         );
                         note(
                             ui,
@@ -4921,10 +5045,7 @@ impl App {
                     }
                 }
             }
-            Dialog::ConfirmDelete { path } => {
-                let refresh = parent(&path).to_string();
-                self.request_then(Request::Delete { path }, Pending::FsOp { refresh });
-            }
+            Dialog::ConfirmDelete { paths } => self.delete_paths(paths),
             Dialog::ConfirmClose(index) => {
                 if index < self.tabs.len() {
                     self.close_tab(index, true);
@@ -4977,6 +5098,25 @@ fn tab_body(ui: &mut Ui, tab: &mut Tab, root: &str) -> Option<editor::Action> {
             let action = editor::show(ui, &mut tab.buf, &mut tab.view, lang);
             note.or(action)
         }
+    }
+}
+
+/// The menu for several picked rows: what can be done to all of them at once.
+fn group_menu(ui: &mut Ui, paths: &[String], action: &mut Option<TreeAction>) {
+    let n = paths.len();
+    if menu_item(ui, icons::SPARKLE, &format!("Add {n} to chat")) {
+        *action = Some(TreeAction::AddToChat(paths.to_vec()));
+    }
+    ui.separator();
+    if menu_item(ui, icons::COPY, "Copy paths") {
+        *action = Some(TreeAction::CopyPath(paths.to_vec(), false));
+    }
+    if menu_item(ui, icons::COPY, "Copy relative paths") {
+        *action = Some(TreeAction::CopyPath(paths.to_vec(), true));
+    }
+    ui.separator();
+    if menu_item(ui, icons::TRASH, &format!("Delete {n} items…")) {
+        *action = Some(TreeAction::Delete(paths.to_vec()));
     }
 }
 

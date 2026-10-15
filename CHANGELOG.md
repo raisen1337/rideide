@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.5
+
+- Pick several files and folders in the file tree: Ctrl+click adds or removes one, Shift+click takes a range. Right-click the picked rows to add them to chat, copy their paths or delete them together. Escape or a plain click clears the pick.
+
 ## 0.9.4
 
 - Notifications come from ride, with its name and icon, instead of from Windows PowerShell. ride registers both for your user the first time it shows one; uninstalling removes them.

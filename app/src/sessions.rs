@@ -17,6 +17,7 @@ pub(super) struct Session {
     pending: HashMap<u64, Pending>,
     tree: HashMap<String, DirState>,
     expanded: HashSet<String>,
+    tree_sel: TreeSel,
     tabs: Vec<Tab>,
     active: usize,
     panes: panes::Panes,
@@ -50,6 +51,7 @@ impl Session {
             pending: HashMap::new(),
             tree: HashMap::new(),
             expanded: HashSet::new(),
+            tree_sel: TreeSel::default(),
             tabs: Vec::new(),
             active: 0,
             panes: panes::Panes::default(),
@@ -146,6 +148,7 @@ impl App {
         swap(&mut self.pending, &mut other.pending);
         swap(&mut self.tree, &mut other.tree);
         swap(&mut self.expanded, &mut other.expanded);
+        swap(&mut self.tree_sel, &mut other.tree_sel);
         swap(&mut self.tabs, &mut other.tabs);
         swap(&mut self.active, &mut other.active);
         swap(&mut self.panes, &mut other.panes);
