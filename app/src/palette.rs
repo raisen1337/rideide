@@ -66,7 +66,7 @@ type MarketResult = Result<Vec<themes::MarketHit>, String>;
 
 #[derive(Default)]
 pub(super) struct Palette {
-    open: bool,
+    pub(super) open: bool,
     /// Finding a file by name, rather than picking a command.
     files_mode: bool,
     query: String,

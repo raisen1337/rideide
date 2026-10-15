@@ -81,9 +81,9 @@ There is no API key to paste into ride.
 
 ## Designer
 
-- Claude designs interfaces in Tribib: each design session is a chat with a
-  Tribib document of its own, and the canvas shows live beside it while Claude builds. Ask for the
-  result as code and it goes into your project.
+- Claude designs interfaces in Tribib, with Tribib itself inside ride: the Designer holds the
+  Tribib app's own window in its middle, with the chat at the right. Each design session is a chat
+  with a Tribib document of its own. Ask for the result as code and it goes into your project.
 - Any MCP server can be given to Claude in Settings. One running on your computer is reached from
   the server Claude runs on through an SSH tunnel ride opens.
 

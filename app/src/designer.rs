@@ -112,6 +112,8 @@ pub(super) struct Canvas {
     pub(super) live: bool,
     /// Fit the picture to the panel, or show it at its size.
     fit: bool,
+    /// Whether a look takes a picture: not while Tribib itself is shown.
+    shots: bool,
 }
 
 impl Default for Canvas {
@@ -126,6 +128,7 @@ impl Default for Canvas {
             last: f64::NEG_INFINITY,
             live: true,
             fit: true,
+            shots: true,
         }
     }
 }
@@ -173,7 +176,7 @@ fn call_tool(url: &str, tool: &str, args: serde_json::Value) -> Result<serde_jso
 }
 
 /// Reads which documents are open, and a picture of the current page.
-fn look(url: &str, select: Option<String>) -> Result<Look, String> {
+fn look(url: &str, select: Option<String>, shot: bool) -> Result<Look, String> {
     if let Some(document) = select {
         call_tool(
             url,
@@ -198,7 +201,7 @@ fn look(url: &str, select: Option<String>) -> Result<Look, String> {
         .collect();
     let page = &state["active"]["page"];
     let png = match page["id"].as_str() {
-        Some(id) if page["children"].as_u64() != Some(0) => {
+        Some(id) if shot && page["children"].as_u64() != Some(0) => {
             let shot = call_tool(
                 url,
                 "get_screenshot",
@@ -229,8 +232,9 @@ impl Canvas {
         }
         let (tx, rx) = channels::channel();
         let ctx = ctx.clone();
+        let shot = self.shots;
         std::thread::spawn(move || {
-            let _ = tx.send(look(&url, select));
+            let _ = tx.send(look(&url, select, shot));
             ctx.request_repaint();
         });
         self.pending = Some(rx);
@@ -264,7 +268,8 @@ impl Canvas {
                             }
                         }
                     }
-                    None => self.texture = None,
+                    None if self.shots => self.texture = None,
+                    None => {}
                 }
             }
             Err(error) => self.error = Some(error),
@@ -504,43 +509,213 @@ impl App {
 
     // ---- the view ----
 
-    /// The Designer view: the design sessions, the chat of the one chosen, and the canvas.
+    /// The Designer view: the design sessions at the left, Tribib itself in the middle (its
+    /// own window, held inside ride's), and the chat of the session at the right.
     pub(super) fn designer_view(&mut self, ui: &mut Ui, ctx: &Context) {
         if self.designs.is_empty() {
             self.new_design();
         }
         self.active_design = self.active_design.min(self.designs.len() - 1);
         self.canvas.take(ctx, self.now);
-        // The canvas is looked at again every moment while Claude works, less often otherwise.
+        let held = self.held.is_some();
+        self.canvas.shots = !held;
+        // Without Tribib in the middle, its picture is followed: every moment while Claude
+        // works, less often otherwise. With it there, only its documents are looked at.
         let busy = self.designs.iter().any(|d| d.chat.busy);
-        let every = match (&self.canvas.error, busy) {
-            (Some(_), _) => 5.0,
-            (None, true) => 1.0,
-            (None, false) => 2.5,
+        let every = match (&self.canvas.error, busy, held) {
+            (Some(_), _, _) => 5.0,
+            (None, _, true) => 4.0,
+            (None, true, false) => 1.0,
+            (None, false, false) => 2.5,
         };
         if self.canvas.live && self.now - self.canvas.last > every {
             self.canvas.refresh(ctx, tribib_url(), None);
         }
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(every / 2.0));
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((every / 2.0).min(1.0)));
 
         let size = ctx.content_rect().size();
         Panel::left("designs")
             .resizable(true)
-            .default_size(240.0)
-            .size_range(200.0..=(size.x * 0.3).max(200.0))
+            .default_size(210.0)
+            .size_range(180.0..=(size.x * 0.25).max(180.0))
             .show_separator_line(true)
             .frame(theme::card(theme::glass()))
             .show(ui, |ui| self.designs_panel(ui));
-        Panel::right("design_canvas")
+        Panel::right("design_chat")
             .resizable(true)
-            .default_size(520.0)
-            .size_range(380.0..=(size.x * 0.7).max(380.0))
+            .default_size(420.0)
+            .size_range(320.0..=(size.x * 0.5).max(320.0))
             .show_separator_line(true)
-            .frame(theme::card(theme::surface()).inner_margin(Margin::same(10)))
-            .show(ui, |ui| self.canvas_panel(ui));
-        CentralPanel::default_margins()
             .frame(theme::card(theme::surface()).inner_margin(Margin::same(12)))
             .show(ui, |ui| self.design_chat(ui));
+        CentralPanel::default_margins()
+            .frame(theme::card(theme::surface()).inner_margin(Margin::ZERO))
+            .show(ui, |ui| self.tribib_area(ui));
+    }
+
+    /// The program held in the middle: Tribib, or another for trying it out (RIDE_EMBED).
+    fn embed_program() -> String {
+        std::env::var("RIDE_EMBED").unwrap_or_else(|_| "Tribib.exe".into())
+    }
+
+    /// The middle of the Designer: Tribib's own window, kept over this part of ride's.
+    fn tribib_area(&mut self, ui: &mut Ui) {
+        let mut pick = None;
+        let mut give_back = false;
+        let mut take_in = false;
+        let index = self.active_design;
+        Frame::NONE
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let chosen = self.designs[index]
+                        .document
+                        .as_ref()
+                        .map_or("Choose a Tribib document".to_string(), |d| d.1.clone());
+                    egui::ComboBox::from_id_salt("tribib_document")
+                        .selected_text(chosen)
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            if self.canvas.documents.is_empty() {
+                                ui.label(
+                                    RichText::new("No document open in Tribib")
+                                        .color(theme::COMMENT()),
+                                );
+                            }
+                            for (id, name, active) in &self.canvas.documents {
+                                let label = if *active {
+                                    format!("{name}  (in front)")
+                                } else {
+                                    name.clone()
+                                };
+                                let current = self.designs[index]
+                                    .document
+                                    .as_ref()
+                                    .is_some_and(|d| &d.0 == id);
+                                if ui.selectable_label(current, label).clicked() {
+                                    pick = Some((id.clone(), name.clone()));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("The document Claude works on in this session");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.held.is_some() {
+                            give_back =
+                                icon_button(ui, icons::POP_OUT, "Give Tribib its own window back");
+                        } else if self.embed_off {
+                            take_in = ui
+                                .button(format!("{}  Bring Tribib in", icons::DOCK))
+                                .clicked();
+                        }
+                        let (dot, text) = match (&self.held, &self.canvas.error) {
+                            (Some(_), _) => (theme::ANSI()[2], "Tribib"),
+                            (None, Some(_)) => (theme::ANSI()[1], "Tribib isn't running"),
+                            (None, None) if self.embed_off => {
+                                (theme::COMMENT(), "Tribib in its own window")
+                            }
+                            (None, None) => (theme::ANSI()[3], "Looking for Tribib…"),
+                        };
+                        ui.label(RichText::new(text).small().color(theme::COMMENT()));
+                        ui.label(RichText::new(icons::DOT.to_string()).size(9.0).color(dot));
+                    });
+                });
+            });
+        if let Some((id, name)) = pick {
+            self.designs[index].document = Some((id.clone(), name));
+            self.canvas.refresh(ui.ctx(), tribib_url(), Some(id));
+        }
+        if give_back {
+            if let Some(held) = self.held.take() {
+                crate::embed::release(&held);
+            }
+            self.embed_off = true;
+        }
+        if take_in {
+            self.embed_off = false;
+        }
+
+        let area = ui.available_rect_before_wrap();
+        ui.advance_cursor_after_rect(area);
+        let parent = self.ride_window;
+        // What lies over the middle hides Tribib: it would cover a dialog or the palette.
+        let covered = self.dialog.is_some() || self.palette.open;
+        if !self.embed_off {
+            if let Some(parent) = parent {
+                let gone = self
+                    .held
+                    .as_ref()
+                    .is_some_and(|h| !crate::embed::alive(h, parent));
+                if gone {
+                    self.held = None;
+                }
+                // Looked for now and then, not every frame: it walks every window.
+                if self.held.is_none() && self.now - self.embed_tried > 1.0 {
+                    self.embed_tried = self.now;
+                    if let Some(window) = crate::embed::find(&Self::embed_program()) {
+                        self.held = crate::embed::hold(window, parent);
+                    }
+                }
+            }
+        }
+        if let Some(held) = &self.held {
+            let scale = ui.ctx().pixels_per_point();
+            let r = area.shrink(1.0);
+            let place = (
+                (r.min.x * scale).round() as i32,
+                (r.min.y * scale).round() as i32,
+                (r.width() * scale).round() as i32,
+                (r.height() * scale).round() as i32,
+                !covered,
+            );
+            if self.embed_place != Some(place) {
+                self.embed_place = Some(place);
+                crate::embed::place(held, place.0, place.1, place.2, place.3, place.4);
+            }
+            return;
+        }
+        // Tribib isn't held: its picture, or what to do.
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink(10.0)));
+        if self.canvas.error.is_some() || !self.embed_off {
+            inner.add_space(40.0);
+            inner.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Tribib shows here, inside ride, once it is running.")
+                        .color(theme::STRONG()),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Its own window moves in; \"Give Tribib its own window back\" moves it out again.")
+                        .small()
+                        .color(theme::COMMENT()),
+                );
+                ui.add_space(10.0);
+                if ui.button(format!("{}  Open Tribib", icons::PLAY)).clicked() {
+                    if let Err(error) = open_tribib() {
+                        self.status = error;
+                    }
+                }
+            });
+            return;
+        }
+        self.canvas_picture(&mut inner);
+    }
+
+    /// Hides Tribib when the Designer isn't shown; ride's other views are under it.
+    pub(super) fn designer_away(&mut self) {
+        if let Some(held) = &self.held {
+            if self.embed_place.is_some_and(|p| p.4) || self.embed_place.is_none() {
+                crate::embed::place(held, 0, 0, 1, 1, false);
+                self.embed_place = Some((0, 0, 1, 1, false));
+            }
+        }
+    }
+
+    /// Gives Tribib its own window back, as ride closes.
+    pub(super) fn designer_release(&mut self) {
+        if let Some(held) = self.held.take() {
+            crate::embed::release(&held);
+        }
     }
 
     fn designs_panel(&mut self, ui: &mut Ui) {
@@ -686,86 +861,8 @@ impl App {
         }
     }
 
-    fn canvas_panel(&mut self, ui: &mut Ui) {
-        let mut pick = None;
-        let mut refresh = false;
-        let index = self.active_design;
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("CANVAS")
-                    .small()
-                    .strong()
-                    .color(theme::COMMENT()),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, icons::POP_OUT, "Open Tribib") {
-                    if let Err(error) = open_tribib() {
-                        self.status = error;
-                    }
-                }
-                let fit = if self.canvas.fit { "Fit" } else { "100%" };
-                if ui
-                    .small_button(fit)
-                    .on_hover_text("Fit the canvas to the panel, or show it at its size")
-                    .clicked()
-                {
-                    self.canvas.fit = !self.canvas.fit;
-                }
-                if icon_button(ui, icons::REFRESH, "Look again") {
-                    refresh = true;
-                }
-                let live = if self.canvas.live {
-                    RichText::new(format!("{}  Live", icons::DOT))
-                        .small()
-                        .color(theme::ANSI()[2])
-                } else {
-                    RichText::new("Paused").small().color(theme::COMMENT())
-                };
-                if ui
-                    .add(egui::Label::new(live).sense(Sense::click()))
-                    .on_hover_text("Click to pause or resume following the canvas")
-                    .clicked()
-                {
-                    self.canvas.live = !self.canvas.live;
-                }
-            });
-        });
-        ui.add_space(2.0);
-        let chosen = self.designs[index]
-            .document
-            .as_ref()
-            .map_or("Choose a Tribib document".to_string(), |d| d.1.clone());
-        egui::ComboBox::from_id_salt("tribib_document")
-            .selected_text(chosen)
-            .width(ui.available_width() - 8.0)
-            .show_ui(ui, |ui| {
-                if self.canvas.documents.is_empty() {
-                    ui.label(RichText::new("No document open in Tribib").color(theme::COMMENT()));
-                }
-                for (id, name, active) in &self.canvas.documents {
-                    let label = if *active {
-                        format!("{name}  (in front)")
-                    } else {
-                        name.clone()
-                    };
-                    let current = self.designs[index]
-                        .document
-                        .as_ref()
-                        .is_some_and(|d| &d.0 == id);
-                    if ui.selectable_label(current, label).clicked() {
-                        pick = Some((id.clone(), name.clone()));
-                    }
-                }
-            });
-        ui.add_space(6.0);
-        if let Some((id, name)) = pick {
-            let index = self.active_design;
-            self.designs[index].document = Some((id.clone(), name));
-            self.canvas.refresh(ui.ctx(), tribib_url(), Some(id));
-        } else if refresh {
-            self.canvas.refresh(ui.ctx(), tribib_url(), None);
-        }
-
+    /// The picture of Tribib's canvas, for when Tribib is in its own window.
+    fn canvas_picture(&mut self, ui: &mut Ui) {
         if let Some(error) = &self.canvas.error {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {

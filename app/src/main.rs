@@ -10,6 +10,7 @@ mod db;
 mod designer;
 mod diff;
 mod editor;
+mod embed;
 mod envfile;
 mod extras;
 mod github;
@@ -65,6 +66,8 @@ fn main() -> eframe::Result {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().name() == Some("main") {
+            // A window held inside ride's would go with it: it is given back first.
+            embed::release_any();
             if let Some(path) = crash_file() {
                 let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
                 let backtrace = std::backtrace::Backtrace::force_capture();
@@ -786,6 +789,13 @@ struct App {
     canvas: designer::Canvas,
     /// SSH tunnels that bring MCP servers of this computer to the host.
     tunnels: Vec<designer::Tunnel>,
+    /// ride's own window, Tribib's held in it, where it was last put (x, y, w, h, shown),
+    /// when it was last looked for, and whether the user gave it its own window back.
+    ride_window: Option<isize>,
+    held: Option<embed::Held>,
+    embed_place: Option<(i32, i32, i32, i32, bool)>,
+    embed_tried: f64,
+    embed_off: bool,
     /// The app's clock (seconds), as of this frame.
     now: f64,
     /// Changelog entries to show once after an update: (version, text).
@@ -1583,6 +1593,11 @@ impl App {
             active_design: 0,
             canvas: designer::Canvas::default(),
             tunnels: Vec::new(),
+            ride_window: None,
+            held: None,
+            embed_place: None,
+            embed_tried: f64::NEG_INFINITY,
+            embed_off: false,
             now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
@@ -4970,6 +4985,17 @@ impl App {
             .show_separator_line(true)
             .frame(Frame::NONE.fill(theme::chrome()))
             .show(ui, |ui| self.activity_bar(ui));
+        if self.ride_window.is_none() {
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(handle) = frame.window_handle() {
+                if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                    self.ride_window = Some(h.hwnd.get());
+                }
+            }
+        }
+        if self.view != View::Designer || !online {
+            self.designer_away();
+        }
         if self.view == View::Designer {
             if online {
                 self.designer_view(ui, &ctx);
@@ -5167,6 +5193,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        // Tribib's window goes back to being its own before ride's goes away with it.
+        self.designer_release();
         // A downloaded update goes in as ride closes; the setup waits for it to be gone.
         if settings::with(|s| s.auto_update) {
             self.updater.install(false);

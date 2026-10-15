@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.1
+
+- **Tribib inside ride.** The Designer now holds the Tribib app itself in its middle: your projects, the canvas, every tool, used right there as in Tribib. The chat with Claude is at the right, the design sessions at the left. Open Tribib (or have it open) and it moves in; the button at the top right of it gives it its own window back, and "Bring Tribib in" takes it in again.
+- Tribib hides while you're in another view, and while a dialog or the command palette is open over it.
+- When ride closes, Tribib gets its own window back. Ending ride from Task Manager, though, takes Tribib's window with it, as Windows closes a window held inside another one; close ride normally while Tribib is in it.
+
 ## 0.8.0
 
 - **MCP servers for Claude.** Settings → Claude → MCP servers: a name and a URL, and every Claude ride starts gets them (the chat, the agents and the Designer). A server on this computer, at 127.0.0.1, is reached from the server Claude runs on through an SSH tunnel ride opens by itself, so a desktop tool works with Claude on your VPS.
