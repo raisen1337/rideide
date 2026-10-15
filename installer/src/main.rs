@@ -1,5 +1,6 @@
-//! The setup program for ride. It carries the application inside itself, installs it
-//! for the current user, and doubles as the uninstaller (`--uninstall`).
+//! The setup program for rkit, the suite: ride, the editor, and rterm, the terminal. It
+//! carries the programs inside itself, installs them for the current user, and doubles as
+//! the uninstaller (`--uninstall`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -36,7 +37,7 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let uninstall = args.iter().any(|arg| arg == "--uninstall");
     // `--silent` does the whole job without a window, for scripted installs:
-    //   ride-setup --silent [--dir=PATH] [--portable]      (--portable: no shortcuts, not registered)
+    //   rkit-setup --silent [--dir=PATH] [--portable]      (--portable: no shortcuts, not registered)
     //   uninstall --uninstall --silent [--remove-data]
     // `--preview` runs the whole interface without touching the computer: no files,
     // shortcuts or registry entries are written, and nothing is launched or removed.
@@ -59,16 +60,16 @@ fn main() -> eframe::Result {
                 height: 128,
             })
             .with_title(if uninstall {
-                "Uninstall ride"
+                "Uninstall rkit"
             } else {
-                "ride Setup"
+                "rkit Setup"
             }),
         centered: true,
         persist_window: false,
         ..Default::default()
     };
     eframe::run_native(
-        "ride-setup",
+        "rkit-setup",
         options,
         Box::new(move |cc| Ok(Box::new(Setup::new(cc, uninstall, preview)))),
     )
@@ -90,8 +91,24 @@ fn local_app_data() -> PathBuf {
     PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| "C:\\".into()))
 }
 
+/// Where a fresh install goes: where rkit already is, if it is installed, so running setup
+/// again updates that copy (installs from before the name rkit live in `Programs\ride`).
 fn default_dir() -> PathBuf {
-    local_app_data().join("Programs").join("ride")
+    registered_dir().unwrap_or_else(|| local_app_data().join("Programs").join("rkit"))
+}
+
+/// The folder Windows lists the install in, under "Installed apps".
+fn registered_dir() -> Option<PathBuf> {
+    let out = quiet("reg")
+        .args(["query", UNINSTALL_KEY, "/v", "InstallLocation"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (_, value) = text.lines().find_map(|line| line.split_once("REG_SZ"))?;
+    Some(PathBuf::from(value.trim())).filter(|dir| !dir.as_os_str().is_empty())
 }
 
 fn start_menu_link() -> PathBuf {
@@ -249,20 +266,13 @@ fn remove_shortcuts() {
 /// Whether `dir` is the install Windows lists under "Installed apps". A portable copy
 /// elsewhere is updated without touching that install's entry, shortcuts or menus.
 fn is_registered(dir: &Path) -> bool {
-    let Ok(out) = quiet("reg")
-        .args(["query", UNINSTALL_KEY, "/v", "InstallLocation"])
-        .output()
-    else {
-        return false;
+    let plain = |p: &Path| {
+        p.display()
+            .to_string()
+            .trim_end_matches('\\')
+            .to_lowercase()
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let listed = text
-        .lines()
-        .find_map(|line| line.split_once("REG_SZ"))
-        .map(|(_, value)| value.trim().trim_end_matches('\\').to_lowercase());
-    let dir = dir.display().to_string();
-    out.status.success()
-        && listed.is_some_and(|listed| listed == dir.trim_end_matches('\\').to_lowercase())
+    registered_dir().is_some_and(|listed| plain(&listed) == plain(dir))
 }
 
 /// Lists ride under "Installed apps", with this program as its uninstaller.
@@ -270,9 +280,9 @@ fn register(dir: &Path, size_kb: u64) -> Result<(), String> {
     let exe = dir.join("ride.exe");
     let uninstall = format!("\"{}\" --uninstall", dir.join("uninstall.exe").display());
     let values: [(&str, &str, String); 9] = [
-        ("DisplayName", "REG_SZ", "ride".into()),
+        ("DisplayName", "REG_SZ", "rkit (ride, rterm)".into()),
         ("DisplayVersion", "REG_SZ", VERSION.into()),
-        ("Publisher", "REG_SZ", "ride".into()),
+        ("Publisher", "REG_SZ", "rkit".into()),
         ("InstallLocation", "REG_SZ", dir.display().to_string()),
         ("DisplayIcon", "REG_SZ", exe.display().to_string()),
         ("UninstallString", "REG_SZ", uninstall),
@@ -512,7 +522,7 @@ fn silent(args: &[String], uninstalling: bool) -> bool {
 }
 
 /// Updates an existing install in place, without a window:
-///   ride-setup --update --dir=PATH [--wait=PID] [--launch]
+///   rkit-setup --update --dir=PATH [--wait=PID] [--launch]
 /// Waits for that ride (PID) to exit, swaps in the new ride.exe so that a failure at any
 /// point leaves the old one working, refreshes the uninstaller and the version Windows
 /// shows, and starts ride again with `--launch`. Shortcuts and menu entries the user has
@@ -646,7 +656,7 @@ fn rehearse(uninstalling: bool, tx: Sender<Progress>, ctx: Context) {
     let steps: &[(f32, &'static str)] = if uninstalling {
         &[
             (0.3, "Removing shortcuts"),
-            (0.6, "Removing ride"),
+            (0.6, "Removing ride and rterm"),
             (0.9, "Unregistering from Windows"),
             (1.0, "Finishing"),
         ]
@@ -760,7 +770,7 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
 
 fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context) {
     paced(&tx, &ctx, 0.3, "Removing shortcuts", remove_shortcuts);
-    paced(&tx, &ctx, 0.6, "Removing ride", || {
+    paced(&tx, &ctx, 0.6, "Removing ride and rterm", || {
         let app = dir.join("ride.exe");
         // If the file is locked, this install of ride is running: it is closed, then removed.
         if app.exists() && std::fs::remove_file(&app).is_err() && ride_is_running() {
@@ -980,7 +990,7 @@ impl Setup {
             )));
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("ride").size(18.0).color(Color32::WHITE));
+                ui.label(RichText::new("rkit").size(18.0).color(Color32::WHITE));
                 ui.label(
                     RichText::new(format!("version {VERSION}"))
                         .size(11.5)
@@ -1052,8 +1062,8 @@ impl Setup {
         if self.uninstalling {
             Self::heading(
                 ui,
-                "Uninstall ride",
-                "This removes ride from this computer.",
+                "Uninstall rkit",
+                "This removes ride and rterm from this computer.",
             );
             ui.label(
                 RichText::new(format!("Installed in {}", self.options.dir.display())).color(TEXT),
@@ -1072,21 +1082,21 @@ impl Setup {
         }
         Self::heading(
             ui,
-            "Welcome to ride",
-            "A fast editor for working on remote servers, with Claude built in.",
+            "Welcome to rkit",
+            "A set of fast tools for your servers and for Windows, made to work together.",
         );
         for (title, text) in [
             (
-                "Edit over SSH",
-                "Files, search and terminals on your server, using your existing SSH setup.",
+                "ride, the editor",
+                "Files, search, terminals and Claude Code on your servers, over your SSH setup.",
             ),
             (
-                "Claude alongside",
-                "A chat, inline edits and a team of agents, through Claude Code on the server.",
+                "rterm, the terminal",
+                "PowerShell, cmd, Git Bash, WSL and SSH in tabs, in the same look as ride.",
             ),
             (
-                "Yours to shape",
-                "Themes and file icons from the VS Code Marketplace.",
+                "One setup, one update",
+                "The same themes and look, and everything updates together.",
             ),
         ] {
             ui.horizontal(|ui| {
@@ -1112,18 +1122,18 @@ impl Setup {
         Self::heading(
             ui,
             "Choose how to install",
-            "ride is installed for your user only; no administrator rights are needed.",
+            "rkit is installed for your user only; no administrator rights are needed.",
         );
         ui.label(RichText::new("Install in").size(13.0).color(DIM));
         ui.horizontal(|ui| {
             ui.add(TextEdit::singleline(&mut self.dir_text).desired_width(380.0));
             if ui.button("Browse…").clicked() {
                 if let Some(folder) = rfd::FileDialog::new()
-                    .set_title("Install ride in")
+                    .set_title("Install rkit in")
                     .pick_folder()
                 {
                     // The program gets a folder of its own inside the one picked.
-                    self.dir_text = folder.join("ride").display().to_string();
+                    self.dir_text = folder.join("rkit").display().to_string();
                 }
             }
         });
@@ -1173,9 +1183,9 @@ impl Setup {
 
     fn working(&mut self, ui: &mut Ui) {
         let title = if self.uninstalling {
-            "Removing ride"
+            "Removing rkit"
         } else {
-            "Installing ride"
+            "Installing rkit"
         };
         Self::heading(ui, title, "This takes a few seconds.");
         ui.add_space(24.0);
@@ -1275,9 +1285,9 @@ impl Setup {
         match (&self.error, self.uninstalling) {
             (Some(error), _) => {
                 let title = if self.uninstalling {
-                    "ride couldn't be removed"
+                    "rkit couldn't be removed"
                 } else {
-                    "ride couldn't be installed"
+                    "rkit couldn't be installed"
                 };
                 Self::heading(
                     ui,
@@ -1286,11 +1296,11 @@ impl Setup {
                 );
                 ui.label(RichText::new(error).color(BAD));
             }
-            (None, true) => Self::heading(ui, "ride was removed", "Thanks for trying it."),
+            (None, true) => Self::heading(ui, "rkit was removed", "Thanks for trying it."),
             (None, false) => {
                 Self::heading(
                     ui,
-                    "ride is installed",
+                    "rkit is installed",
                     &format!("You'll find it in {}", self.options.dir.display()),
                 );
                 ui.checkbox(&mut self.launch, "Open ride now");

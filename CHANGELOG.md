@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.7
+
+- **rkit.** ride and rterm now come as one suite, rkit: the setup program is `rkit-setup.exe`, and Windows lists them together as rkit. Your install stays where it is and keeps updating as before.
+- **Split panes in rterm.** Split a tab beside (Alt+Shift+=), below (Alt+Shift+-) or along its longer side (Alt+Shift+D), or from the tab's right-click menu. Alt and an arrow moves between panes, the lines between them drag to resize, and Ctrl+Shift+W closes the pane you're in.
+- The side chat works on this computer again when MCP servers are set up (Tribib's, for one). Windows PowerShell dropped the quotes in their settings on the way to Claude Code, which then wouldn't start; the settings and the system prompt now go to it in a file.
+- New pictures in the README.
+
 ## 0.9.6
 
 - **rterm, a terminal for Windows.** A separate app that comes with ride, made from ride's own terminal: tabs of PowerShell, PowerShell 7, Command Prompt, Git Bash, each WSL distribution and every host in your SSH config, in ride's look, with glass if you like. Find it in the Start menu as rterm, right-click a folder for "Open in rterm", or type `rterm` in Explorer's address bar. Updating ride installs it; setup has a box to leave it out.

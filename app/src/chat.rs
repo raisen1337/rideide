@@ -32,6 +32,40 @@ fn mcp_config() -> Option<String> {
     MCP_CONFIG.lock().ok().and_then(|c| c.clone())
 }
 
+/// On this computer, text for Claude Code's command line is handed over in a file, and this
+/// is its path, quoted for PowerShell. Windows PowerShell drops the double quotes inside an
+/// argument it passes to a program, which broke the MCP servers' JSON (Claude Code then took
+/// it for a file name and wouldn't start) and changed prompts. `None` on a remote host, or
+/// when the file can't be written. The name follows the text, so the same text gives the same
+/// command and doesn't restart Claude.
+fn local_arg_file(kind: &str, extension: &str, text: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    if !local_shell() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let dir = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("ride")
+        .join("claude");
+    let path = dir.join(format!("{kind}-{:016x}.{extension}", hasher.finish()));
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, text).ok()?;
+    }
+    Some(path.display().to_string().replace('\'', "''"))
+}
+
+/// Text to go between single quotes on the command line. A POSIX shell closes and reopens
+/// the quotes around an embedded one; PowerShell, used on this computer, doubles it.
+fn shell_quote(text: &str) -> String {
+    if local_shell() {
+        text.replace('\'', "''")
+    } else {
+        text.replace('\'', "'\\''")
+    }
+}
+
 /// Standard base64, as MCP servers send pictures.
 pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     let value = |c: u8| -> Option<u32> {
@@ -649,25 +683,22 @@ impl Chat {
         }
         // The MCP servers set in Settings, and the tools that need no asking.
         if let Some(config) = mcp_config() {
-            let quoted = if LOCAL_SHELL.load(std::sync::atomic::Ordering::Relaxed) {
-                config.replace('\'', "''")
-            } else {
-                config.replace('\'', "'\\''")
-            };
-            cmd.push_str(&format!(" --mcp-config '{quoted}'"));
+            match local_arg_file("mcp", "json", &config) {
+                Some(path) => cmd.push_str(&format!(" --mcp-config '{path}'")),
+                None => cmd.push_str(&format!(" --mcp-config '{}'", shell_quote(&config))),
+            }
         }
         if !self.allowed_tools.is_empty() {
             cmd.push_str(&format!(" --allowedTools {}", self.allowed_tools));
         }
         if let Some(system) = &self.system {
-            // Single-quoted for the shell that will run it. A POSIX shell closes and reopens
-            // the quotes around an embedded one; PowerShell, used on this computer, doubles it.
-            let quoted = if LOCAL_SHELL.load(std::sync::atomic::Ordering::Relaxed) {
-                system.replace('\'', "''")
-            } else {
-                system.replace('\'', "'\\''")
-            };
-            cmd.push_str(&format!(" --append-system-prompt '{quoted}'"));
+            match local_arg_file("system", "txt", system) {
+                Some(path) => cmd.push_str(&format!(" --append-system-prompt-file '{path}'")),
+                None => {
+                    let quoted = shell_quote(system);
+                    cmd.push_str(&format!(" --append-system-prompt '{quoted}'"));
+                }
+            }
         }
         cmd
     }

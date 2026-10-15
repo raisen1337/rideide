@@ -1,5 +1,5 @@
 [package]
-name = "ride-setup"
+name = "rkit-setup"
 version.workspace = true
 edition.workspace = true
 

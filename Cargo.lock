@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "flate2",
  "ignore",
@@ -4294,22 +4294,10 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "postcard",
  "serde",
-]
-
-[[package]]
-name = "ride-setup"
-version = "0.9.6"
-dependencies = [
- "eframe",
- "flate2",
- "rfd",
- "sha2 0.10.9",
- "ureq",
- "winresource",
 ]
 
 [[package]]
@@ -4324,6 +4312,18 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rkit-setup"
+version = "0.9.7"
+dependencies = [
+ "eframe",
+ "flate2",
+ "rfd",
+ "sha2 0.10.9",
+ "ureq",
+ "winresource",
 ]
 
 [[package]]
@@ -4367,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "rterm"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "alacritty_terminal",
  "arboard",

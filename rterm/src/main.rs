@@ -17,6 +17,7 @@ mod os;
 mod profiles;
 mod pty;
 mod settings;
+mod split;
 
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, Context, CornerRadius, Event, FontId, Frame, Key,
@@ -139,20 +140,70 @@ fn default_dir() -> PathBuf {
     }
 }
 
-struct Tab {
+/// One terminal and the program running in it.
+struct Pane {
+    id: u64,
     term: Terminal,
     pty: Option<Pty>,
     profile: Profile,
-    /// Why the program isn't running any more, once it has ended in a way worth reading.
+    /// The program has ended in a way worth reading, and the pane waits for Enter or Esc.
     ended: bool,
 }
 
-impl Tab {
+impl Pane {
     fn title(&self) -> String {
         profiles::tidy_title(&self.term.title)
             .map(str::to_string)
             .unwrap_or_else(|| self.profile.name.clone())
     }
+}
+
+struct Tab {
+    panes: Vec<Pane>,
+    layout: split::Node,
+    /// The pane that has the keyboard.
+    focus: u64,
+    /// Where each pane was drawn last, for splitting along the longer side and moving focus.
+    rects: Vec<(u64, Rect)>,
+}
+
+impl Tab {
+    fn focused(&self) -> &Pane {
+        self.panes
+            .iter()
+            .find(|p| p.id == self.focus)
+            .unwrap_or(&self.panes[0])
+    }
+
+    fn focused_mut(&mut self) -> &mut Pane {
+        let index = self
+            .panes
+            .iter()
+            .position(|p| p.id == self.focus)
+            .unwrap_or(0);
+        &mut self.panes[index]
+    }
+
+    fn title(&self) -> String {
+        let title = self.focused().title();
+        match self.panes.len() {
+            1 => title,
+            n => format!("{title}  ({n})"),
+        }
+    }
+
+    fn focus_on(&mut self, id: u64) {
+        self.focus = id;
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.term.request_focus = true;
+        }
+    }
+}
+
+/// What to do with a pane once this frame's input is handled.
+enum PaneAct {
+    Restart(u64),
+    Close(u64),
 }
 
 struct App {
@@ -219,6 +270,15 @@ impl App {
                 .unwrap_or_else(|| app.default_profile())
         };
         app.open_tab(ctx, first);
+        // RTERM_SPLIT=right,down splits the first tab that way at the start, to look at panes
+        // without the keyboard.
+        for way in std::env::var("RTERM_SPLIT").unwrap_or_default().split(',') {
+            match way {
+                "right" => app.split(ctx, Some(true)),
+                "down" => app.split(ctx, Some(false)),
+                _ => {}
+            }
+        }
         app
     }
 
@@ -235,9 +295,11 @@ impl App {
             .unwrap_or_else(|| self.profiles[0].clone())
     }
 
-    fn open_tab(&mut self, ctx: &Context, profile: Profile) {
-        let mut term = Terminal::new(self.next_id, 120, 30);
+    /// A pane running `profile`; if it can't start, the pane says why.
+    fn new_pane(&mut self, ctx: &Context, profile: Profile) -> Pane {
+        let id = self.next_id;
         self.next_id += 1;
+        let mut term = Terminal::new(id, 120, 30);
         let (pty, ended) = match Pty::spawn(&profile, &self.dir, term.size(), ctx) {
             Ok(pty) => (Some(pty), false),
             Err(error) => {
@@ -249,13 +311,70 @@ impl App {
                 (None, true)
             }
         };
-        self.tabs.push(Tab {
+        Pane {
+            id,
             term,
             pty,
             profile,
             ended,
+        }
+    }
+
+    fn open_tab(&mut self, ctx: &Context, profile: Profile) {
+        let pane = self.new_pane(ctx, profile);
+        self.push_tab(pane);
+    }
+
+    fn push_tab(&mut self, pane: Pane) {
+        let id = pane.id;
+        self.tabs.push(Tab {
+            panes: vec![pane],
+            layout: split::Node::Pane(id),
+            focus: id,
+            rects: Vec::new(),
         });
         self.active = self.tabs.len() - 1;
+    }
+
+    /// Splits the focused pane of the current tab: side by side, one under the other, or
+    /// (with `None`) along its longer side. The new pane runs the same profile.
+    fn split(&mut self, ctx: &Context, across: Option<bool>) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let (focus, profile) = (tab.focus, tab.focused().profile.clone());
+        let across = across.unwrap_or_else(|| {
+            let rect = tab
+                .rects
+                .iter()
+                .find(|(id, _)| *id == focus)
+                .map(|(_, r)| *r);
+            // Cells are about twice as tall as wide, so a pane is split across when it is
+            // wider than it is tall, give or take.
+            rect.is_none_or(|r| r.width() >= r.height())
+        });
+        let pane = self.new_pane(ctx, profile);
+        let id = pane.id;
+        let tab = &mut self.tabs[self.active];
+        tab.layout.split(focus, id, across);
+        tab.panes.push(pane);
+        tab.focus_on(id);
+    }
+
+    /// Closes a pane, and its tab with it when it was the last one.
+    fn close_pane(&mut self, ctx: &Context, index: usize, id: u64) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if !tab.layout.remove(id) {
+            self.close_tab(ctx, index);
+            return;
+        }
+        tab.panes.retain(|p| p.id != id);
+        if tab.focus == id {
+            let next = tab.layout.panes()[0];
+            tab.focus_on(next);
+        }
     }
 
     fn close_tab(&mut self, ctx: &Context, index: usize) {
@@ -282,27 +401,31 @@ impl App {
 
     fn focus_active(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
-            tab.term.request_focus = true;
+            tab.focused_mut().term.request_focus = true;
         }
     }
 
-    fn restart(&mut self, ctx: &Context, index: usize) {
-        let tab = &mut self.tabs[index];
-        tab.pty = None;
-        match Pty::spawn(&tab.profile, &self.dir, tab.term.size(), ctx) {
+    fn restart(&mut self, ctx: &Context, id: u64) {
+        let dir = self.dir.clone();
+        let Some(pane) = self.tabs[self.active].panes.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        pane.pty = None;
+        match Pty::spawn(&pane.profile, &dir, pane.term.size(), ctx) {
             Ok(pty) => {
-                tab.term.feed(b"\x1b[2J\x1b[3J\x1b[H", &mut Vec::new(), ctx);
-                tab.pty = Some(pty);
-                tab.ended = false;
+                pane.term
+                    .feed(b"\x1b[2J\x1b[3J\x1b[H", &mut Vec::new(), ctx);
+                pane.pty = Some(pty);
+                pane.ended = false;
             }
             Err(error) => {
                 let note = format!("\r\n\x1b[31m{error}\x1b[0m\r\n");
-                tab.term.feed(note.as_bytes(), &mut Vec::new(), ctx);
+                pane.term.feed(note.as_bytes(), &mut Vec::new(), ctx);
             }
         }
     }
 
-    /// Feeds every tab's output to its terminal, shown or not, and notices programs ending.
+    /// Feeds every pane's output to its terminal, shown or not, and notices programs ending.
     fn poll(&mut self, ctx: &Context) {
         if let Some(more) = &self.more_profiles {
             if let Ok(found) = more.try_recv() {
@@ -312,30 +435,33 @@ impl App {
         }
         let mut close = Vec::new();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let Some(pty) = &mut tab.pty else { continue };
-            let mut reply = Vec::new();
-            while let Ok(data) = pty.output.try_recv() {
-                tab.term.feed(&data, &mut reply, ctx);
-            }
-            if !reply.is_empty() {
-                pty.write(&reply);
-            }
-            match pty.exit_code() {
-                // A program that ends cleanly takes its tab with it.
-                Some(0) => close.push(index),
-                Some(code) => {
-                    let note = format!(
-                        "\r\n\x1b[90m[process exited with code {code}]\r\nPress Enter to start it again, or Esc to close this tab.\x1b[0m"
-                    );
-                    tab.term.feed(note.as_bytes(), &mut Vec::new(), ctx);
-                    tab.pty = None;
-                    tab.ended = true;
+            for pane in &mut tab.panes {
+                let Some(pty) = &mut pane.pty else { continue };
+                let mut reply = Vec::new();
+                while let Ok(data) = pty.output.try_recv() {
+                    pane.term.feed(&data, &mut reply, ctx);
                 }
-                None => {}
+                if !reply.is_empty() {
+                    pty.write(&reply);
+                }
+                match pty.exit_code() {
+                    // A program that ends cleanly takes its pane with it.
+                    Some(0) => close.push((index, pane.id)),
+                    Some(code) => {
+                        let note = format!(
+                            "\r\n\x1b[90m[process exited with code {code}]\r\nPress Enter to start it again, or Esc to close.\x1b[0m"
+                        );
+                        pane.term.feed(note.as_bytes(), &mut Vec::new(), ctx);
+                        pane.pty = None;
+                        pane.ended = true;
+                    }
+                    None => {}
+                }
             }
         }
-        for index in close.into_iter().rev() {
-            self.close_tab(ctx, index);
+        // From the last tab back, so closing one doesn't move the others' places.
+        for (index, id) in close.into_iter().rev() {
+            self.close_pane(ctx, index, id);
         }
     }
 
@@ -364,18 +490,46 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &Context) {
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
         if take_key(ctx, ctrl_shift, Key::T) {
             self.open_tab(ctx, self.default_profile());
         }
         if take_key(ctx, ctrl_shift, Key::W) {
-            self.close_tab(ctx, self.active);
+            let focus = self.tabs[self.active].focus;
+            self.close_pane(ctx, self.active, focus);
+            if self.tabs.is_empty() {
+                return;
+            }
         }
         if take_key(ctx, ctrl_shift, Key::D) {
-            let profile = self.tabs[self.active].profile.clone();
+            let profile = self.tabs[self.active].focused().profile.clone();
             self.open_tab(ctx, profile);
         }
         if take_key(ctx, ctrl_shift, Key::N) {
             new_window();
+        }
+        // Splits, as in Windows Terminal.
+        if take_key(ctx, alt_shift, Key::D) {
+            self.split(ctx, None);
+        }
+        if take_key(ctx, alt_shift, Key::Equals) || take_key(ctx, alt_shift, Key::Plus) {
+            self.split(ctx, Some(true));
+        }
+        if take_key(ctx, alt_shift, Key::Minus) {
+            self.split(ctx, Some(false));
+        }
+        for (key, dir) in [
+            (Key::ArrowLeft, split::Dir::Left),
+            (Key::ArrowRight, split::Dir::Right),
+            (Key::ArrowUp, split::Dir::Up),
+            (Key::ArrowDown, split::Dir::Down),
+        ] {
+            if take_key(ctx, Modifiers::ALT, key) {
+                let tab = &mut self.tabs[self.active];
+                if let Some(next) = split::neighbour(&tab.rects, tab.focus, dir) {
+                    tab.focus_on(next);
+                }
+            }
         }
         let count = self.tabs.len();
         if take_key(ctx, Modifiers::CTRL, Key::Tab) {
@@ -439,6 +593,7 @@ impl App {
         let mut close = None;
         let mut open = None;
         let mut close_others = None;
+        let mut split = None;
         Panel::top("title")
             .exact_size(TITLE_H)
             .frame(Frame::NONE.fill(theme::chrome()).inner_margin(Margin {
@@ -457,8 +612,8 @@ impl App {
                     for (index, tab) in self.tabs.iter().enumerate() {
                         let title = tab.title();
                         let active = index == self.active;
-                        let (clicked, closed, resp) =
-                            tab_button(ui, &title, tab.profile.icon, active, width);
+                        let icon = tab.focused().profile.icon;
+                        let (clicked, closed, resp) = tab_button(ui, &title, icon, active, width);
                         if clicked {
                             select = Some(index);
                         }
@@ -466,8 +621,19 @@ impl App {
                             close = Some(index);
                         }
                         resp.on_hover_text(&title).context_menu(|ui| {
-                            if ui.button("Duplicate tab").clicked() {
-                                open = Some(tab.profile.clone());
+                            let split_item = |ui: &mut Ui, text: &str, keys: &str| {
+                                ui.add(egui::Button::new(text).shortcut_text(keys))
+                                    .clicked()
+                            };
+                            if split_item(ui, "Split right", "Alt+Shift+=") {
+                                split = Some((index, true));
+                            }
+                            if split_item(ui, "Split down", "Alt+Shift+-") {
+                                split = Some((index, false));
+                            }
+                            ui.separator();
+                            if split_item(ui, "Duplicate tab", "Ctrl+Shift+D") {
+                                open = Some(tab.focused().profile.clone());
                             }
                             if ui.button("Close other tabs").clicked() {
                                 close_others = Some(index);
@@ -493,6 +659,10 @@ impl App {
             });
         if let Some(index) = select {
             self.select(index);
+        }
+        if let Some((index, across)) = split {
+            self.select(index);
+            self.split(&ctx, Some(across));
         }
         if let Some(profile) = open {
             self.open_tab(&ctx, profile);
@@ -583,20 +753,57 @@ impl App {
         };
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, theme::surface());
-        let inner = Rect::from_min_max(rect.min + vec2(8.0, 6.0), rect.max - vec2(6.0, 6.0));
+        let area = Rect::from_min_max(rect.min + vec2(2.0, 0.0), rect.max - vec2(2.0, 2.0));
+        let (mut rects, mut dividers) = (Vec::new(), Vec::new());
+        tab.layout.layout(area, &mut rects, &mut dividers);
+        let several = rects.len() > 1;
 
+        // The lines between panes, which can be dragged to resize them.
+        for divider in &dividers {
+            let id = ui.id().with(("divider", &divider.path));
+            let resp = ui.interact(divider.line, id, Sense::drag());
+            let (delta, size, icon) = if divider.across {
+                let d = resp.drag_delta().x;
+                (d, divider.area.width(), egui::CursorIcon::ResizeHorizontal)
+            } else {
+                let d = resp.drag_delta().y;
+                (d, divider.area.height(), egui::CursorIcon::ResizeVertical)
+            };
+            if resp.hovered() || resp.dragged() {
+                ctx.set_cursor_icon(icon);
+            }
+            if delta != 0.0 {
+                tab.layout.drag(&divider.path, delta, size);
+            }
+            let line = if divider.across {
+                [divider.line.center_top(), divider.line.center_bottom()]
+            } else {
+                [divider.line.left_center(), divider.line.right_center()]
+            };
+            let color = if resp.hovered() || resp.dragged() {
+                theme::ACCENT()
+            } else {
+                theme::LINE()
+            };
+            ui.painter().line_segment(line, (1.0, color));
+        }
+
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let under = |p: egui::Pos2| rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id);
         // A right click copies the selection, or pastes when there is none, as in the
-        // Windows console.
-        let right = ui.input(|i| {
-            i.pointer.secondary_clicked()
-                && i.pointer.interact_pos().is_some_and(|p| inner.contains(p))
-        });
-        if right {
-            tab.term.request_focus = true;
-            match tab.term.selected_text() {
+        // Windows console. It goes to the pane under the pointer.
+        let right = ui
+            .input(|i| i.pointer.secondary_clicked())
+            .then_some(pointer)
+            .flatten()
+            .and_then(under);
+        if let Some(id) = right {
+            tab.focus_on(id);
+            let pane = tab.focused_mut();
+            match pane.term.selected_text() {
                 Some(text) => {
                     ctx.copy_text(text);
-                    tab.term.clear_selection();
+                    pane.term.clear_selection();
                 }
                 None => {
                     if let Some(text) = clipboard_text() {
@@ -605,14 +812,13 @@ impl App {
                 }
             }
         }
-        // Files dropped on the window are typed in as their paths.
+        // Files dropped on the window are typed in as their paths, in the pane they land on.
         let dropped: Vec<String> = ui.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .map(|f| f.path())
-                .map(|p| {
-                    let p = p.display().to_string();
+                .map(|f| {
+                    let p = f.path().display().to_string();
                     if p.contains(' ') {
                         format!("\"{p}\"")
                     } else {
@@ -621,38 +827,79 @@ impl App {
                 })
                 .collect()
         });
+        if !dropped.is_empty() {
+            if let Some(id) = ui.input(|i| i.pointer.hover_pos()).and_then(under) {
+                tab.focus_on(id);
+            }
+        }
         if ui.memory(|m| m.focused().is_none()) {
-            tab.term.request_focus = true;
+            tab.focused_mut().term.request_focus = true;
         }
 
-        let builder = egui::UiBuilder::new()
-            .id_salt(("term", tab.term.id))
-            .max_rect(inner);
-        let out = ui
-            .scope_builder(builder, |ui| {
-                ui.set_clip_rect(inner.intersect(ui.clip_rect()));
-                tab.term.show(ui)
-            })
-            .inner;
-        let mut input = out.input;
-        if !dropped.is_empty() {
-            input.extend(dropped.join(" ").bytes());
+        let mut act = None;
+        let focus = tab.focus;
+        let mut new_focus = None;
+        for (id, pane_rect) in &rects {
+            let Some(pane) = tab.panes.iter_mut().find(|p| p.id == *id) else {
+                continue;
+            };
+            let inner = Rect::from_min_max(
+                pane_rect.min + vec2(6.0, if several { 4.0 } else { 6.0 }),
+                pane_rect.max - vec2(4.0, 4.0),
+            );
+            // Only the pane with the keyboard gets the keys; the others still take clicks.
+            if *id != focus {
+                pane.term.request_focus = false;
+            }
+            let builder = egui::UiBuilder::new()
+                .id_salt(("term", pane.id))
+                .max_rect(inner);
+            let out = ui
+                .scope_builder(builder, |ui| {
+                    ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+                    pane.term.show(ui)
+                })
+                .inner;
+            if out.focused && *id != focus {
+                new_focus = Some(*id);
+            }
+            let mut input = out.input;
+            if *id == focus && !dropped.is_empty() {
+                input.extend(dropped.join(" ").bytes());
+            }
+            if pane.ended {
+                if input.contains(&b'\r') {
+                    act = Some(PaneAct::Restart(pane.id));
+                } else if input.contains(&0x1b) || input.contains(&0x04) {
+                    act = Some(PaneAct::Close(pane.id));
+                }
+                continue;
+            }
+            if let Some(pty) = &mut pane.pty {
+                if let Some((cols, rows)) = out.resize {
+                    pty.resize(cols, rows);
+                }
+                if !input.is_empty() {
+                    pty.write(&input);
+                }
+            }
         }
-        if tab.ended {
-            if input.contains(&b'\r') {
-                self.restart(&ctx, self.active);
-            } else if input.contains(&0x1b) || input.contains(&0x04) {
-                self.close_tab(&ctx, self.active);
+        // With several panes, the one with the keyboard has a quiet accent along its top.
+        if several {
+            if let Some((_, r)) = rects.iter().find(|(id, _)| *id == focus) {
+                let top = Rect::from_min_size(r.min + vec2(1.0, 0.0), vec2(r.width() - 2.0, 2.0));
+                ui.painter()
+                    .rect_filled(top, 0.0, theme::ACCENT().gamma_multiply(0.7));
             }
-            return;
         }
-        if let Some(pty) = &mut tab.pty {
-            if let Some((cols, rows)) = out.resize {
-                pty.resize(cols, rows);
-            }
-            if !input.is_empty() {
-                pty.write(&input);
-            }
+        if let Some(id) = new_focus {
+            tab.focus = id;
+        }
+        tab.rects = rects;
+        match act {
+            Some(PaneAct::Restart(id)) => self.restart(&ctx, id),
+            Some(PaneAct::Close(id)) => self.close_pane(&ctx, self.active, id),
+            None => {}
         }
     }
 }

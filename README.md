@@ -5,7 +5,8 @@
 <h1 align="center">ride</h1>
 
 <p align="center">
-  A code editor for working on servers over SSH, with Claude Code built in.
+  A code editor for working on servers over SSH, with Claude Code built in.<br>
+  Part of <b>rkit</b>, with <a href="#rterm">rterm</a>, a terminal for Windows.
 </p>
 
 <p align="center">
@@ -17,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/split.png" alt="ride with three panes open" width="900">
+  <img src="docs/split.png" alt="ride with three TypeScript files open side by side, with inlay hints" width="900">
 </p>
 
 ride opens a folder on a server the way you'd open one on your own disk. It connects with the
@@ -27,8 +28,9 @@ It runs on your own computer as well.
 
 ## Download
 
-Get **`ride-setup.exe`** from the [latest release](https://github.com/raisen1337/rideide/releases/latest)
-and run it. The installer puts ride in your user folder, so it doesn't ask for admin rights.
+Get **`rkit-setup.exe`** from the [latest release](https://github.com/raisen1337/rideide/releases/latest)
+and run it. It installs rkit: ride and [rterm](#rterm), in your user folder, so it doesn't ask
+for admin rights.
 
 After that ride keeps itself current. Each time it opens it checks the latest release here; a
 newer version is downloaded, checked against its SHA-256 and installed, and ride restarts into it
@@ -44,7 +46,7 @@ You need:
 
 ## Claude
 
-<img src="docs/claude.png" alt="Claude answering about the open file" width="900">
+<img src="docs/claude.png" alt="Claude in the side panel, answering about the open file" width="900">
 
 The chat runs the Claude Code that's installed on the server, with the account logged in there.
 There is no API key to paste into ride.
@@ -128,11 +130,16 @@ There is no API key to paste into ride.
 ride comes with rterm, a terminal for Windows made from ride's own terminal. It is a separate
 app, in the Start menu as rterm and in Explorer's right-click menu as "Open in rterm" on folders.
 
+<img src="docs/rterm.png" alt="rterm with a tab split into three panes" width="640">
+
 - Tabs of PowerShell, PowerShell 7, Command Prompt, Git Bash, each WSL distribution and every
   host in `~/.ssh/config`, found on their own. Pick the one new tabs open with in the menu beside
   the tabs.
+- Split a tab into panes: Alt+Shift+= beside, Alt+Shift+- below, Alt+Shift+D along the longer
+  side, or from the tab's right-click menu. Alt and an arrow moves between them; drag the lines
+  between them to resize.
 - ride's themes and its glass, if you like the desktop showing through.
-- Ctrl+Shift+T opens a tab, Ctrl+Shift+W closes it, Ctrl+Tab moves between them,
+- Ctrl+Shift+T opens a tab, Ctrl+Shift+W closes the pane (or the tab), Ctrl+Tab moves between tabs,
   Ctrl+Shift+1…9 opens a profile and Ctrl+Alt+1…9 goes to a tab. Ctrl+Shift+D duplicates the
   tab and Ctrl+Shift+N opens a new window. Ctrl+= and Ctrl+- size the text, as does Ctrl+wheel.
 - Ctrl+C copies when text is selected and interrupts otherwise; Ctrl+V pastes. A right click
@@ -145,14 +152,14 @@ app, in the Start menu as rterm and in Explorer's right-click menu as "Open in r
 
 ```powershell
 rustup target add x86_64-unknown-linux-musl   # for the server agent
-.\build-installer.ps1                          # writes dist\ride-setup.exe
+.\build-installer.ps1                          # writes dist\rkit-setup.exe
 ```
 
 `cargo run -p ride` starts the editor without installing it.
 
 To release, add an entry to `CHANGELOG.md`, raise `version` in the root `Cargo.toml` and push to `main`. The
 [Release workflow](.github/workflows/release.yml) tests and builds on GitHub's Windows runners,
-then publishes `ride-setup.exe` with a `latest.json` that installed copies read to update.
+then publishes `rkit-setup.exe` with a `latest.json` that installed copies read to update.
 
 | Folder | What it is |
 | --- | --- |
