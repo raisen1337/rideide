@@ -79,6 +79,14 @@ There is no API key to paste into ride.
 - The Command Palette (Ctrl+Shift+P) can search the VS Code Marketplace for themes and file icons,
   and previews them before you install one.
 
+## Designer
+
+- Claude designs interfaces in Tribib: each design session is a chat with a
+  Tribib document of its own, and the canvas shows live beside it while Claude builds. Ask for the
+  result as code and it goes into your project.
+- Any MCP server can be given to Claude in Settings. One running on your computer is reached from
+  the server Claude runs on through an SSH tunnel ride opens.
+
 ## Working together
 
 - **Live sessions.** Share the folder you have open with people who have no access to the server.

@@ -18,6 +18,8 @@ const LAYOUT_SIDEBAR: char = '\u{ebf3}';
 const LAYOUT_PANEL: char = '\u{ebf5}';
 const LAYOUT_SECONDARY: char = '\u{ebf4}';
 pub(super) const WARNING: char = '\u{ea6c}';
+/// The codicon for the Designer: a pen on a canvas.
+const DESIGNER_ICON: char = '\u{eb4c}';
 
 /// An icon of the activity bar: brighter when its view is shown, with a bar at its left.
 fn activity_button(ui: &mut Ui, icon: char, active: bool, hint: &str) -> bool {
@@ -289,6 +291,20 @@ impl App {
                     View::Code
                 } else {
                     View::Themes
+                };
+            }
+            if online
+                && activity_button(
+                    ui,
+                    DESIGNER_ICON,
+                    self.view == View::Designer,
+                    "Designer: Claude designs in Tribib",
+                )
+            {
+                self.view = if self.view == View::Designer {
+                    View::Code
+                } else {
+                    View::Designer
                 };
             }
             if online

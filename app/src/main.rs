@@ -7,6 +7,7 @@ mod chrome;
 mod collab;
 mod conn;
 mod db;
+mod designer;
 mod diff;
 mod editor;
 mod envfile;
@@ -517,6 +518,8 @@ enum View {
     Code,
     /// A team of Claude agents: the list on the left, the selected one's chat in the middle.
     Agents,
+    /// Claude designing in Tribib: the sessions, a chat, and the canvas live beside it.
+    Designer,
     /// Installed themes and the VS Code Marketplace, using the whole window.
     Themes,
     Settings,
@@ -777,6 +780,12 @@ struct App {
     live: collab::Live,
     /// The language servers of the connection, and what they found.
     lsp: lsp::Lsp,
+    /// The design sessions of the Designer view, the one shown, and the canvas beside it.
+    designs: Vec<designer::Design>,
+    active_design: usize,
+    canvas: designer::Canvas,
+    /// SSH tunnels that bring MCP servers of this computer to the host.
+    tunnels: Vec<designer::Tunnel>,
     /// The app's clock (seconds), as of this frame.
     now: f64,
     /// Changelog entries to show once after an update: (version, text).
@@ -795,6 +804,9 @@ struct App {
     drag_file: Option<sessions::DragFile>,
     /// Where a dragged file can be let go: the place on screen, the connection, the folder.
     drop_targets: Vec<(egui::Rect, u64, String)>,
+    /// The places of the last frame, for files dropped from Explorer, which arrive at the
+    /// start of the next one.
+    last_drop_targets: Vec<(egui::Rect, u64, String)>,
     /// An upload in progress.
     upload: Option<extras::Upload>,
     /// A folder to list again a moment from now (app time, path).
@@ -1344,6 +1356,15 @@ pub fn paste_keys_down() -> bool {
     os::paste_keys_down()
 }
 
+/// Where the cursor is in the window, asked of the system: while files are dragged in from
+/// Explorer, the window hears nothing of the mouse.
+pub fn cursor_in_window(ctx: &Context) -> Option<Pos2> {
+    let (x, y) = os::cursor()?;
+    let inner = ctx.input(|i| i.viewport().inner_rect)?;
+    let scale = ctx.pixels_per_point();
+    Some(Pos2::new(x / scale, y / scale) - inner.min.to_vec2())
+}
+
 pub fn dragged_outside(ctx: &Context) -> Option<Pos2> {
     let (x, y) = os::cursor_outside_window()?;
     let scale = ctx
@@ -1558,6 +1579,10 @@ impl App {
             join_input: None,
             live: collab::Live::default(),
             lsp: lsp::Lsp::default(),
+            designs: Vec::new(),
+            active_design: 0,
+            canvas: designer::Canvas::default(),
+            tunnels: Vec::new(),
             now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
@@ -1578,6 +1603,7 @@ impl App {
             hide_beside: false,
             drag_file: None,
             drop_targets: Vec::new(),
+            last_drop_targets: Vec::new(),
             upload: None,
             refresh_later: None,
             restore: HashMap::new(),
@@ -1638,6 +1664,8 @@ impl App {
             Ok("outline") => app.side = Side::Outline,
             Ok("database") => app.side = Side::Database,
             Ok("search") => app.side = Side::Search,
+            // RIDE_SIDE=designer starts in the Designer view.
+            Ok("designer") => app.view = View::Designer,
             Ok("problems") => {
                 app.panel_tab = chrome::PanelTab::Problems;
                 app.show_term = true;
@@ -1679,6 +1707,10 @@ impl App {
             app.open_on_connect = (!is_dir).then_some(path);
             app.view = View::Code;
             app.connect(&cc.egui_ctx);
+        }
+        // RIDE_SIDE=designer starts in the Designer view, folder or not.
+        if std::env::var("RIDE_SIDE").as_deref() == Ok("designer") {
+            app.view = View::Designer;
         }
         app.refresh_icon_sets();
         if !icon_set.is_empty() {
@@ -1779,6 +1811,8 @@ impl App {
             "chat": self.chat.to_json(),
             "agents": agents,
             "active_agent": self.active_agent,
+            "designs": self.designs_json(),
+            "active_design": self.active_design,
             "scheduled": self.scheduled_json(),
             "session": self.session_json(),
         })
@@ -1813,6 +1847,10 @@ impl App {
             self.next_uid = self.next_uid.max(uid + 1);
         }
         self.active_agent = v["active_agent"].as_u64().unwrap_or(0) as usize;
+        for d in v["designs"].as_array().into_iter().flatten() {
+            self.design_from_json(d);
+        }
+        self.active_design = v["active_design"].as_u64().unwrap_or(0) as usize;
         self.load_scheduled(&v["scheduled"]);
         self.load_session(&v["session"]);
         self.saved_state = hash_of(&text);
@@ -1918,6 +1956,9 @@ impl App {
         // Claude's processes run on the connection shown; losing another one leaves them be.
         if !self.background {
             self.chat.stopped();
+            for design in &mut self.designs {
+                design.chat.stopped();
+            }
             for agent in &mut self.agents {
                 agent.chat.stopped();
                 agent.inbox.clear();
@@ -1996,6 +2037,7 @@ impl App {
             || self.transfer_message(id, &resp)
             || self.live_message(id, &resp)
             || self.intel_message(id, &resp)
+            || self.design_message(id, &resp)
         {
             return;
         }
@@ -3621,13 +3663,15 @@ impl App {
                                 TreeAction::Open(row.path.clone())
                             });
                         }
+                        // Files dropped on a row go into its folder: from another
+                        // connection's tree, or from Explorer.
+                        let folder = if row.is_dir {
+                            row.path.clone()
+                        } else {
+                            parent(&row.path).to_string()
+                        };
+                        targets.push((resp.rect, here, folder));
                         if several {
-                            let folder = if row.is_dir {
-                                row.path.clone()
-                            } else {
-                                parent(&row.path).to_string()
-                            };
-                            targets.push((resp.rect, here, folder));
                             if resp.drag_started() {
                                 dragged = Some(sessions::DragFile {
                                     from: here,
@@ -3662,21 +3706,16 @@ impl App {
                             if menu_item(ui, icons::TRASH, "Delete…") {
                                 action = Some(TreeAction::Delete(row.path.clone()));
                             }
-                            if menu_item(ui, icons::COPY, "Copy path") {
-                                ui.ctx().copy_text(row.path.clone());
-                            }
                         });
                     });
                 }
             },
         );
-        if several {
-            // Let go over the empty part of the tree, a file lands in the open folder.
-            targets.push((tree_area.inner_rect, here, root.clone()));
-            self.drop_targets.extend(targets);
-            if dragged.is_some() {
-                self.drag_file = dragged;
-            }
+        // Let go over the empty part of the tree, a file lands in the open folder.
+        targets.push((tree_area.inner_rect, here, root.clone()));
+        self.drop_targets.extend(targets);
+        if several && dragged.is_some() {
+            self.drag_file = dragged;
         }
 
         match action {
@@ -4818,6 +4857,7 @@ impl App {
         self.poll(&ctx);
         self.live_tick(&ctx);
         self.intel_tick(&ctx);
+        self.mcp_tick();
         self.shortcuts(&ctx);
         self.sync_glass(frame);
         self.apply_settings(&ctx);
@@ -4930,6 +4970,30 @@ impl App {
             .show_separator_line(true)
             .frame(Frame::NONE.fill(theme::chrome()))
             .show(ui, |ui| self.activity_bar(ui));
+        if self.view == View::Designer {
+            if online {
+                self.designer_view(ui, &ctx);
+            } else {
+                CentralPanel::default_margins().show(ui, |ui| {
+                    ui.add_space(40.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Connect to a server first: Claude designs from there.")
+                                .color(theme::COMMENT()),
+                        );
+                    });
+                });
+            }
+            self.term_focused = false;
+            self.detached_windows(&ctx);
+            self.dialogs(&ctx);
+            self.share_window(&ctx);
+            self.join_window(&ctx);
+            self.nickname_window(&ctx);
+            self.palette_window(&ctx);
+            resize_edges(&ctx);
+            return;
+        }
         if self.view == View::Themes || self.view == View::Settings {
             if self.view == View::Themes {
                 self.themes_view(ui);

@@ -398,6 +398,8 @@ impl App {
     /// Called once a frame after the trees are drawn: shows what is being dragged, and
     /// starts a copy when it is let go over a folder of another connection.
     pub(super) fn tree_drag(&mut self, ui: &mut Ui) {
+        self.last_drop_targets = self.drop_targets.clone();
+        self.explorer_drag_hint(ui);
         let Some(file) = self.drag_file.clone() else {
             self.drop_targets.clear();
             return;
@@ -441,6 +443,71 @@ impl App {
             }
         }
         self.drop_targets.clear();
+    }
+
+    /// Where files dragged in from Explorer would go: the folder of the row under the
+    /// cursor, or the open folder.
+    pub(super) fn explorer_target(&self, ctx: &Context) -> String {
+        let here = self.session_uid;
+        crate::cursor_in_window(ctx)
+            .and_then(|p| {
+                self.last_drop_targets
+                    .iter()
+                    .filter(|(rect, to, _)| *to == here && rect.contains(p))
+                    .min_by(|a, b| a.0.area().total_cmp(&b.0.area()))
+                    .map(|(_, _, folder)| folder.clone())
+            })
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    /// While files from Explorer are over the window: the folder they would go into, lit up.
+    fn explorer_drag_hint(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if !hovering || !self.online() || self.background {
+            return;
+        }
+        // Nothing else wakes the window while the files are carried around.
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        let folder = self.explorer_target(&ctx);
+        let here = self.session_uid;
+        let rect = self
+            .last_drop_targets
+            .iter()
+            .filter(|(_, to, f)| *to == here && *f == folder)
+            .filter(|(rect, _, _)| crate::cursor_in_window(&ctx).is_some_and(|p| rect.contains(p)))
+            .min_by(|a, b| a.0.area().total_cmp(&b.0.area()))
+            .map(|(rect, _, _)| *rect);
+        let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("explorer_drop"));
+        let painter = ctx.layer_painter(layer);
+        if let Some(rect) = rect {
+            painter.rect(
+                rect,
+                4,
+                theme::ACCENT().gamma_multiply(0.18),
+                (1.0, theme::ACCENT()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(pointer) = crate::cursor_in_window(&ctx) {
+            let shown = if folder == self.root {
+                file_name(&self.root).to_string()
+            } else {
+                folder
+                    .strip_prefix(&format!("{}/", self.root.trim_end_matches('/')))
+                    .unwrap_or(&folder)
+                    .to_string()
+            };
+            let label = format!("{}  Upload into {shown}", icons::ARROW_UP);
+            let galley = painter.layout_no_wrap(label, FontId::proportional(13.0), theme::STRONG());
+            let at = pointer + vec2(16.0, 12.0);
+            painter.rect_filled(
+                egui::Rect::from_min_size(at - vec2(6.0, 4.0), galley.size() + vec2(12.0, 8.0)),
+                6,
+                theme::PANEL_BG(),
+            );
+            painter.galley(at, galley, theme::STRONG());
+        }
     }
 
     /// The files of another connection, under the tree of the one shown. Files and folders

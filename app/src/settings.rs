@@ -169,6 +169,27 @@ pub fn server_for(path: &str) -> Option<LangServer> {
     })
 }
 
+/// An MCP server Claude is given, reached over HTTP. One on this computer is reached from
+/// the host through a tunnel ride opens.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct McpServer {
+    pub name: String,
+    pub url: String,
+    pub on: bool,
+}
+
+impl McpServer {
+    /// The Tribib design editor, where its desktop app listens.
+    pub fn tribib() -> Self {
+        Self {
+            name: "tribib".into(),
+            url: "http://127.0.0.1:3848/mcp".into(),
+            on: true,
+        }
+    }
+}
+
 /// The formatter command for a file, with its path filled in.
 pub fn formatter_for(path: &str) -> Option<String> {
     let ext = path.rsplit_once('.')?.1.to_lowercase();
@@ -232,6 +253,8 @@ pub struct Settings {
     pub catchup_model: String,
     pub catchup: CatchUp,
     pub team_budget: u32,
+    /// MCP servers every Claude ride starts is given.
+    pub mcp_servers: Vec<McpServer>,
     pub notifications: bool,
     // Connection
     pub reconnect: bool,
@@ -279,6 +302,7 @@ impl Default for Settings {
             catchup_model: "sonnet".into(),
             catchup: CatchUp::Daily,
             team_budget: 40,
+            mcp_servers: Vec::new(),
             notifications: true,
             reconnect: true,
             claude_previews: true,
@@ -944,6 +968,54 @@ impl App {
                     },
                 );
                 row(ui, "Notifications", "A Windows notification when Claude or an agent finishes while ride is in the background.", |ui| toggle(ui, &mut s.notifications));
+                ui.add_space(14.0);
+                ui.label(RichText::new("MCP servers").color(theme::STRONG()));
+                ui.label(
+                    RichText::new(
+                        "Given to every Claude ride starts: the chat, the agents and the Designer. One on this computer (127.0.0.1) is reached from the server through an SSH tunnel ride opens, so Claude there finds it at the same kind of address.",
+                    )
+                    .small()
+                    .color(theme::COMMENT()),
+                );
+                ui.add_space(6.0);
+                let mut remove = None;
+                for (index, server) in s.mcp_servers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        toggle(ui, &mut server.on);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.name)
+                                .desired_width(110.0)
+                                .hint_text("name"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut server.url)
+                                .desired_width((ui.available_width() - 40.0).max(160.0))
+                                .hint_text("http://127.0.0.1:3848/mcp")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if icon_button(ui, icons::CLOSE, "Remove") {
+                            remove = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove {
+                    s.mcp_servers.remove(index);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Add an MCP server").clicked() {
+                        s.mcp_servers.push(McpServer {
+                            on: true,
+                            ..McpServer::default()
+                        });
+                    }
+                    let has_tribib = s
+                        .mcp_servers
+                        .iter()
+                        .any(|m| m.name.eq_ignore_ascii_case("tribib"));
+                    if !has_tribib && ui.button("Add Tribib").clicked() {
+                        s.mcp_servers.push(McpServer::tribib());
+                    }
+                });
             }
             7 => {
                 let mut live = s.live_editing;

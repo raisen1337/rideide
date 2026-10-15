@@ -3,7 +3,7 @@ resolver = "2"
 members = ["proto", "agent", "app", "installer"]
 
 [workspace.package]
-version = "0.7.5"
+version = "0.8.0"
 edition = "2021"
 
 [workspace.dependencies]

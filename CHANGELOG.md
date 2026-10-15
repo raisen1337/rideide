@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.0
+
+- **MCP servers for Claude.** Settings → Claude → MCP servers: a name and a URL, and every Claude ride starts gets them (the chat, the agents and the Designer). A server on this computer, at 127.0.0.1, is reached from the server Claude runs on through an SSH tunnel ride opens by itself, so a desktop tool works with Claude on your VPS.
+- **The Designer view** (the new icon above Agents). Claude designs user interfaces in Tribib: each design session is a chat of its own with a Tribib document of its own, and the canvas shows live beside it as Claude builds, every moment while it works. Pick the document above the canvas; Fit or 100%, pause, look again, or open Tribib. Tribib's tools don't ask for approval every step. Ask for the design as code and Claude writes it into the open project. "Add Tribib" in the view or in Settings sets its server up.
+- **Drag files from Explorer into the file tree.** While you carry them over the tree, the folder under the cursor lights up with "Upload into …", and they go into that folder (a file's row means its folder; empty space, the open folder).
+
 ## 0.7.5
 
 - **A full table editor in the database explorer.** Click a table to open it in a tab of its own:

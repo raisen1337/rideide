@@ -253,8 +253,9 @@ impl App {
         });
         // Files dropped on the window are for the connection shown, not for one behind it.
         if !dropped.is_empty() && self.online() && !self.background {
-            // Dropped files go where the user is looking: the open folder.
-            let dir = self.root.clone();
+            // Into the folder of the tree row they were let go on, or the open folder.
+            let dir = self.explorer_target(ctx);
+            self.expanded.insert(dir.clone());
             self.upload_into(dir, dropped);
         }
         // A listing asked for right after the last file would race with the writes.

@@ -19,6 +19,52 @@ pub fn local_shell() -> bool {
     LOCAL_SHELL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The MCP servers every Claude is started with, as `--mcp-config` takes them.
+static MCP_CONFIG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_mcp_config(config: Option<String>) {
+    if let Ok(mut current) = MCP_CONFIG.lock() {
+        *current = config;
+    }
+}
+
+fn mcp_config() -> Option<String> {
+    MCP_CONFIG.lock().ok().and_then(|c| c.clone())
+}
+
+/// Standard base64, as MCP servers send pictures.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let bytes: Vec<u8> = text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut n = 0u32;
+        for (i, b) in chunk.iter().enumerate() {
+            n |= value(*b)? << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     /// Reads and answers; asks the user before it changes a file or runs a command.
@@ -186,6 +232,9 @@ pub struct Chat {
     pub title: String,
     /// One of the agents in the Agents view, rather than the side chat.
     pub team_member: bool,
+    /// Tools it may use without asking (Claude Code's `--allowedTools`), such as an MCP
+    /// server's, by name.
+    pub allowed_tools: String,
     /// Extra system prompt for Claude Code.
     pub system: Option<String>,
     /// Final text of the last finished turn, until someone takes it.
@@ -351,6 +400,7 @@ impl Default for Chat {
             pinned: false,
             title: "Claude".into(),
             team_member: false,
+            allowed_tools: String::new(),
             system: None,
             last_result: None,
             history: Vec::new(),
@@ -445,6 +495,18 @@ impl Chat {
         }
         if !self.effort.is_empty() {
             cmd.push_str(&format!(" --effort {}", self.effort));
+        }
+        // The MCP servers set in Settings, and the tools that need no asking.
+        if let Some(config) = mcp_config() {
+            let quoted = if LOCAL_SHELL.load(std::sync::atomic::Ordering::Relaxed) {
+                config.replace('\'', "''")
+            } else {
+                config.replace('\'', "'\\''")
+            };
+            cmd.push_str(&format!(" --mcp-config '{quoted}'"));
+        }
+        if !self.allowed_tools.is_empty() {
+            cmd.push_str(&format!(" --allowedTools {}", self.allowed_tools));
         }
         if let Some(system) = &self.system {
             // Single-quoted for the shell that will run it. A POSIX shell closes and reopens
@@ -2516,6 +2578,11 @@ mod tests {
 
     #[test]
     fn base64_matches_the_standard() {
+        assert_eq!(
+            base64_decode(&base64(b"hello world!?")).unwrap(),
+            b"hello world!?"
+        );
+        assert_eq!(base64_decode("Zm8=").unwrap(), b"fo");
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
