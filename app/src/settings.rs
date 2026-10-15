@@ -382,11 +382,7 @@ fn save(settings: &Settings) -> std::io::Result<()> {
 }
 
 pub fn chat_mode() -> chat::Mode {
-    with(|s| match s.chat_mode.as_str() {
-        "acceptEdits" => chat::Mode::Edit,
-        "auto" => chat::Mode::Auto,
-        _ => chat::Mode::Ask,
-    })
+    with(|s| chat::Mode::from_key(&s.chat_mode))
 }
 
 const SECTIONS: [&str; 8] = [
@@ -926,6 +922,7 @@ impl App {
                                 ("default", "Ask: asks before changes"),
                                 ("acceptEdits", "Edit: asks for commands"),
                                 ("auto", "Auto: edits and safe commands"),
+                                ("full", "Full access: never asks"),
                             ],
                         );
                     },

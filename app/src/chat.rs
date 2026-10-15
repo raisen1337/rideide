@@ -73,6 +73,9 @@ pub enum Mode {
     Edit,
     /// Claude Code's auto mode: edits, plus commands it judges safe.
     Auto,
+    /// Everything it asks to do is allowed: edits, any command, any tool. Only what your
+    /// own Claude Code settings deny stays denied.
+    Full,
 }
 
 impl Mode {
@@ -81,6 +84,25 @@ impl Mode {
             Mode::Ask => "default",
             Mode::Edit => "acceptEdits",
             Mode::Auto => "auto",
+            // Edits go through outright; everything else is asked here, and allowed.
+            Mode::Full => "acceptEdits",
+        }
+    }
+
+    /// How a chat and the settings keep it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Mode::Full => "full",
+            mode => mode.flag(),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Mode {
+        match key {
+            "acceptEdits" => Mode::Edit,
+            "auto" => Mode::Auto,
+            "full" => Mode::Full,
+            _ => Mode::Ask,
         }
     }
 
@@ -89,6 +111,7 @@ impl Mode {
             Mode::Ask => "Ask",
             Mode::Edit => "Edit",
             Mode::Auto => "Auto",
+            Mode::Full => "Full access",
         }
     }
 }
@@ -1027,7 +1050,7 @@ impl Chat {
             "history": history,
             "title": self.title,
             "team_member": self.team_member,
-            "mode": self.mode.flag(),
+            "mode": self.mode.key(),
             "model": self.model_choice,
             "effort": self.effort,
             "system": self.system,
@@ -1066,11 +1089,7 @@ impl Chat {
                 .collect(),
             title: v["title"].as_str().unwrap_or("Claude").to_string(),
             team_member: v["team_member"].as_bool().unwrap_or(false),
-            mode: match v["mode"].as_str() {
-                Some("acceptEdits") => Mode::Edit,
-                Some("auto") => Mode::Auto,
-                _ => Mode::Ask,
-            },
+            mode: Mode::from_key(v["mode"].as_str().unwrap_or("")),
             model_choice: known(&["fable", "opus", "sonnet", "haiku"], &v["model"]),
             effort: known(&["low", "medium", "high", "xhigh", "max"], &v["effort"]),
             system: v["system"].as_str().map(str::to_string),
@@ -1516,7 +1535,10 @@ impl Chat {
                     .unwrap_or("tool")
                     .to_string();
                 let input = v["request"]["input"].clone();
-                if self.allow_edits && edits_files(&tool) {
+                // Questions for the user still are; Full access allows everything else.
+                let full = self.mode == Mode::Full
+                    && !matches!(tool.as_str(), "AskUserQuestion" | "ExitPlanMode");
+                if full || (self.allow_edits && edits_files(&tool)) {
                     self.answer(&id, Some(&input));
                 } else {
                     self.new_ask = Some(format!("{tool} {}", tool_detail(&tool, &input)));
@@ -2205,7 +2227,7 @@ impl Chat {
                         let before = (self.mode, self.model_choice, self.effort);
                         egui::ComboBox::from_id_salt("chat_mode")
                             .selected_text(RichText::new(self.mode.label()).small())
-                            .width(58.0)
+                            .width(if self.mode == Mode::Full { 84.0 } else { 58.0 })
                             .show_ui(ui, |ui| {
                                 for (mode, hint) in [
                                     (
@@ -2217,6 +2239,11 @@ impl Chat {
                                         "Edits files without asking; asks before running commands",
                                     ),
                                     (Mode::Auto, "May edit files and run commands it judges safe"),
+                                    (
+                                        Mode::Full,
+                                        "Does everything without asking: any command, any tool, \
+                                         pushes and deploys included",
+                                    ),
                                 ] {
                                     ui.selectable_value(&mut self.mode, mode, mode.label())
                                         .on_hover_text(hint);
@@ -2698,6 +2725,24 @@ mod tests {
 "#);
         assert!(chat.asks.is_empty());
         assert_eq!(chat.take_outbox().len(), 1);
+
+        // Full access answers every request itself, any command included.
+        chat.allow_edits = false;
+        chat.mode = Mode::Full;
+        chat.on_stdout(br#"{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"vsp push"}}}
+"#);
+        assert!(chat.asks.is_empty());
+        let sent: Vec<Value> = chat
+            .take_outbox()
+            .iter()
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(sent[0]["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            sent[0]["response"]["response"]["updatedInput"]["command"],
+            "vsp push"
+        );
+        assert!(Chat::from_json(&chat.to_json()).mode == Mode::Full);
 
         // The checkpoint is kept with the conversation.
         let restored = Chat::from_json(&chat.to_json());

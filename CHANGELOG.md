@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.5
+
+- **Full access mode for Claude.** A fourth mode next to Ask, Edit and Auto: Claude does whatever it asks to do without stopping for you, any command or tool included (pushes and deploys too). Questions it puts to you still come to you, and anything your own Claude Code settings deny stays denied. It is never the default; pick it in the chat, or in Settings for new chats.
+
 ## 0.8.4
 
 - **See the pictures Claude looks at.** When Claude reads an image file, or a tool hands it a screenshot (Tribib's canvas, say), the picture shows in the chat right under that step: in the side chat, the Agents view, the Designer and a subagent's own conversation. Click it to see it whole; a click or Escape closes it.
