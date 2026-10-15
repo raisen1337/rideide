@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.8
+
+- **rterm's panes have their own tabs.** Split the window and every pane gets a row of tabs above it, so you switch terminals right where they are; with one pane they stay up in the title bar.
+- **Split by dragging.** Drag a tab to the left, right, top or bottom edge of any pane and the pane splits there; drop it among another pane's tabs to move it over. Panes split any way you like, and the lines between them drag to resize. The keys and the tab's right-click menu still work.
+
 ## 0.9.7
 
 - **rkit.** ride and rterm now come as one suite, rkit: the setup program is `rkit-setup.exe`, and Windows lists them together as rkit. Your install stays where it is and keeps updating as before.

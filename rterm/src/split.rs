@@ -25,6 +25,34 @@ pub struct Divider {
     pub line: Rect,
 }
 
+/// Where on a pane a dragged tab lands: beside it on one side, or in among its tabs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Zone {
+    Into,
+    Left,
+    Right,
+    Above,
+    Below,
+}
+
+/// The zone of `rect` under `pointer`, and the part of the pane the tab would take.
+pub fn zone_at(rect: Rect, pointer: eframe::egui::Pos2) -> (Zone, Rect) {
+    let (w, h) = (rect.width() * 0.28, rect.height() * 0.28);
+    let half_w = vec2(rect.width() / 2.0, rect.height());
+    let half_h = vec2(rect.width(), rect.height() / 2.0);
+    if pointer.x < rect.left() + w {
+        (Zone::Left, Rect::from_min_size(rect.min, half_w))
+    } else if pointer.x > rect.right() - w {
+        (Zone::Right, Rect::from_min_size(rect.center_top(), half_w))
+    } else if pointer.y < rect.top() + h {
+        (Zone::Above, Rect::from_min_size(rect.min, half_h))
+    } else if pointer.y > rect.bottom() - h {
+        (Zone::Below, Rect::from_min_size(rect.left_center(), half_h))
+    } else {
+        (Zone::Into, rect)
+    }
+}
+
 /// Directions focus moves in with Alt and an arrow key.
 #[derive(Clone, Copy)]
 pub enum Dir {
@@ -35,21 +63,24 @@ pub enum Dir {
 }
 
 impl Node {
-    /// Splits the pane `target` in two, the new pane `id` after it.
-    pub fn split(&mut self, target: u64, id: u64, across: bool) -> bool {
+    /// Splits the pane `target` in two, the new pane `id` after it, or before it (to the
+    /// left or above) with `before`.
+    pub fn split(&mut self, target: u64, id: u64, across: bool, before: bool) -> bool {
         match self {
             Node::Pane(pane) if *pane == target => {
+                let (old, new) = (Box::new(Node::Pane(target)), Box::new(Node::Pane(id)));
+                let (first, second) = if before { (new, old) } else { (old, new) };
                 *self = Node::Split {
                     across,
                     ratio: 0.5,
-                    first: Box::new(Node::Pane(target)),
-                    second: Box::new(Node::Pane(id)),
+                    first,
+                    second,
                 };
                 true
             }
             Node::Pane(_) => false,
             Node::Split { first, second, .. } => {
-                first.split(target, id, across) || second.split(target, id, across)
+                first.split(target, id, across, before) || second.split(target, id, across, before)
             }
         }
     }
@@ -195,8 +226,8 @@ mod tests {
     #[test]
     fn split_and_remove() {
         let mut root = Node::Pane(1);
-        assert!(root.split(1, 2, true));
-        assert!(root.split(2, 3, false));
+        assert!(root.split(1, 2, true, false));
+        assert!(root.split(2, 3, false, false));
         assert_eq!(root.panes(), [1, 2, 3]);
         let (mut panes, mut dividers) = (Vec::new(), Vec::new());
         root.layout(area(), &mut panes, &mut dividers);
@@ -221,9 +252,22 @@ mod tests {
     }
 
     #[test]
+    fn split_before_puts_the_new_pane_first() {
+        let mut root = Node::Pane(1);
+        root.split(1, 2, false, true);
+        let (mut panes, mut dividers) = (Vec::new(), Vec::new());
+        root.layout(area(), &mut panes, &mut dividers);
+        assert_eq!(
+            panes[0],
+            (2, Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0)))
+        );
+        assert_eq!(root.panes(), [2, 1]);
+    }
+
+    #[test]
     fn dividers_move_within_bounds() {
         let mut root = Node::Pane(1);
-        root.split(1, 2, true);
+        root.split(1, 2, true, false);
         root.drag(&[], 30.0, 100.0);
         let (mut panes, mut dividers) = (Vec::new(), Vec::new());
         root.layout(area(), &mut panes, &mut dividers);

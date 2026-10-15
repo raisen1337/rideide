@@ -131,16 +131,17 @@ There is no API key to paste into ride.
 ride comes with rterm, a terminal for Windows made from ride's own terminal. It is a separate
 app, in the Start menu as rterm and in Explorer's right-click menu as "Open in rterm" on folders.
 
-<img src="docs/rterm.png" alt="rterm with a tab split into three panes" width="640">
+<img src="docs/rterm.png" alt="rterm with three panes, each with its own tabs" width="640">
 
 - Tabs of PowerShell, PowerShell 7, Command Prompt, Git Bash, each WSL distribution and every
   host in `~/.ssh/config`, found on their own. Pick the one new tabs open with in the menu beside
   the tabs.
-- Split a tab into panes: Alt+Shift+= beside, Alt+Shift+- below, Alt+Shift+D along the longer
-  side, or from the tab's right-click menu. Alt and an arrow moves between them; drag the lines
-  between them to resize.
+- Lay the window out as a grid of panes, each with its own tabs: drag a tab to the edge of any
+  pane to split it there, or into another pane's tabs to move it. Alt+Shift+= splits beside,
+  Alt+Shift+- below, Alt+Shift+D along the longer side. Alt and an arrow moves between panes;
+  drag the lines between them to resize.
 - ride's themes and its glass, if you like the desktop showing through.
-- Ctrl+Shift+T opens a tab, Ctrl+Shift+W closes the pane (or the tab), Ctrl+Tab moves between tabs,
+- Ctrl+Shift+T opens a tab in the pane you're in, Ctrl+Shift+W closes it, Ctrl+Tab moves between tabs,
   Ctrl+Shift+1…9 opens a profile and Ctrl+Alt+1…9 goes to a tab. Ctrl+Shift+D duplicates the
   tab and Ctrl+Shift+N opens a new window. Ctrl+= and Ctrl+- size the text, as does Ctrl+wheel.
 - Ctrl+C copies when text is selected and interrupts otherwise; Ctrl+V pastes. A right click
