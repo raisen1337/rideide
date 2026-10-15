@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.4
+
+- Notifications come from ride, with its name and icon, instead of from Windows PowerShell. ride registers both for your user the first time it shows one; uninstalling removes them.
+
 ## 0.9.3
 
 - Chat and Agents find Claude Code on Linux and macOS hosts where it works in the terminal but ride said it wasn't installed. ride starts it through a login shell, which skips the part of `~/.bashrc` where nvm and Claude Code's installer put themselves on the PATH; it now also looks in `~/.local/bin`, nvm's and fnm's Node versions, and npm's, bun's and volta's folders.

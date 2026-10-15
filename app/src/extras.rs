@@ -443,12 +443,10 @@ impl App {
             );
             thread::spawn(move || {
                 use tauri_winrt_notification::Toast;
-                // Shown under PowerShell's identity: an app needs a registered one of its own
-                // to post toasts, and an unregistered one is dropped without a word.
-                let _ = Toast::new(Toast::POWERSHELL_APP_ID)
-                    .title(&title)
-                    .text1(&body)
-                    .show();
+                // Under ride's own name and icon once they're registered; PowerShell's
+                // otherwise, since a toast from an app Windows doesn't know is dropped.
+                let app = toast_app().unwrap_or(Toast::POWERSHELL_APP_ID);
+                let _ = Toast::new(app).title(&title).text1(&body).show();
             });
         }
     }
@@ -581,5 +579,93 @@ impl App {
             Ok(()) => self.status = format!("Saved the team as \"{name}\""),
             Err(error) => self.status = format!("Couldn't save the template: {error}"),
         }
+    }
+}
+
+/// The identity ride's notifications are posted under. Windows shows a toast only from an
+/// app it knows, so the name and icon are registered for this user (no admin needed) the
+/// first time, with the icon saved next to ride's other data.
+#[cfg(windows)]
+fn toast_app() -> Option<&'static str> {
+    const ID: &str = "raisen1337.ride";
+    static REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    REGISTERED
+        .get_or_init(|| register_toast_app(ID).is_some())
+        .then_some(ID)
+}
+
+#[cfg(windows)]
+fn register_toast_app(id: &str) -> Option<()> {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegCreateKeyExW(
+            key: isize,
+            sub_key: *const u16,
+            reserved: u32,
+            class: *const u16,
+            options: u32,
+            access: u32,
+            security: *const std::ffi::c_void,
+            result: *mut isize,
+            disposition: *mut u32,
+        ) -> i32;
+        fn RegSetValueExW(
+            key: isize,
+            name: *const u16,
+            reserved: u32,
+            kind: u32,
+            data: *const u8,
+            len: u32,
+        ) -> i32;
+        fn RegCloseKey(key: isize) -> i32;
+    }
+    const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
+    const KEY_SET_VALUE: u32 = 0x0002;
+    const REG_SZ: u32 = 1;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+
+    let icon = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("ride")
+        .join("notification-icon.png");
+    let png = include_bytes!("../assets/ride.png");
+    if std::fs::read(&icon).ok().as_deref() != Some(&png[..]) {
+        std::fs::create_dir_all(icon.parent()?).ok()?;
+        std::fs::write(&icon, png).ok()?;
+    }
+    let path = wide(&format!("Software\\Classes\\AppUserModelId\\{id}"));
+    let mut key = 0isize;
+    // SAFETY: the strings end in a zero and outlive the calls, and the key is closed after.
+    unsafe {
+        let made = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        );
+        if made != 0 {
+            return None;
+        }
+        let mut ok = true;
+        for (name, value) in [
+            ("DisplayName", "ride".to_string()),
+            ("IconUri", icon.to_string_lossy().into_owned()),
+        ] {
+            let (name, value) = (wide(name), wide(&value));
+            ok &= RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                (value.len() * 2) as u32,
+            ) == 0;
+        }
+        RegCloseKey(key);
+        ok.then_some(())
     }
 }

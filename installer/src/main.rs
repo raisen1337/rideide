@@ -662,6 +662,14 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
     paced(&tx, &ctx, 0.9, "Unregistering from Windows", || {
         remove_context_menu();
         let _ = quiet("reg").args(["delete", UNINSTALL_KEY, "/f"]).status();
+        // The name and icon ride registers for its notifications.
+        let _ = quiet("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Classes\AppUserModelId\raisen1337.ride",
+                "/f",
+            ])
+            .status();
     });
     paced(&tx, &ctx, 1.0, "Finishing", || {});
     let _ = tx.send(Progress::Done);
