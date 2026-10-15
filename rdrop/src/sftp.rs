@@ -209,21 +209,98 @@ pub struct Session {
     next_id: u32,
 }
 
-/// Starts `ssh` without a console window and without asking anything: a host that needs a
-/// password the user hasn't given ssh some other way fails rather than waits.
-fn ssh(host: &str) -> Command {
+/// How to reach a server: what `ssh` gets for it, and a password when there is one.
+#[derive(Clone, Default)]
+pub struct Target {
+    pub args: Vec<String>,
+    pub password: Option<String>,
+}
+
+/// The servers the app has said how to reach, by the key panes and transfers know them by.
+/// A key with nothing here is a host from ~/.ssh/config, reached by its name.
+static TARGETS: std::sync::Mutex<Option<std::collections::HashMap<String, Target>>> =
+    std::sync::Mutex::new(None);
+
+pub fn register(key: &str, target: Target) {
+    let mut targets = TARGETS.lock().unwrap();
+    targets
+        .get_or_insert_with(Default::default)
+        .insert(key.to_string(), target);
+}
+
+fn target(key: &str) -> Target {
+    let targets = TARGETS.lock().unwrap();
+    targets
+        .as_ref()
+        .and_then(|t| t.get(key).cloned())
+        .unwrap_or_else(|| Target {
+            args: vec![key.to_string()],
+            password: None,
+        })
+}
+
+/// What a sign-in that was refused starts with, so the app can ask for a password.
+pub const REFUSED: &str = "Sign-in refused";
+
+pub fn is_refused(error: &str) -> bool {
+    error.starts_with(REFUSED)
+}
+
+/// Run as `SSH_ASKPASS`: ssh starts rdrop to ask for the password, and rdrop answers with
+/// the one it was given for this connection. True when this run was that.
+pub fn answer_askpass() -> bool {
+    if std::env::var_os("RDROP_ASKPASS").is_none() {
+        return false;
+    }
+    use std::io::Write;
+    let secret = std::env::var("RDROP_SECRET").unwrap_or_default();
+    let _ = writeln!(std::io::stdout(), "{secret}");
+    // A test can see that ssh asked.
+    if let Some(mark) = std::env::var_os("RDROP_ASKPASS_MARK") {
+        let _ = std::fs::write(mark, "asked");
+    }
+    true
+}
+
+/// Starts `ssh` for the SFTP subsystem without a console window. Without a password it
+/// asks nothing (keys and the agent only); with one, ssh asks rdrop for it.
+fn ssh(key: &str) -> Command {
+    let target = target(key);
     let mut command = Command::new("ssh");
     command.args([
-        "-o",
-        "BatchMode=yes",
         "-o",
         "ConnectTimeout=15",
         "-o",
         "ServerAliveInterval=30",
-        "-s",
-        host,
-        "sftp",
+        // A server seen for the first time is trusted from then on, as WinSCP offers; a
+        // changed key is still refused.
+        "-o",
+        "StrictHostKeyChecking=accept-new",
     ]);
+    match &target.password {
+        Some(password) => {
+            command.args([
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "NumberOfPasswordPrompts=1",
+                "-o",
+                "PreferredAuthentications=publickey,keyboard-interactive,password",
+            ]);
+            if let Ok(me) = std::env::current_exe() {
+                command
+                    .env("SSH_ASKPASS", me)
+                    .env("SSH_ASKPASS_REQUIRE", "force")
+                    .env("DISPLAY", ":0")
+                    .env("RDROP_ASKPASS", "1")
+                    .env("RDROP_SECRET", password);
+            }
+        }
+        None => {
+            command.args(["-o", "BatchMode=yes"]);
+        }
+    }
+    command.arg("-s").args(&target.args).arg("sftp");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -267,8 +344,12 @@ impl Session {
             let _ = err.read_to_string(&mut text);
         }
         let text = text.trim();
-        if text.contains("Permission denied") {
-            "The server wouldn't let you in with your SSH keys (Permission denied). rdrop signs in the way `ssh` does with BatchMode, so it needs a key or agent rather than a password.".into()
+        if text.contains("Permission denied") || text.contains("Too many authentication failures") {
+            format!("{REFUSED}: {}", text.lines().last().unwrap_or(text))
+        } else if text.contains("Host key verification failed")
+            || text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        {
+            "The server's host key has changed since you last connected, so rdrop won't connect. If that was expected, remove its line from ~/.ssh/known_hosts.".into()
         } else if text.is_empty() {
             "The connection closed before SFTP started".into()
         } else {

@@ -3,6 +3,12 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.2.0
+
+- **Sign in with a password.** When a server doesn't take your SSH keys, rdrop asks for the password, with a box to remember it. Remembered passwords are encrypted by Windows for your account.
+- **Saved sites.** Save a connection with its host, port, user, password and the folder to start in, under Sites on the left; right-click one to edit it, forget its password or delete it. Without a remembered password, rdrop asks for it when it connects.
+- A server seen for the first time is trusted from then on, and one whose key has changed is refused with a clear message.
+
 ## 0.1.0
 
 - **rdrop, files between this computer and your servers.** It signs in the way `ssh` does, with your `~/.ssh/config`, keys, agent and jump hosts, and works with any server that has SFTP.

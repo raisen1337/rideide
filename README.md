@@ -140,7 +140,9 @@ on its own from the Start menu and Explorer; rkit puts them in one place:
 
 rdrop moves files between this computer and your servers, and from one server to another,
 over SFTP. It signs in the way `ssh` does, so your `~/.ssh/config`, keys, agent and jump hosts
-all apply, and it works with any server that has SFTP.
+all apply, and it works with any server that has SFTP. Servers that want a password get one:
+save sites with their user and password, or be asked when you connect, and remembered
+passwords are encrypted by Windows for your account.
 
 - As many panes as you like, each on this computer or on any server. Drag a pane by its header
   to the edge of another to put it there, drag a server from the list onto a pane to open it

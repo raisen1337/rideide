@@ -26,7 +26,7 @@ impl Place {
     pub fn label(&self) -> &str {
         match self {
             Place::Local => "This computer",
-            Place::Server(host) => host,
+            Place::Server(key) => key.strip_prefix("site:").unwrap_or(key),
         }
     }
 }

@@ -27,6 +27,7 @@ mod window;
 
 mod remote;
 mod sftp;
+mod sites;
 mod transfer;
 
 use eframe::egui::{
@@ -35,6 +36,7 @@ use eframe::egui::{
     ViewportBuilder,
 };
 use remote::{Answer, Ask, Remote};
+use sites::Site;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -49,6 +51,10 @@ const GOOD: Color32 = Color32::from_rgb(0x7f, 0xd0, 0x9a);
 const BAD: Color32 = Color32::from_rgb(0xf0, 0x80, 0x8a);
 
 fn main() -> eframe::Result {
+    // ssh starting rdrop to ask for a password: answer it and go.
+    if sftp::answer_askpass() {
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--version") {
         use std::io::Write;
         let _ = writeln!(std::io::stdout(), "{VERSION}");
@@ -400,6 +406,29 @@ enum Dialog {
     Delete(u64, Vec<String>),
 }
 
+/// Signing in: a saved site being made or changed, or a password asked for.
+enum Auth {
+    Site {
+        /// The name it had, when an existing site is changed.
+        old: Option<String>,
+        site: Site,
+        port: String,
+        password: String,
+        focus: bool,
+    },
+    Password {
+        pane: u64,
+        key: String,
+        /// user@host, for the question.
+        label: String,
+        password: String,
+        remember: bool,
+        /// The last password tried was refused.
+        wrong: bool,
+        focus: bool,
+    },
+}
+
 enum Drag {
     /// Rows dragged out of a pane, to copy into another.
     Rows { from: u64, names: Vec<String> },
@@ -442,6 +471,10 @@ struct App {
     show_jobs: bool,
     status: String,
     settings: Settings,
+    sites: Vec<Site>,
+    /// Passwords given this session, by connection, remembered or not.
+    passwords: HashMap<String, String>,
+    auth: Option<Auth>,
     offset: i64,
     adopted: bool,
     next_id: u64,
@@ -473,6 +506,9 @@ impl App {
             focus_dialog: false,
             drag: None,
             show_jobs: false,
+            sites: sites::load(),
+            passwords: HashMap::new(),
+            auth: None,
             status: String::new(),
             settings,
             offset: local_offset(),
@@ -545,7 +581,38 @@ impl App {
     }
 
     /// Points a pane at this computer or at a server, in `path` or where it was last.
+    fn site(&self, key: &str) -> Option<&Site> {
+        let name = key.strip_prefix("site:")?;
+        self.sites.iter().find(|s| s.name == name)
+    }
+
+    /// Tells the SFTP side how to reach `key`: a saved site's address, or a host from the
+    /// SSH config by its name; with the password given this session or remembered.
+    fn register(&self, key: &str) {
+        let args = match self.site(key) {
+            Some(site) => site.ssh_args(),
+            None => vec![key.strip_prefix("site:").unwrap_or(key).to_string()],
+        };
+        let password = self
+            .passwords
+            .get(key)
+            .cloned()
+            .or_else(|| sites::password(key));
+        sftp::register(key, sftp::Target { args, password });
+    }
+
     fn set_place(&mut self, ctx: &Context, id: u64, place: Place, path: Option<String>) {
+        let path = match &place {
+            Place::Server(key) => {
+                self.register(key);
+                path.or_else(|| {
+                    self.site(key)
+                        .map(|s| s.folder.clone())
+                        .filter(|f| !f.is_empty())
+                })
+            }
+            Place::Local => path,
+        };
         let remembered = match &place {
             Place::Server(host) => self.settings.remote.get(host).cloned(),
             Place::Local => None,
@@ -640,6 +707,7 @@ impl App {
             }
         }
         let mut lists = Vec::new();
+        let mut refused = Vec::new();
         for pane in &mut self.panes {
             let Some(conn) = &pane.conn else { continue };
             let mut lost = None;
@@ -676,6 +744,11 @@ impl App {
                 }
             }
             if let Some(e) = lost {
+                if sftp::is_refused(&e) {
+                    if let Some(Place::Server(key)) = &pane.place {
+                        refused.push((pane.id, key.clone()));
+                    }
+                }
                 pane.connected = false;
                 pane.loading = false;
                 pane.error = Some(e);
@@ -684,6 +757,24 @@ impl App {
         }
         for (id, path) in lists {
             self.open(id, path);
+        }
+        // A server that wouldn't take the keys asks for a password, here.
+        for (pane, key) in refused {
+            if self.auth.is_some() {
+                break;
+            }
+            let wrong = self.passwords.remove(&key).is_some() || sites::password(&key).is_some();
+            let label = self.site(&key).map_or(key.clone(), Site::address);
+            let remember = self.site(&key).is_some_and(|s| s.remember);
+            self.auth = Some(Auth::Password {
+                pane,
+                key,
+                label,
+                password: String::new(),
+                remember,
+                wrong,
+                focus: true,
+            });
         }
         let changed: Vec<(Place, String)> = self.queue.changed.try_iter().collect();
         for (place, folder) in changed {
@@ -775,7 +866,7 @@ impl App {
     }
 
     fn keys(&mut self, ctx: &Context) {
-        if self.dialog.is_some() || ctx.memory(|m| m.focused().is_some()) {
+        if self.dialog.is_some() || self.auth.is_some() || ctx.memory(|m| m.focused().is_some()) {
             return;
         }
         let id = self.focus;
@@ -868,7 +959,7 @@ impl App {
     }
 
     /// One line of the list on the left: a place to open, drag or click.
-    fn place_row(&mut self, ui: &mut Ui, ctx: &Context, place: Place) {
+    fn place_row(&mut self, ui: &mut Ui, ctx: &Context, place: Place) -> egui::Response {
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
         let open_somewhere = self
@@ -883,7 +974,8 @@ impl App {
         ui.painter().rect_filled(rect, 7.0, fill);
         let (icon, name) = match &place {
             Place::Local => (icons::FOLDER_ROOT, "This computer"),
-            Place::Server(host) => (icons::REMOTE, host.as_str()),
+            Place::Server(key) if key.starts_with("site:") => (icons::SAVE, place.label()),
+            Place::Server(_) => (icons::REMOTE, place.label()),
         };
         let color = if open_somewhere {
             GOOD
@@ -919,6 +1011,7 @@ impl App {
                 self.set_place(ctx, self.focus, place, None);
             }
         }
+        resp
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
@@ -933,7 +1026,53 @@ impl App {
                 ui.add_space(4.0);
                 self.place_row(ui, &ctx, Place::Local);
                 ui.add_space(10.0);
-                ui.label(RichText::new("SERVERS").size(11.5).strong().color(theme::COMMENT()));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("SITES").size(11.5).strong().color(theme::COMMENT()));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("+ New").on_hover_text("Save a connection: host, user, password").clicked() {
+                            self.auth = Some(Auth::Site {
+                                old: None,
+                                site: Site { port: 22, ..Site::default() },
+                                port: "22".into(),
+                                password: String::new(),
+                                focus: true,
+                            });
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+                if self.sites.is_empty() {
+                    ui.label(RichText::new("Servers you save, with their user and password.").size(12.0).color(theme::COMMENT()));
+                }
+                for site in self.sites.clone() {
+                    let resp = self.place_row(ui, &ctx, Place::Server(site.key()));
+                    resp.context_menu(|ui| {
+                        if ui.button("Edit…").clicked() {
+                            self.auth = Some(Auth::Site {
+                                old: Some(site.name.clone()),
+                                port: site.port.to_string(),
+                                site: site.clone(),
+                                password: String::new(),
+                                focus: true,
+                            });
+                        }
+                        if ui.button("Forget the password").clicked() {
+                            sites::forget(&site.key());
+                            self.passwords.remove(&site.key());
+                            if let Some(s) = self.sites.iter_mut().find(|s| s.name == site.name) {
+                                s.remember = false;
+                            }
+                            sites::save(&self.sites);
+                        }
+                        if ui.button("Delete").clicked() {
+                            sites::forget(&site.key());
+                            self.sites.retain(|s| s.name != site.name);
+                            sites::save(&self.sites);
+                        }
+                    });
+                }
+                ui.add_space(10.0);
+                ui.label(RichText::new("SSH CONFIG").size(11.5).strong().color(theme::COMMENT()));
                 ui.add_space(4.0);
                 if self.hosts.is_empty() {
                     let text = if self.hosts_rx.is_some() { "Reading ~/.ssh/config…" } else { "No hosts in ~/.ssh/config" };
@@ -1360,7 +1499,12 @@ impl App {
     fn pane_ui(&mut self, ui: &mut Ui, id: u64, rect: Rect, acts: &mut Vec<(u64, PaneAct)>) {
         let focused = self.focus == id;
         let several = self.panes.len() > 1;
-        let hosts = self.hosts.clone();
+        let hosts: Vec<String> = self
+            .sites
+            .iter()
+            .map(Site::key)
+            .chain(self.hosts.iter().cloned())
+            .collect();
         let offset = self.offset;
         let dragging_rows = matches!(self.drag, Some(Drag::Rows { .. }));
         if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
@@ -1399,7 +1543,7 @@ impl App {
         );
         let (icon, title) = match &pane.place {
             Some(Place::Local) => (icons::FOLDER_ROOT, "This computer".to_string()),
-            Some(Place::Server(host)) => (icons::REMOTE, host.clone()),
+            Some(place @ Place::Server(_)) => (icons::REMOTE, place.label().to_string()),
             None => (icons::ADD, "Pick a place".to_string()),
         };
         let dot = match &pane.place {
@@ -1427,7 +1571,14 @@ impl App {
                 }
                 ui.separator();
                 for host in &hosts {
-                    if ui.button(format!("{}  {host}", icons::REMOTE)).clicked() {
+                    if ui
+                        .button(format!(
+                            "{}  {}",
+                            icons::REMOTE,
+                            host.strip_prefix("site:").unwrap_or(host)
+                        ))
+                        .clicked()
+                    {
                         act(PaneAct::Pick(Place::Server(host.clone())));
                     }
                 }
@@ -1556,7 +1707,7 @@ impl App {
                                 act(PaneAct::Pick(Place::Local));
                             }
                             for host in hosts.iter().take(8) {
-                                if ui.button(format!("{}  {host}", icons::REMOTE)).clicked() {
+                                if ui.button(format!("{}  {}", icons::REMOTE, host.strip_prefix("site:").unwrap_or(host))).clicked() {
                                     act(PaneAct::Pick(Place::Server(host.clone())));
                                 }
                             }
@@ -1963,6 +2114,201 @@ impl App {
         }
     }
 
+    /// Saving a site, and the password questions.
+    fn auth_dialog(&mut self, ctx: &Context) {
+        let Some(auth) = &mut self.auth else { return };
+        let mut close = false;
+        let mut done = false;
+        let mut connect = false;
+        let title = match auth {
+            Auth::Site { old: None, .. } => "New site".to_string(),
+            Auth::Site { .. } => "Edit site".to_string(),
+            Auth::Password { label, .. } => format!("Password for {label}"),
+        };
+        let remembered = match auth {
+            Auth::Site {
+                old: Some(name), ..
+            } => sites::password(&format!("site:{name}")).is_some(),
+            _ => false,
+        };
+        egui::Modal::new(egui::Id::new("auth")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.label(RichText::new(&title).size(16.0).strong());
+            ui.add_space(10.0);
+            let enter = ui.input(|i| i.key_pressed(Key::Enter));
+            match auth {
+                Auth::Site { site, port, password, focus, .. } => {
+                    egui::Grid::new("site").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        let name = ui.add(TextEdit::singleline(&mut site.name).hint_text("shop, production…").desired_width(260.0));
+                        if std::mem::take(focus) {
+                            name.request_focus();
+                        }
+                        ui.end_row();
+                        ui.label("Host");
+                        ui.add(TextEdit::singleline(&mut site.host).hint_text("example.com or 10.0.0.5").desired_width(260.0));
+                        ui.end_row();
+                        ui.label("Port");
+                        ui.add(TextEdit::singleline(port).desired_width(70.0));
+                        ui.end_row();
+                        ui.label("User");
+                        ui.add(TextEdit::singleline(&mut site.user).hint_text("root, deploy…").desired_width(260.0));
+                        ui.end_row();
+                        ui.label("Password");
+                        let hint = if remembered { "unchanged" } else { "empty: SSH keys" };
+                        ui.add(TextEdit::singleline(password).password(true).hint_text(hint).desired_width(260.0));
+                        ui.end_row();
+                        ui.label("");
+                        ui.checkbox(&mut site.remember, "Remember password");
+                        ui.end_row();
+                        ui.label("Start in");
+                        ui.add(TextEdit::singleline(&mut site.folder).hint_text("home folder").desired_width(260.0));
+                        ui.end_row();
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Without a remembered password, rdrop asks for it when it connects. Remembered passwords are encrypted by Windows for your account.")
+                            .size(11.5)
+                            .color(theme::COMMENT()),
+                    );
+                }
+                Auth::Password { password, remember, wrong, focus, .. } => {
+                    if *wrong {
+                        ui.label(RichText::new("That password didn't work. Try again.").size(12.5).color(BAD));
+                        ui.add_space(4.0);
+                    } else {
+                        ui.label(RichText::new("The server didn't take your SSH keys; it wants a password.").size(12.5).color(theme::COMMENT()));
+                        ui.add_space(4.0);
+                    }
+                    let edit = ui.add(TextEdit::singleline(password).password(true).desired_width(f32::INFINITY));
+                    if std::mem::take(focus) {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() && enter {
+                        done = true;
+                    }
+                    ui.checkbox(remember, "Remember password");
+                }
+            }
+            ui.add_space(12.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                match auth {
+                    Auth::Site { .. } => {
+                        if ui.button("Save and connect").clicked() {
+                            done = true;
+                            connect = true;
+                        }
+                        if ui.button("Save").clicked() {
+                            done = true;
+                        }
+                    }
+                    Auth::Password { .. } => {
+                        if ui.button("Connect").clicked() {
+                            done = true;
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+        });
+        if close {
+            self.auth = None;
+            return;
+        }
+        if !done {
+            return;
+        }
+        match self.auth.take() {
+            Some(Auth::Site {
+                old,
+                mut site,
+                port,
+                password,
+                ..
+            }) => {
+                site.name = site.name.trim().to_string();
+                site.host = site.host.trim().to_string();
+                site.port = port.trim().parse().unwrap_or(22);
+                let taken = self
+                    .sites
+                    .iter()
+                    .any(|s| s.name == site.name && Some(&s.name) != old.as_ref());
+                if site.name.is_empty() || site.host.is_empty() || taken {
+                    self.status = if taken {
+                        "A site with that name is already saved".into()
+                    } else {
+                        "A site needs a name and a host".into()
+                    };
+                    self.auth = Some(Auth::Site {
+                        old,
+                        site,
+                        port,
+                        password,
+                        focus: false,
+                    });
+                    return;
+                }
+                let key = site.key();
+                // A renamed site takes its password along.
+                if let Some(old_name) = &old {
+                    let old_key = format!("site:{old_name}");
+                    if old_key != key {
+                        if let Some(pw) = sites::password(&old_key) {
+                            if password.is_empty() && site.remember {
+                                sites::remember(&key, &pw);
+                            }
+                        }
+                        sites::forget(&old_key);
+                        self.passwords.remove(&old_key);
+                    }
+                    self.sites.retain(|s| &s.name != old_name);
+                }
+                if !password.is_empty() {
+                    self.passwords.insert(key.clone(), password.clone());
+                    if site.remember {
+                        sites::remember(&key, &password);
+                    } else {
+                        sites::forget(&key);
+                    }
+                } else if !site.remember {
+                    sites::forget(&key);
+                }
+                site.remember = site.remember && sites::password(&key).is_some();
+                self.sites.push(site);
+                self.sites.sort_by_key(|s| s.name.to_lowercase());
+                sites::save(&self.sites);
+                if connect {
+                    self.set_place(ctx, self.focus, Place::Server(key), None);
+                }
+            }
+            Some(Auth::Password {
+                pane,
+                key,
+                password,
+                remember,
+                ..
+            }) => {
+                self.passwords.insert(key.clone(), password.clone());
+                if remember {
+                    sites::remember(&key, &password);
+                } else {
+                    sites::forget(&key);
+                }
+                if let Some(site) = self.sites.iter_mut().find(|s| s.key() == key) {
+                    site.remember = remember;
+                }
+                sites::save(&self.sites);
+                self.set_place(ctx, pane, Place::Server(key), None);
+            }
+            None => {}
+        }
+    }
+
     fn save(&mut self) {
         let order = self.layout.panes();
         self.settings.panes = order
@@ -2071,6 +2417,7 @@ impl eframe::App for App {
             .show(ui, |ui| self.panes_ui(ui));
         self.jobs_popup(&ctx);
         self.dialogs(&ctx);
+        self.auth_dialog(&ctx);
         if self.drag.is_none() {
             resize_edges(&ctx);
         }

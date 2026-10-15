@@ -4090,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "rdrop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "raw-window-handle",
@@ -4293,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "flate2",
  "ignore",
@@ -4306,7 +4306,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "postcard",
  "serde",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "eframe",
  "flate2",
