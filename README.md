@@ -131,10 +131,27 @@ There is no API key to paste into ride.
 The setup program installs rkit, the suite's hub, beside ride and rterm. Each app still starts
 on its own from the Start menu and Explorer; rkit puts them in one place:
 
-- Open ride or rterm, open a folder in ride, or start any of rterm's shells.
+- Open ride, rterm or rdrop, open a folder in ride, or start any of rterm's shells.
 - Reopen the folders you used lately in ride, on this computer or on a server.
-- Every server in your `~/.ssh/config`, one click from ride or from an SSH session in rterm.
+- Every server in your `~/.ssh/config`, one click from ride, rdrop or an SSH session in rterm.
 - Updates for each app on its own, with its changelog: see what's new, then update just that app.
+
+## rdrop
+
+rdrop moves files between this computer and your servers, and from one server to another,
+over SFTP. It signs in the way `ssh` does, so your `~/.ssh/config`, keys, agent and jump hosts
+all apply, and it works with any server that has SFTP.
+
+- As many panes as you like, each on this computer or on any server. Drag a pane by its header
+  to the edge of another to put it there, drag a server from the list onto a pane to open it
+  beside, and drag the lines between panes to resize.
+- Drag rows from one pane onto another to copy them, or files from Explorer onto a pane. Server
+  to server goes straight across, without a stop on this computer's disk. Folders copy with all
+  they hold, and files keep their modification times.
+- Transfers run in the background, three at a time, while you keep browsing; the bar at the
+  bottom shows how far they are and opens the full list.
+- F5 copies to the pane you used before, F2 renames, F7 makes a folder, Del deletes, Backspace
+  goes up, Alt+Left goes back, Tab moves to the next pane, and typing narrows the list.
 
 ## rterm
 
@@ -170,7 +187,7 @@ rustup target add x86_64-unknown-linux-musl   # for the server agent
 `cargo run -p ride` starts the editor without installing it.
 
 Each app has its own version (in its `Cargo.toml`) and changelog: `CHANGELOG.md` for ride,
-`rterm/CHANGELOG.md` and `rkit/CHANGELOG.md`. To release, add an entry for each app that changed,
+`rterm/CHANGELOG.md`, `rdrop/CHANGELOG.md` and `rkit/CHANGELOG.md`. To release, add an entry for each app that changed,
 raise its version, raise the suite's `version` in the root `Cargo.toml` and push to `main`. The
 [Release workflow](.github/workflows/release.yml) tests and builds on GitHub's Windows runners,
 then `tools/manifest.py` writes `apps.json` (each app's version, program and changelog, for
@@ -184,12 +201,13 @@ programs.
 | `proto/` | The protocol between the two |
 | `rterm/` | The terminal that comes with ride |
 | `rkit/` | The hub that starts the apps and updates each on its own |
+| `rdrop/` | Files between this computer and servers, over SFTP |
 | `tools/` | `manifest.py`, which writes a release's `apps.json` and `latest.json` |
 | `installer/` | The Windows setup program |
 
 ## License
 
-ride and rterm are free and open source, under either of
+ride, rterm, rdrop and rkit are free and open source, under either of
 
 - the [Apache License, Version 2.0](LICENSE-APACHE), or
 - the [MIT license](LICENSE-MIT),

@@ -13,6 +13,7 @@ fn main() {
         ("ride.exe", "ride"),
         ("rterm.exe", "rterm"),
         ("rkit.exe", "rkit"),
+        ("rdrop.exe", "rdrop"),
     ] {
         let app = root.join("target").join("release").join(exe);
         println!("cargo:rerun-if-changed={}", app.display());

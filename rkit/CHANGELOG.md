@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rkit you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rkit.
 
+## 0.2.0
+
+- rdrop has a card of its own, and every server in the list opens in rdrop with one click.
+
 ## 0.1.0
 
 - **rkit, one place for the suite.** Open ride or rterm, open a folder in ride, start any of rterm's shells, and reopen the folders you used lately in ride, on this computer or on a server.

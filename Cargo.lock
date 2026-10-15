@@ -4089,6 +4089,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdrop"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "raw-window-handle",
+ "resvg",
+ "serde",
+ "serde_json",
+ "winresource",
+]
+
+[[package]]
 name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4251,7 +4263,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4281,7 +4293,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "flate2",
  "ignore",
@@ -4294,7 +4306,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "postcard",
  "serde",
@@ -4316,7 +4328,7 @@ dependencies = [
 
 [[package]]
 name = "rkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "raw-window-handle",
@@ -4331,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "eframe",
  "flate2",

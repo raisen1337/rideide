@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2c33"/>
+      <stop offset="1" stop-color="#131316"/>
+    </linearGradient>
+    <linearGradient id="drop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b3ceff"/>
+      <stop offset="1" stop-color="#6c9af4"/>
+    </linearGradient>
+  </defs>
+  <!-- ride's tile, so the suite reads as one family. -->
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#tile)"/>
+  <rect x="9" y="9" width="238" height="238" rx="57" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+  <!-- A cloud, where the files live. -->
+  <path d="M78 132 C58 132 48 118 48 104 C48 88 60 78 74 78 C78 60 94 48 114 48 C134 48 148 60 153 76 C157 75 160 74 164 74 C186 74 204 90 204 108 C204 122 194 132 178 132 Z" fill="#f3f4f6"/>
+  <!-- A file dropping out of it, in ride's cursor colour, with arrows both ways inside. -->
+  <path d="M128 112 C128 112 168 156 168 182 C168 204 150 220 128 220 C106 220 88 204 88 182 C88 156 128 112 128 112 Z" fill="url(#drop)" stroke="#131316" stroke-width="8"/>
+  <path d="M114 158 V200 M104 168 L114 156 L124 168" stroke="#131316" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M142 150 V192 M132 182 L142 194 L152 182" stroke="#131316" stroke-width="8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

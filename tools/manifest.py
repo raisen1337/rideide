@@ -21,6 +21,7 @@ APPS = [
     ('ride', 'app', 'CHANGELOG.md'),
     ('rterm', 'rterm', 'rterm/CHANGELOG.md'),
     ('rkit', 'rkit', 'rkit/CHANGELOG.md'),
+    ('rdrop', 'rdrop', 'rdrop/CHANGELOG.md'),
 ]
 
 

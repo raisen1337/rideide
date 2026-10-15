@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["proto", "agent", "app", "installer", "rterm", "rkit"]
+members = ["proto", "agent", "app", "installer", "rterm", "rkit", "rdrop"]
 
 [workspace.package]
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 

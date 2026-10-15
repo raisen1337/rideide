@@ -106,6 +106,20 @@ impl Node {
         }
     }
 
+    /// Exchanges the places of two panes.
+    #[allow(dead_code)] // rdrop rearranges its panes with it.
+    pub fn swap(&mut self, a: u64, b: u64) {
+        match self {
+            Node::Pane(id) if *id == a => *id = b,
+            Node::Pane(id) if *id == b => *id = a,
+            Node::Pane(_) => {}
+            Node::Split { first, second, .. } => {
+                first.swap(a, b);
+                second.swap(a, b);
+            }
+        }
+    }
+
     pub fn panes(&self) -> Vec<u64> {
         match self {
             Node::Pane(id) => vec![*id],

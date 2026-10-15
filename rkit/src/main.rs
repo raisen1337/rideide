@@ -80,6 +80,7 @@ fn main() -> eframe::Result {
 enum Kind {
     Ride,
     Rterm,
+    Rdrop,
     Rkit,
 }
 
@@ -205,6 +206,13 @@ impl App {
                 include_bytes!(concat!(env!("OUT_DIR"), "/rterm-96.rgba")),
             ),
             card(
+                Kind::Rdrop,
+                "rdrop",
+                "rdrop",
+                "Files between this computer and your servers, and server to server, over SFTP.",
+                include_bytes!(concat!(env!("OUT_DIR"), "/rdrop-96.rgba")),
+            ),
+            card(
                 Kind::Rkit,
                 "rkit",
                 "rkit",
@@ -212,7 +220,7 @@ impl App {
                 include_bytes!(concat!(env!("OUT_DIR"), "/rkit-96.rgba")),
             ),
         ];
-        cards[2].installed = Some(Some(VERSION.to_string()));
+        cards[3].installed = Some(Some(VERSION.to_string()));
 
         let mut app = Self {
             cards,
@@ -363,7 +371,7 @@ impl App {
             .show(ui, |ui| {
                 title_drag(ui);
                 ui.horizontal(|ui| {
-                    let icon = &self.cards[2].icon;
+                    let icon = &self.cards[3].icon;
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(
                         icon.id(),
                         vec2(22.0, 22.0),
@@ -486,7 +494,7 @@ impl App {
                                 }
                             });
                         }
-                        Kind::Rkit => {}
+                        Kind::Rdrop | Kind::Rkit => {}
                     }
                 }
 
@@ -581,6 +589,7 @@ impl App {
     fn side(&mut self, ui: &mut Ui) {
         let ride = self.cards[0].exe.clone();
         let rterm = self.cards[1].exe.clone();
+        let rdrop = self.cards[2].exe.clone();
         let mut run: Option<(PathBuf, Vec<String>)> = None;
         heading(ui, "Recent in ride");
         if self.recent.is_empty() {
@@ -635,6 +644,9 @@ impl App {
                 ui.label(RichText::new(icons::REMOTE).color(theme::COMMENT()));
                 ui.label(RichText::new(host).size(14.0).color(theme::TEXT()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if small(ui, "rdrop", "This server's files in rdrop") {
+                        run = Some((rdrop.clone(), vec![format!("--host={host}")]));
+                    }
                     if small(ui, "rterm", "An SSH session in rterm") {
                         run = Some((rterm.clone(), vec!["-p".into(), format!("SSH: {host}")]));
                     }

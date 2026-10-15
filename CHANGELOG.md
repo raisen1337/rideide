@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.10
+
+- **rdrop joins the suite**: files between this computer and your servers, and from server to server, in as many panes as you like. It comes with this update, in the Start menu and as "Open in rdrop" on folders; rkit shows it too.
+
 ## 0.9.9
 
 - **rkit, the suite's hub.** A new app beside ride and rterm, in the Start menu as rkit: open either of them, reopen the folders you used lately in ride (on this computer or on a server), connect to any server in your SSH config, and update each app on its own after reading what's new in it. ride and rterm still start on their own, from the Start menu and Explorer, as before.

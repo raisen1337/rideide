@@ -81,6 +81,7 @@ fn main() {
         ("rkit", root.join("assets").join("rkit.svg")),
         ("ride", root.join("../app/assets/ride.svg")),
         ("rterm", root.join("../rterm/assets/rterm.svg")),
+        ("rdrop", root.join("../rdrop/assets/rdrop.svg")),
     ] {
         std::fs::write(out.join(format!("{name}-96.rgba")), render(&tree(&svg), 96)).unwrap();
     }

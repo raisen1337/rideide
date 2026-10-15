@@ -21,6 +21,8 @@ static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ride.exe.gz"))
 static RTERM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rterm.exe.gz"));
 /// rkit, which starts the apps and updates each on its own.
 static RKIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rkit.exe.gz"));
+/// rdrop, for files between this computer and servers.
+static RDROP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rdrop.exe.gz"));
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The icon as 128x128 RGBA pixels, for the window and the mark in the side rail.
 static ICON: &[u8] = include_bytes!("../../app/assets/icon-128.rgba");
@@ -126,6 +128,10 @@ fn rkit_link() -> PathBuf {
     start_menu_link().with_file_name("rkit.lnk")
 }
 
+fn rdrop_link() -> PathBuf {
+    start_menu_link().with_file_name("rdrop.lnk")
+}
+
 /// A packed program, unpacked.
 fn unpack(packed: &[u8]) -> Result<Vec<u8>, String> {
     let mut data = Vec::new();
@@ -221,6 +227,58 @@ fn install_rkit(dir: &Path, start_menu: bool) -> Result<(), String> {
             .status();
     }
     Ok(())
+}
+
+/// Installs rdrop beside the others, with a Start menu entry and "Open in rdrop" on folders.
+fn install_rdrop(dir: &Path, start_menu: bool, context_menu: bool) -> Result<(), String> {
+    let exe = dir.join("rdrop.exe");
+    swap_in(&exe, &unpack(RDROP)?)?;
+    if start_menu {
+        let script = format!(
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath = {}; \
+             $s.Description = 'rdrop: files between this computer and your servers'; $s.Save()",
+            ps(&rdrop_link().to_string_lossy()),
+            ps(&exe.to_string_lossy()),
+        );
+        run_powershell(&script).map_err(|e| format!("Can't create rdrop's shortcut: {e}"))?;
+        let _ = quiet("reg")
+            .args([
+                "add",
+                RDROP_APP_PATH,
+                "/ve",
+                "/d",
+                &exe.to_string_lossy(),
+                "/f",
+            ])
+            .status();
+    }
+    if context_menu {
+        add_menu_entries(&exe, &RDROP_MENU_KEYS, "Open in rdrop", "")?;
+    }
+    Ok(())
+}
+
+const RDROP_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rdrop.exe";
+
+/// rdrop's entries: a folder, and the empty space of a folder or the desktop.
+const RDROP_MENU_KEYS: [(&str, &str); 2] = [
+    (r"HKCU\Software\Classes\Directory\shell\rdrop", "%1"),
+    (
+        r"HKCU\Software\Classes\Directory\Background\shell\rdrop",
+        "%V",
+    ),
+];
+
+fn remove_rdrop(dir: &Path) {
+    let _ = std::fs::remove_file(rdrop_link());
+    let _ = quiet("reg").args(["delete", RDROP_APP_PATH, "/f"]).status();
+    for (key, _) in RDROP_MENU_KEYS {
+        let _ = quiet("reg").args(["delete", key, "/f"]).status();
+    }
+    let exe = dir.join("rdrop.exe");
+    if std::fs::remove_file(&exe).is_err() {
+        let _ = std::fs::rename(&exe, exe.with_extension("old.exe"));
+    }
 }
 
 const RKIT_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rkit.exe";
@@ -630,6 +688,12 @@ fn replace_app(dir: &Path) -> Result<(), String> {
             let _ = std::fs::write(log.join("rterm-error.txt"), error);
         }
     }
+    // rdrop likewise, with its Start menu and right-click entries the first time.
+    let first = !dir.join("rdrop.exe").exists();
+    if let Err(error) = install_rdrop(dir, first && registered, first && registered) {
+        let log = local_app_data().join("ride").join("updates");
+        let _ = std::fs::write(log.join("rdrop-error.txt"), error);
+    }
     // rkit likewise, with its Start menu entry the first time.
     let first = !dir.join("rkit.exe").exists();
     if let Err(error) = install_rkit(dir, first && registered) {
@@ -705,7 +769,7 @@ fn rehearse(uninstalling: bool, tx: Sender<Progress>, ctx: Context) {
     let steps: &[(f32, &'static str)] = if uninstalling {
         &[
             (0.3, "Removing shortcuts"),
-            (0.6, "Removing ride and rterm"),
+            (0.6, "Removing the apps"),
             (0.9, "Unregistering from Windows"),
             (1.0, "Finishing"),
         ]
@@ -717,6 +781,7 @@ fn rehearse(uninstalling: bool, tx: Sender<Progress>, ctx: Context) {
             (0.7, "Creating shortcuts"),
             (0.8, "Adding \"Open with ride\" to the right-click menu"),
             (0.83, "Installing rkit"),
+            (0.84, "Installing rdrop"),
             (0.85, "Installing rterm"),
             (0.9, "Registering with Windows"),
             (1.0, "Finishing"),
@@ -782,6 +847,9 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
         paced(&tx, &ctx, 0.83, "Installing rkit", || {
             install_rkit(dir, options.start_menu)
         })?;
+        paced(&tx, &ctx, 0.84, "Installing rdrop", || {
+            install_rdrop(dir, options.start_menu, options.context_menu)
+        })?;
         paced(&tx, &ctx, 0.85, "Installing rterm", || {
             // Left out on purpose, it stays out on updates too.
             let marker = dir.join("no-rterm");
@@ -823,7 +891,7 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
 
 fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context) {
     paced(&tx, &ctx, 0.3, "Removing shortcuts", remove_shortcuts);
-    paced(&tx, &ctx, 0.6, "Removing ride and rterm", || {
+    paced(&tx, &ctx, 0.6, "Removing the apps", || {
         let app = dir.join("ride.exe");
         // If the file is locked, this install of ride is running: it is closed, then removed.
         if app.exists() && std::fs::remove_file(&app).is_err() && ride_is_running() {
@@ -833,6 +901,7 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
         }
         remove_rterm(&dir);
         remove_rkit(&dir);
+        remove_rdrop(&dir);
     });
     if remove_data {
         paced(
@@ -843,7 +912,9 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
             || {
                 if let Some(roaming) = std::env::var_os("APPDATA") {
                     let _ = std::fs::remove_dir_all(PathBuf::from(&roaming).join("ride"));
-                    let _ = std::fs::remove_dir_all(PathBuf::from(roaming).join("rterm"));
+                    let _ = std::fs::remove_dir_all(PathBuf::from(&roaming).join("rterm"));
+                    let _ = std::fs::remove_dir_all(PathBuf::from(&roaming).join("rkit"));
+                    let _ = std::fs::remove_dir_all(PathBuf::from(roaming).join("rdrop"));
                 }
             },
         );
@@ -1123,7 +1194,7 @@ impl Setup {
             Self::heading(
                 ui,
                 "Uninstall rkit",
-                "This removes ride and rterm from this computer.",
+                "This removes ride, rterm, rdrop and rkit from this computer.",
             );
             ui.label(
                 RichText::new(format!("Installed in {}", self.options.dir.display())).color(TEXT),
