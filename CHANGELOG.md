@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.6
+
+- **rterm, a terminal for Windows.** A separate app that comes with ride, made from ride's own terminal: tabs of PowerShell, PowerShell 7, Command Prompt, Git Bash, each WSL distribution and every host in your SSH config, in ride's look, with glass if you like. Find it in the Start menu as rterm, right-click a folder for "Open in rterm", or type `rterm` in Explorer's address bar. Updating ride installs it; setup has a box to leave it out.
+- With glass on, Windows no longer draws a faint second set of minimize and maximize buttons under ride's own.
+
 ## 0.9.5
 
 - Pick several files and folders in the file tree: Ctrl+click adds or removes one, Shift+click takes a range. Right-click the picked rows to add them to chat, copy their paths or delete them together. Escape or a plain click clears the pick.

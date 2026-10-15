@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 /// The application, gzip-compressed, packed in by build.rs.
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ride.exe.gz"));
+/// rterm, the terminal that comes with ride, packed the same way.
+static RTERM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rterm.exe.gz"));
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The icon as 128x128 RGBA pixels, for the window and the mark in the side rail.
 static ICON: &[u8] = include_bytes!("../../app/assets/icon-128.rgba");
@@ -97,6 +99,96 @@ fn start_menu_link() -> PathBuf {
         .join("Microsoft\\Windows\\Start Menu\\Programs\\ride.lnk")
 }
 
+fn rterm_link() -> PathBuf {
+    start_menu_link().with_file_name("rterm.lnk")
+}
+
+/// A packed program, unpacked.
+fn unpack(packed: &[u8]) -> Result<Vec<u8>, String> {
+    let mut data = Vec::new();
+    flate2::read::GzDecoder::new(packed)
+        .read_to_end(&mut data)
+        .map_err(|e| format!("The package is damaged: {e}"))?;
+    Ok(data)
+}
+
+/// Puts a program in place even while a copy of it is running: Windows can rename a
+/// program file that is open, but not overwrite it, so the old one is moved aside first.
+/// A failure at any point leaves the old one working.
+fn swap_in(target: &Path, data: &[u8]) -> Result<(), String> {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let fresh = target.with_extension("exe.new");
+    let old = target.with_extension("old.exe");
+    std::fs::write(&fresh, data).map_err(|e| format!("Can't write the new {name}: {e}"))?;
+    let _ = std::fs::remove_file(&old);
+    // Some antivirus scanners hold the file a moment longer.
+    let mut moved = !target.exists();
+    for _ in 0..20 {
+        if moved || std::fs::rename(target, &old).is_ok() {
+            moved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !moved {
+        let _ = std::fs::remove_file(&fresh);
+        return Err(format!(
+            "{name} stayed in use, so the update was left for later."
+        ));
+    }
+    if let Err(error) = std::fs::rename(&fresh, target) {
+        let _ = std::fs::rename(&old, target);
+        let _ = std::fs::remove_file(&fresh);
+        return Err(format!("Can't put the new {name} in place: {error}"));
+    }
+    Ok(())
+}
+
+/// Installs rterm beside ride, with a Start menu entry and "Open in rterm" on folders.
+fn install_rterm(dir: &Path, start_menu: bool, context_menu: bool) -> Result<(), String> {
+    let exe = dir.join("rterm.exe");
+    swap_in(&exe, &unpack(RTERM)?)?;
+    if start_menu {
+        let script = format!(
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath = {}; \
+             $s.Description = 'rterm, a terminal'; $s.Save()",
+            ps(&rterm_link().to_string_lossy()),
+            ps(&exe.to_string_lossy()),
+        );
+        run_powershell(&script).map_err(|e| format!("Can't create rterm's shortcut: {e}"))?;
+        // Lets Win+R and Explorer's address bar start it by name.
+        let _ = quiet("reg")
+            .args([
+                "add",
+                RTERM_APP_PATH,
+                "/ve",
+                "/d",
+                &exe.to_string_lossy(),
+                "/f",
+            ])
+            .status();
+    }
+    if context_menu {
+        add_menu_entries(&exe, &RTERM_MENU_KEYS, "Open in rterm", "-d ")?;
+    }
+    Ok(())
+}
+
+const RTERM_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rterm.exe";
+
+fn remove_rterm(dir: &Path) {
+    let _ = std::fs::remove_file(rterm_link());
+    let _ = quiet("reg").args(["delete", RTERM_APP_PATH, "/f"]).status();
+    for (key, _) in RTERM_MENU_KEYS {
+        let _ = quiet("reg").args(["delete", key, "/f"]).status();
+    }
+    let exe = dir.join("rterm.exe");
+    // A running rterm keeps its file; it is moved aside to go with the folder.
+    if std::fs::remove_file(&exe).is_err() {
+        let _ = std::fs::rename(&exe, exe.with_extension("old.exe"));
+    }
+}
+
 /// PowerShell quoting: a single-quoted string with its quotes doubled.
 fn ps(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
@@ -154,6 +246,25 @@ fn remove_shortcuts() {
     );
 }
 
+/// Whether `dir` is the install Windows lists under "Installed apps". A portable copy
+/// elsewhere is updated without touching that install's entry, shortcuts or menus.
+fn is_registered(dir: &Path) -> bool {
+    let Ok(out) = quiet("reg")
+        .args(["query", UNINSTALL_KEY, "/v", "InstallLocation"])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let listed = text
+        .lines()
+        .find_map(|line| line.split_once("REG_SZ"))
+        .map(|(_, value)| value.trim().trim_end_matches('\\').to_lowercase());
+    let dir = dir.display().to_string();
+    out.status.success()
+        && listed.is_some_and(|listed| listed == dir.trim_end_matches('\\').to_lowercase())
+}
+
 /// Lists ride under "Installed apps", with this program as its uninstaller.
 fn register(dir: &Path, size_kb: u64) -> Result<(), String> {
     let exe = dir.join("ride.exe");
@@ -202,13 +313,33 @@ const MENU_KEYS: [(&str, &str); 3] = [
     ),
 ];
 
+/// rterm's entries: a folder, and the empty space of a folder or the desktop.
+const RTERM_MENU_KEYS: [(&str, &str); 2] = [
+    (r"HKCU\Software\Classes\Directory\shell\rterm", "%1"),
+    (
+        r"HKCU\Software\Classes\Directory\Background\shell\rterm",
+        "%V",
+    ),
+];
+
 /// Adds "Open with ride" to Explorer's right-click menu, for this user only.
 fn add_context_menu(exe: &Path) -> Result<(), String> {
+    add_menu_entries(exe, &MENU_KEYS, "Open with ride", "")
+}
+
+/// Adds an entry named `label` to Explorer's right-click menus under `keys`, running `exe`
+/// with `flag` and then what was clicked.
+fn add_menu_entries(
+    exe: &Path,
+    keys: &[(&str, &str)],
+    label: &str,
+    flag: &str,
+) -> Result<(), String> {
     let exe = exe.display().to_string();
-    for (key, argument) in MENU_KEYS {
-        let command = format!("\"{exe}\" \"{argument}\"");
+    for &(key, argument) in keys {
+        let command = format!("\"{exe}\" {flag}\"{argument}\"");
         let entries: [(&str, Vec<&str>); 3] = [
-            (key, vec!["/ve", "/d", "Open with ride"]),
+            (key, vec!["/ve", "/d", label]),
             (key, vec!["/v", "Icon", "/d", &exe]),
             (&format!("{key}\\command"), vec!["/ve", "/d", &command]),
         ];
@@ -221,7 +352,7 @@ fn add_context_menu(exe: &Path) -> Result<(), String> {
                 .status()
                 .map_err(|e| e.to_string())?;
             if !status.success() {
-                return Err("could not add \"Open with ride\" to the right-click menu".into());
+                return Err(format!("could not add \"{label}\" to the right-click menu"));
             }
         }
     }
@@ -256,6 +387,8 @@ struct Options {
     context_menu: bool,
     /// Install Tribib, the design app the Designer works in, from Tribib's own releases.
     tribib: bool,
+    /// Install rterm, the terminal that comes with ride.
+    rterm: bool,
 }
 
 /// Where Tribib publishes its Windows releases; its own app updates from here too.
@@ -368,6 +501,7 @@ fn silent(args: &[String], uninstalling: bool) -> bool {
                 context_menu: shortcuts,
                 // A silent install asks for it by name.
                 tribib: has("--tribib"),
+                rterm: !has("--no-rterm"),
             },
             tx,
             ctx,
@@ -428,36 +562,20 @@ fn wait_for_exit(pid: u32) {
 }
 
 fn replace_app(dir: &Path) -> Result<(), String> {
-    let mut app = Vec::new();
-    flate2::read::GzDecoder::new(PAYLOAD)
-        .read_to_end(&mut app)
-        .map_err(|e| format!("The update is damaged: {e}"))?;
+    let app = unpack(PAYLOAD)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
-    let (target, fresh, old) = (
-        dir.join("ride.exe"),
-        dir.join("ride.exe.new"),
-        dir.join("ride.old.exe"),
-    );
-    std::fs::write(&fresh, &app).map_err(|e| format!("Can't write the new ride.exe: {e}"))?;
-    let _ = std::fs::remove_file(&old);
-    // Windows can rename a program file that is still open, but not overwrite it, so the
-    // old one is moved aside first. Some antivirus scanners hold it a moment longer.
-    let mut moved = !target.exists();
-    for _ in 0..20 {
-        if moved || std::fs::rename(&target, &old).is_ok() {
-            moved = true;
-            break;
+    swap_in(&dir.join("ride.exe"), &app)?;
+    let registered = is_registered(dir);
+    // rterm is updated with ride. An install from before rterm gets it now, with its Start
+    // menu entry and right-click entries when ride itself was installed with its own.
+    let rterm = dir.join("rterm.exe");
+    let first = !rterm.exists();
+    let unwanted = dir.join("no-rterm").exists();
+    if !unwanted {
+        if let Err(error) = install_rterm(dir, first && registered, first && registered) {
+            let log = local_app_data().join("ride").join("updates");
+            let _ = std::fs::write(log.join("rterm-error.txt"), error);
         }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    if !moved {
-        let _ = std::fs::remove_file(&fresh);
-        return Err("ride.exe stayed in use, so the update was left for later.".into());
-    }
-    if let Err(error) = std::fs::rename(&fresh, &target) {
-        let _ = std::fs::rename(&old, &target);
-        let _ = std::fs::remove_file(&fresh);
-        return Err(format!("Can't put the new ride.exe in place: {error}"));
     }
     if let Ok(me) = std::env::current_exe() {
         let uninstaller = dir.join("uninstall.exe");
@@ -465,10 +583,6 @@ fn replace_app(dir: &Path) -> Result<(), String> {
             let _ = std::fs::copy(me, uninstaller);
         }
     }
-    let registered = quiet("reg")
-        .args(["query", UNINSTALL_KEY])
-        .status()
-        .is_ok_and(|status| status.success());
     if registered {
         let _ = quiet("reg")
             .args([
@@ -543,6 +657,7 @@ fn rehearse(uninstalling: bool, tx: Sender<Progress>, ctx: Context) {
             (0.6, "Adding the uninstaller"),
             (0.7, "Creating shortcuts"),
             (0.8, "Adding \"Open with ride\" to the right-click menu"),
+            (0.85, "Installing rterm"),
             (0.9, "Registering with Windows"),
             (1.0, "Finishing"),
         ]
@@ -566,10 +681,7 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
             0.35,
             "Copying ride",
             || -> Result<u64, String> {
-                let mut app = Vec::new();
-                flate2::read::GzDecoder::new(PAYLOAD)
-                    .read_to_end(&mut app)
-                    .map_err(|e| format!("The package is damaged: {e}"))?;
+                let app = unpack(PAYLOAD)?;
                 // A copy of ride running from this folder would lock the file; one running from elsewhere is left alone.
                 write_over_running(&dir.join("ride.exe"), &app)
                     .map_err(|e| format!("Can't write ride.exe: {e}"))?;
@@ -607,6 +719,17 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
                 }
             },
         )?;
+        paced(&tx, &ctx, 0.85, "Installing rterm", || {
+            // Left out on purpose, it stays out on updates too.
+            let marker = dir.join("no-rterm");
+            if options.rterm {
+                let _ = std::fs::remove_file(&marker);
+                install_rterm(dir, options.start_menu, options.context_menu)
+            } else {
+                remove_rterm(dir);
+                std::fs::write(&marker, "").map_err(|e| e.to_string())
+            }
+        })?;
         paced(&tx, &ctx, 0.9, "Registering with Windows", || {
             if options.register {
                 register(dir, size / 1024)
@@ -645,6 +768,7 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
             std::thread::sleep(Duration::from_millis(800));
             let _ = std::fs::remove_file(&app);
         }
+        remove_rterm(&dir);
     });
     if remove_data {
         paced(
@@ -654,7 +778,8 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
             "Removing chats, themes and settings",
             || {
                 if let Some(roaming) = std::env::var_os("APPDATA") {
-                    let _ = std::fs::remove_dir_all(PathBuf::from(roaming).join("ride"));
+                    let _ = std::fs::remove_dir_all(PathBuf::from(&roaming).join("ride"));
+                    let _ = std::fs::remove_dir_all(PathBuf::from(roaming).join("rterm"));
                 }
             },
         );
@@ -755,6 +880,7 @@ impl Setup {
                 register: true,
                 context_menu: true,
                 tribib: true,
+                rterm: true,
             },
             launch: true,
             remove_data: false,
@@ -1013,6 +1139,13 @@ impl Setup {
         ui.checkbox(
             &mut self.options.context_menu,
             "Add \"Open with ride\" to the right-click menu",
+        );
+        ui.checkbox(
+            &mut self.options.rterm,
+            "Install rterm, a terminal for PowerShell, cmd, WSL and SSH",
+        )
+        .on_hover_text(
+            "A separate app, with its own Start menu entry and \"Open in rterm\" on folders.",
         );
         if !tribib_exe().exists() {
             ui.checkbox(

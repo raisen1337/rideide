@@ -1193,12 +1193,13 @@ mod os {
             if SetWindowSubclass(window, hide_frame, 1, 0) == 0 {
                 return false;
             }
-            // The whole window counts as frame, so the backdrop can show anywhere in it.
+            // No part of the client area counts as frame: where it did, the system drew its
+            // own caption buttons under the see-through title bar. The blur doesn't need it.
             let margins = Margins {
-                left: -1,
-                right: -1,
-                top: -1,
-                bottom: -1,
+                left: 0,
+                right: 0,
+                top: 0,
+                bottom: 0,
             };
             DwmExtendFrameIntoClientArea(window, &margins);
             // Makes Windows recompute the frame now, through `hide_frame`.

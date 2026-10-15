@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "flate2",
  "ignore",
@@ -4294,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "postcard",
  "serde",
@@ -4302,7 +4302,7 @@ dependencies = [
 
 [[package]]
 name = "ride-setup"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "eframe",
  "flate2",
@@ -4363,6 +4363,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rterm"
+version = "0.9.6"
+dependencies = [
+ "alacritty_terminal",
+ "arboard",
+ "eframe",
+ "portable-pty",
+ "raw-window-handle",
+ "resvg",
+ "serde",
+ "serde_json",
+ "winresource",
 ]
 
 [[package]]

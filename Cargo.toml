@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["proto", "agent", "app", "installer"]
+members = ["proto", "agent", "app", "installer", "rterm"]
 
 [workspace.package]
-version = "0.9.5"
+version = "0.9.6"
 edition = "2021"
 
 [workspace.dependencies]

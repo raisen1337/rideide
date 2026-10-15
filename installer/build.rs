@@ -7,20 +7,24 @@ use std::path::PathBuf;
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let app = root.join("target").join("release").join("ride.exe");
-    println!("cargo:rerun-if-changed={}", app.display());
-
-    let bytes = std::fs::read(&app).unwrap_or_else(|_| {
-        panic!(
-            "{} is missing: build ride first (cargo build --release -p ride)",
-            app.display()
-        )
-    });
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ride.exe.gz");
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(&bytes).unwrap();
-    std::fs::write(out, encoder.finish().unwrap()).unwrap();
-    println!("cargo:rustc-env=RIDE_PAYLOAD_SIZE={}", bytes.len());
+    let mut total = 0;
+    // ride, and rterm, the terminal that comes with it.
+    for (exe, package) in [("ride.exe", "ride"), ("rterm.exe", "rterm")] {
+        let app = root.join("target").join("release").join(exe);
+        println!("cargo:rerun-if-changed={}", app.display());
+        let bytes = std::fs::read(&app).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing: build it first (cargo build --release -p {package})",
+                app.display()
+            )
+        });
+        let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join(format!("{exe}.gz"));
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&bytes).unwrap();
+        std::fs::write(out, encoder.finish().unwrap()).unwrap();
+        total += bytes.len();
+    }
+    println!("cargo:rustc-env=RIDE_PAYLOAD_SIZE={total}");
 
     // The program's icon, as Explorer, the taskbar and shortcuts show it.
     let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

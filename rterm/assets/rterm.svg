@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2c33"/>
+      <stop offset="1" stop-color="#131316"/>
+    </linearGradient>
+    <linearGradient id="caret" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b3ceff"/>
+      <stop offset="1" stop-color="#6c9af4"/>
+    </linearGradient>
+  </defs>
+  <!-- ride's tile, so the two read as a pair. -->
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#tile)"/>
+  <rect x="9" y="9" width="238" height="238" rx="57" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+  <!-- A prompt, then ride's cursor lying down as an underscore. -->
+  <path d="M74 88 L120 128 L74 168" fill="none" stroke="#f3f4f6" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="136" y="156" width="56" height="26" rx="10" fill="url(#caret)"/>
+</svg>

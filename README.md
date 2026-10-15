@@ -123,6 +123,24 @@ There is no API key to paste into ride.
 - The folder and open tabs, unsaved changes included, come back the next time you open ride.
 - Themes and VS Code icon themes, and ride updates itself from this repository's releases.
 
+## rterm
+
+ride comes with rterm, a terminal for Windows made from ride's own terminal. It is a separate
+app, in the Start menu as rterm and in Explorer's right-click menu as "Open in rterm" on folders.
+
+- Tabs of PowerShell, PowerShell 7, Command Prompt, Git Bash, each WSL distribution and every
+  host in `~/.ssh/config`, found on their own. Pick the one new tabs open with in the menu beside
+  the tabs.
+- ride's themes and its glass, if you like the desktop showing through.
+- Ctrl+Shift+T opens a tab, Ctrl+Shift+W closes it, Ctrl+Tab moves between them,
+  Ctrl+Shift+1…9 opens a profile and Ctrl+Alt+1…9 goes to a tab. Ctrl+Shift+D duplicates the
+  tab and Ctrl+Shift+N opens a new window. Ctrl+= and Ctrl+- size the text, as does Ctrl+wheel.
+- Ctrl+C copies when text is selected and interrupts otherwise; Ctrl+V pastes. A right click
+  copies the selection or pastes, as in the Windows console. Files dropped on it are typed in as
+  their paths.
+- `rterm [-d FOLDER] [-p PROFILE] [COMMAND ARGS…]` starts in a folder, with a profile, or
+  running a command.
+
 ## Building from source
 
 ```powershell
@@ -141,4 +159,5 @@ then publishes `ride-setup.exe` with a `latest.json` that installed copies read 
 | `app/` | The editor (Rust, [egui](https://github.com/emilk/egui)) |
 | `agent/` | The helper ride uploads to the server; also an MCP server Claude uses for previews |
 | `proto/` | The protocol between the two |
+| `rterm/` | The terminal that comes with ride |
 | `installer/` | The Windows setup program |

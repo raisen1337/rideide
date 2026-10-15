@@ -285,8 +285,13 @@ impl Terminal {
         text.join("\n").trim_end().to_string()
     }
 
-    fn selected_text(&self) -> Option<String> {
+    pub fn selected_text(&self) -> Option<String> {
         self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    #[allow(dead_code)] // rterm's right click uses it.
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
     }
 
     pub fn show(&mut self, ui: &mut Ui) -> Output {
