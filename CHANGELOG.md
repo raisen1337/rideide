@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.4
+
+- **See the pictures Claude looks at.** When Claude reads an image file, or a tool hands it a screenshot (Tribib's canvas, say), the picture shows in the chat right under that step: in the side chat, the Agents view, the Designer and a subagent's own conversation. Click it to see it whole; a click or Escape closes it.
+
 ## 0.8.3
 
 - **Tribib is part of ride now.** ride starts Tribib itself and keeps its window inside the Designer: it has no window or taskbar button of its own and shows only in the Designer view. A Tribib ride started closes with ride. One you had open already is taken in too, and gets its own window back when ride closes.

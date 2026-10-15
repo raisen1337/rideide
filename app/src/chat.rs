@@ -112,6 +112,12 @@ enum Item {
         /// Missing once the chat has been saved and loaded again.
         texture: Option<egui::TextureHandle>,
     },
+    /// A picture Claude looked at: a file it read, a screenshot a tool took. The bytes are
+    /// kept for this run only; a saved chat keeps its name.
+    Seen {
+        name: String,
+        bytes: Option<std::sync::Arc<[u8]>>,
+    },
     /// Claude Code's id for the user message just before it. Files can be put back to how
     /// they were when that message was sent.
     Checkpoint(String),
@@ -340,6 +346,7 @@ fn item_to_json(item: &Item) -> Value {
         Item::Tool { name, detail } => json!({ "k": "tool", "a": name, "b": detail }),
         Item::Error(text) => json!({ "k": "error", "a": text }),
         Item::Image { name, .. } => json!({ "k": "image", "a": name }),
+        Item::Seen { name, .. } => json!({ "k": "seen", "a": name }),
         Item::Checkpoint(id) => json!({ "k": "cp", "a": id }),
         Item::Note(text) => json!({ "k": "note", "a": text }),
         Item::Agent { id, kind, task } => json!({ "k": "agent", "a": task, "b": kind, "c": id }),
@@ -358,6 +365,10 @@ fn item_from_json(v: &Value) -> Option<Item> {
         "image" => Item::Image {
             name: a,
             texture: None,
+        },
+        "seen" => Item::Seen {
+            name: a,
+            bytes: None,
         },
         "cp" => Item::Checkpoint(a),
         "note" => Item::Note(a),
@@ -459,6 +470,113 @@ fn tool_detail(name: &str, input: &Value) -> String {
         .chars()
         .take(120)
         .collect()
+}
+
+/// The pictures in a tool's result (a file Claude read, a screenshot a tool took), named
+/// after the tool that brought them: its file, or itself.
+fn seen_pictures(block: &Value, items: &[Item]) -> Vec<Item> {
+    let name = items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            Item::Tool { name, detail } if name == "Read" => Some(
+                detail
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(detail)
+                    .to_string(),
+            ),
+            Item::Tool { name, .. } => Some(name.rsplit("__").next().unwrap_or(name).to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "picture".to_string());
+    block["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == "image")
+        .filter_map(|c| {
+            let data = c["source"]["data"].as_str().or(c["data"].as_str())?;
+            let bytes = base64_decode(data)?;
+            Some(Item::Seen {
+                name: name.clone(),
+                bytes: Some(bytes.into()),
+            })
+        })
+        .collect()
+}
+
+/// A picture Claude looked at, at a size that reads in the chat; a click shows it whole.
+fn seen_picture(ui: &mut Ui, name: &str, bytes: Option<&std::sync::Arc<[u8]>>) {
+    let Some(bytes) = bytes else {
+        let chip = format!("{}  {name}", icons::IMAGE);
+        ui.label(RichText::new(chip).small().color(theme::COMMENT()));
+        return;
+    };
+    // Decoded once, and kept with the window's other data under the picture's own id.
+    let id = egui::Id::new(("seen_picture", bytes.as_ptr() as usize, bytes.len()));
+    let ctx = ui.ctx().clone();
+    let texture = ctx
+        .data(|d| d.get_temp::<Option<egui::TextureHandle>>(id))
+        .unwrap_or_else(|| {
+            let texture = image::load_from_memory(bytes).ok().map(|picture| {
+                let picture = picture.thumbnail(2048, 2048).to_rgba8();
+                let size = [picture.width() as usize, picture.height() as usize];
+                let image = egui::ColorImage::from_rgba_unmultiplied(size, picture.as_raw());
+                ctx.load_texture(format!("seen {name}"), image, egui::TextureOptions::LINEAR)
+            });
+            ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+            texture
+        });
+    let Some(texture) = texture else {
+        let chip = format!("{}  {name} (couldn't be shown)", icons::IMAGE);
+        ui.label(RichText::new(chip).small().color(theme::COMMENT()));
+        return;
+    };
+    let size = texture.size_vec2();
+    let room = ui.available_width().min(520.0);
+    let scale = (room / size.x).min(360.0 / size.y).min(1.0);
+    let open_id = id.with("open");
+    let resp = ui
+        .add(
+            egui::Image::new(egui::load::SizedTexture::new(texture.id(), size * scale))
+                .corner_radius(8)
+                .sense(Sense::click()),
+        )
+        .on_hover_text(format!(
+            "{name} · {}×{} · click to see it whole",
+            size.x, size.y
+        ));
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        ui.ctx().data_mut(|d| d.insert_temp(open_id, true));
+    }
+    // Whole, over the window, until a click or Escape closes it.
+    if ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(open_id).unwrap_or(false))
+    {
+        let screen = ui.ctx().content_rect().shrink(40.0);
+        let fit = (screen.width() / size.x)
+            .min(screen.height() / size.y)
+            .min(1.0);
+        let shown = egui::Modal::new(open_id.with("modal"))
+            .backdrop_color(egui::Color32::from_black_alpha(190))
+            .frame(Frame::NONE)
+            .show(ui.ctx(), |ui| {
+                ui.add(
+                    egui::Image::new(egui::load::SizedTexture::new(texture.id(), size * fit))
+                        .corner_radius(8)
+                        .sense(Sense::click()),
+                )
+                .clicked()
+            });
+        if shown.inner || shown.should_close() {
+            ui.ctx().data_mut(|d| d.insert_temp(open_id, false));
+        }
+    }
 }
 
 fn tool_icon(name: &str) -> char {
@@ -770,6 +888,7 @@ impl Chat {
                 Item::Tool { name, detail } => format!("claude used {name} {}", clip(detail)),
                 Item::Error(text) => format!("error: {}", clip(text)),
                 Item::Image { name, .. } => format!("user attached an image: {name}"),
+                Item::Seen { name, .. } => format!("claude looked at a picture: {name}"),
                 Item::Note(text) => format!("note: {}", clip(text)),
                 Item::Agent { kind, task, .. } => {
                     format!("claude started a {kind} agent: {}", clip(task))
@@ -822,6 +941,7 @@ impl Chat {
                 first_line(text, 80)
             }
             Some(Item::Image { name, .. }) => name.clone(),
+            Some(Item::Seen { name, .. }) => format!("Looked at {name}"),
             Some(Item::Checkpoint(_)) => String::new(),
             Some(Item::From { who, text }) => format!("{who}: {}", first_line(text, 70)),
             Some(Item::Tool { name, detail }) => format!("{name} {}", first_line(detail, 70)),
@@ -1096,6 +1216,10 @@ impl Chat {
                     if block["type"] != "tool_result" {
                         continue;
                     }
+                    if let Some(sub) = self.subs.get_mut(&parent) {
+                        let seen = seen_pictures(block, &sub.items);
+                        sub.items.extend(seen);
+                    }
                     let id = block["tool_use_id"].as_str().unwrap_or("");
                     if let Some(sub) = self.subs.get_mut(id) {
                         sub.done = true;
@@ -1156,6 +1280,7 @@ impl Chat {
                     match item {
                         Item::Text(text) => markdown(ui, text, 1_000_000 + index),
                         Item::Tool { name, detail } => tool_chip(ui, name, detail),
+                        Item::Seen { name, bytes } => seen_picture(ui, name, bytes.as_ref()),
                         Item::Agent { id, kind, task } => {
                             let inner = self.subs.get(id);
                             let running = busy && !inner.is_some_and(|s| s.done);
@@ -1521,6 +1646,8 @@ impl Chat {
                     if block["type"] != "tool_result" {
                         continue;
                     }
+                    let seen = seen_pictures(block, &self.items);
+                    self.items.extend(seen);
                     let id = block["tool_use_id"].as_str().unwrap_or("");
                     if let Some(sub) = self.subs.get_mut(id) {
                         sub.done = true;
@@ -1816,6 +1943,7 @@ impl Chat {
                             }
                         });
                     }
+                    Item::Seen { name, bytes } => seen_picture(ui, name, bytes.as_ref()),
                     Item::Checkpoint(_) => {}
                     Item::Note(text) => {
                         ui.horizontal_wrapped(|ui| {
@@ -2574,6 +2702,33 @@ mod tests {
         // The checkpoint is kept with the conversation.
         let restored = Chat::from_json(&chat.to_json());
         assert!(matches!(&restored.items[1], Item::Checkpoint(id) if id == "msg-1"));
+    }
+
+    #[test]
+    fn pictures_claude_reads_show_in_the_chat() {
+        let mut chat = Chat::default();
+        let png = base64(b"\x89PNG not really");
+        chat.on_stdout(br#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/srv/app/shots/home.png"}}]}}
+"#);
+        let result = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{png}"}}}}]}}]}}}}
+"#
+        );
+        chat.on_stdout(result.as_bytes());
+        match chat.items.last() {
+            Some(Item::Seen { name, bytes }) => {
+                assert_eq!(name, "home.png");
+                assert_eq!(bytes.as_deref(), Some(&b"\x89PNG not really"[..]));
+            }
+            _ => panic!("no picture in the chat"),
+        }
+        // A screenshot from an MCP tool is named after the tool.
+        chat.on_stdout(br#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"mcp__tribib__get_screenshot","input":{}}]}}
+"#);
+        chat.on_stdout(result.replace("t1", "t2").as_bytes());
+        assert!(
+            matches!(chat.items.last(), Some(Item::Seen { name, .. }) if name == "get_screenshot")
+        );
     }
 
     #[test]
