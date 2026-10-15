@@ -5,6 +5,7 @@ members = ["proto", "agent", "app", "installer", "rterm"]
 [workspace.package]
 version = "0.9.7"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -2,6 +2,7 @@
 name = "rkit-setup"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }

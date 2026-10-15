@@ -15,6 +15,7 @@
   <a href="https://github.com/raisen1337/rideide/commits/main"><img src="https://img.shields.io/github/last-commit/raisen1337/rideide?style=flat-square&color=2b2c33" alt="Last commit"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-2b2c33?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Rust-2b2c33?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2b2c33?style=flat-square" alt="License: MIT or Apache-2.0">
 </p>
 
 <p align="center">
@@ -168,3 +169,12 @@ then publishes `rkit-setup.exe` with a `latest.json` that installed copies read 
 | `proto/` | The protocol between the two |
 | `rterm/` | The terminal that comes with ride |
 | `installer/` | The Windows setup program |
+
+## License
+
+ride and rterm are free and open source, under either of
+
+- the [Apache License, Version 2.0](LICENSE-APACHE), or
+- the [MIT license](LICENSE-MIT),
+
+at your option. Contributions are taken under the same terms.

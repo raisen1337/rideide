@@ -2,6 +2,7 @@
 name = "ride"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 ride-proto = { path = "../proto" }
