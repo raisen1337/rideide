@@ -8,8 +8,12 @@ use std::path::PathBuf;
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut total = 0;
-    // ride, and rterm, the terminal that comes with it.
-    for (exe, package) in [("ride.exe", "ride"), ("rterm.exe", "rterm")] {
+    // ride, rterm, the terminal that comes with it, and rkit, which starts and updates both.
+    for (exe, package) in [
+        ("ride.exe", "ride"),
+        ("rterm.exe", "rterm"),
+        ("rkit.exe", "rkit"),
+    ] {
         let app = root.join("target").join("release").join(exe);
         println!("cargo:rerun-if-changed={}", app.display());
         let bytes = std::fs::read(&app).unwrap_or_else(|_| {

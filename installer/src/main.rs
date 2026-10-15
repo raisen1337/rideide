@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ride.exe.gz"));
 /// rterm, the terminal that comes with ride, packed the same way.
 static RTERM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rterm.exe.gz"));
+/// rkit, which starts the apps and updates each on its own.
+static RKIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rkit.exe.gz"));
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The icon as 128x128 RGBA pixels, for the window and the mark in the side rail.
 static ICON: &[u8] = include_bytes!("../../app/assets/icon-128.rgba");
@@ -120,6 +122,10 @@ fn rterm_link() -> PathBuf {
     start_menu_link().with_file_name("rterm.lnk")
 }
 
+fn rkit_link() -> PathBuf {
+    start_menu_link().with_file_name("rkit.lnk")
+}
+
 /// A packed program, unpacked.
 fn unpack(packed: &[u8]) -> Result<Vec<u8>, String> {
     let mut data = Vec::new();
@@ -189,6 +195,43 @@ fn install_rterm(dir: &Path, start_menu: bool, context_menu: bool) -> Result<(),
         add_menu_entries(&exe, &RTERM_MENU_KEYS, "Open in rterm", "-d ")?;
     }
     Ok(())
+}
+
+/// Installs rkit beside the apps, with a Start menu entry.
+fn install_rkit(dir: &Path, start_menu: bool) -> Result<(), String> {
+    let exe = dir.join("rkit.exe");
+    swap_in(&exe, &unpack(RKIT)?)?;
+    if start_menu {
+        let script = format!(
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath = {}; \
+             $s.Description = 'rkit: ride, rterm and their updates'; $s.Save()",
+            ps(&rkit_link().to_string_lossy()),
+            ps(&exe.to_string_lossy()),
+        );
+        run_powershell(&script).map_err(|e| format!("Can't create rkit's shortcut: {e}"))?;
+        let _ = quiet("reg")
+            .args([
+                "add",
+                RKIT_APP_PATH,
+                "/ve",
+                "/d",
+                &exe.to_string_lossy(),
+                "/f",
+            ])
+            .status();
+    }
+    Ok(())
+}
+
+const RKIT_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rkit.exe";
+
+fn remove_rkit(dir: &Path) {
+    let _ = std::fs::remove_file(rkit_link());
+    let _ = quiet("reg").args(["delete", RKIT_APP_PATH, "/f"]).status();
+    let exe = dir.join("rkit.exe");
+    if std::fs::remove_file(&exe).is_err() {
+        let _ = std::fs::rename(&exe, exe.with_extension("old.exe"));
+    }
 }
 
 const RTERM_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rterm.exe";
@@ -587,6 +630,12 @@ fn replace_app(dir: &Path) -> Result<(), String> {
             let _ = std::fs::write(log.join("rterm-error.txt"), error);
         }
     }
+    // rkit likewise, with its Start menu entry the first time.
+    let first = !dir.join("rkit.exe").exists();
+    if let Err(error) = install_rkit(dir, first && registered) {
+        let log = local_app_data().join("ride").join("updates");
+        let _ = std::fs::write(log.join("rkit-error.txt"), error);
+    }
     if let Ok(me) = std::env::current_exe() {
         let uninstaller = dir.join("uninstall.exe");
         if me != uninstaller && uninstaller.exists() {
@@ -667,6 +716,7 @@ fn rehearse(uninstalling: bool, tx: Sender<Progress>, ctx: Context) {
             (0.6, "Adding the uninstaller"),
             (0.7, "Creating shortcuts"),
             (0.8, "Adding \"Open with ride\" to the right-click menu"),
+            (0.83, "Installing rkit"),
             (0.85, "Installing rterm"),
             (0.9, "Registering with Windows"),
             (1.0, "Finishing"),
@@ -729,6 +779,9 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
                 }
             },
         )?;
+        paced(&tx, &ctx, 0.83, "Installing rkit", || {
+            install_rkit(dir, options.start_menu)
+        })?;
         paced(&tx, &ctx, 0.85, "Installing rterm", || {
             // Left out on purpose, it stays out on updates too.
             let marker = dir.join("no-rterm");
@@ -779,6 +832,7 @@ fn uninstall(dir: PathBuf, remove_data: bool, tx: Sender<Progress>, ctx: Context
             let _ = std::fs::remove_file(&app);
         }
         remove_rterm(&dir);
+        remove_rkit(&dir);
     });
     if remove_data {
         paced(
@@ -959,7 +1013,13 @@ impl Setup {
             && self.error.is_none()
             && self.launch
         {
-            let exe = self.options.dir.join("ride.exe");
+            // rkit, which starts the rest; ride when rkit isn't there.
+            let rkit = self.options.dir.join("rkit.exe");
+            let exe = if rkit.exists() {
+                rkit
+            } else {
+                self.options.dir.join("ride.exe")
+            };
             let _ = Command::new(&exe).current_dir(&self.options.dir).spawn();
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1095,8 +1155,8 @@ impl Setup {
                 "PowerShell, cmd, Git Bash, WSL and SSH in tabs, in the same look as ride.",
             ),
             (
-                "One setup, one update",
-                "The same themes and look, and everything updates together.",
+                "rkit, the hub",
+                "Start any of them, reopen recent folders, and update each app on its own.",
             ),
         ] {
             ui.horizontal(|ui| {
@@ -1164,7 +1224,7 @@ impl Setup {
             )
             .on_hover_text("Downloaded from Tribib and checked before it runs. Tribib keeps itself up to date.");
         }
-        ui.checkbox(&mut self.launch, "Open ride when setup finishes");
+        ui.checkbox(&mut self.launch, "Open rkit when setup finishes");
         ui.add_space(14.0);
         let (color, text) = if self.has_ssh {
             (
@@ -1303,7 +1363,7 @@ impl Setup {
                     "rkit is installed",
                     &format!("You'll find it in {}", self.options.dir.display()),
                 );
-                ui.checkbox(&mut self.launch, "Open ride now");
+                ui.checkbox(&mut self.launch, "Open rkit now");
             }
         }
     }

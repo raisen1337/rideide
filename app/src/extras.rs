@@ -669,3 +669,31 @@ fn register_toast_app(id: &str) -> Option<()> {
         ok.then_some(())
     }
 }
+
+/// Where the folders opened lately are kept, newest first, for rkit to offer again.
+fn recent_path() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(base).join("ride").join("recent.json"))
+}
+
+/// Puts a folder at the top of the recent ones: `[{"host", "root", "at"}]`, at most 20.
+pub(super) fn note_recent(host: &str, root: &str) {
+    let Some(path) = recent_path() else { return };
+    let mut list: Vec<serde_json::Value> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    list.retain(|item| !(item["host"] == host && item["root"] == root));
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    list.insert(
+        0,
+        serde_json::json!({ "host": host, "root": root, "at": at }),
+    );
+    list.truncate(20);
+    if let Ok(text) = serde_json::to_vec_pretty(&list) {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let _ = std::fs::write(path, text);
+    }
+}

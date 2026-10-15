@@ -63,6 +63,11 @@ fn crash_file() -> Option<PathBuf> {
 }
 
 fn main() -> eframe::Result {
+    // `--version` answers rkit, which shows what is installed.
+    if std::env::args().any(|arg| arg == "--version") {
+        let _ = writeln!(std::io::stdout(), "{}", update::VERSION);
+        return Ok(());
+    }
     // A panic on the interface's thread closes ride; what it was is written down first.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1824,6 +1829,19 @@ impl App {
             app.view = View::Code;
             app.connect(&cc.egui_ctx);
         }
+        // `--host=NAME` connects to a host from ~/.ssh/config, and `--root=PATH` opens that
+        // folder there: how rkit reopens a recent folder on a server.
+        let flag = |name: &str| {
+            std::env::args().find_map(|arg| arg.strip_prefix(name).map(str::to_string))
+        };
+        if let Some(host) = flag("--host=").filter(|h| !h.trim().is_empty()) {
+            if let Some(root) = flag("--root=") {
+                app.saved = Some((host.clone(), root));
+            }
+            app.host = host;
+            app.view = View::Code;
+            app.connect(&cc.egui_ctx);
+        }
         // RIDE_SIDE=designer starts in the Designer view, folder or not.
         if std::env::var("RIDE_SIDE").as_deref() == Ok("designer") {
             app.view = View::Designer;
@@ -2510,6 +2528,10 @@ impl App {
         self.expanded.clear();
         self.root_input = root.clone();
         self.root = root.clone();
+        // Someone else's live session isn't a folder of one's own to come back to.
+        if !share::is_session_id(&self.host) {
+            extras::note_recent(&self.host, &root);
+        }
         self.load_dir(&root);
         // Language servers know one folder; the next files start them anew.
         self.lsp.stop_all();

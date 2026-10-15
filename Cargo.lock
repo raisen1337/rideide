@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "flate2",
  "ignore",
@@ -4294,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "postcard",
  "serde",
@@ -4315,8 +4315,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rkit"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "raw-window-handle",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+ "winresource",
+]
+
+[[package]]
 name = "rkit-setup"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "eframe",
  "flate2",
@@ -4367,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "rterm"
-version = "0.9.8"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",

@@ -126,6 +126,16 @@ There is no API key to paste into ride.
 - The folder and open tabs, unsaved changes included, come back the next time you open ride.
 - Themes and VS Code icon themes, and ride updates itself from this repository's releases.
 
+## rkit
+
+The setup program installs rkit, the suite's hub, beside ride and rterm. Each app still starts
+on its own from the Start menu and Explorer; rkit puts them in one place:
+
+- Open ride or rterm, open a folder in ride, or start any of rterm's shells.
+- Reopen the folders you used lately in ride, on this computer or on a server.
+- Every server in your `~/.ssh/config`, one click from ride or from an SSH session in rterm.
+- Updates for each app on its own, with its changelog: see what's new, then update just that app.
+
 ## rterm
 
 ride comes with rterm, a terminal for Windows made from ride's own terminal. It is a separate
@@ -159,9 +169,13 @@ rustup target add x86_64-unknown-linux-musl   # for the server agent
 
 `cargo run -p ride` starts the editor without installing it.
 
-To release, add an entry to `CHANGELOG.md`, raise `version` in the root `Cargo.toml` and push to `main`. The
+Each app has its own version (in its `Cargo.toml`) and changelog: `CHANGELOG.md` for ride,
+`rterm/CHANGELOG.md` and `rkit/CHANGELOG.md`. To release, add an entry for each app that changed,
+raise its version, raise the suite's `version` in the root `Cargo.toml` and push to `main`. The
 [Release workflow](.github/workflows/release.yml) tests and builds on GitHub's Windows runners,
-then publishes `rkit-setup.exe` with a `latest.json` that installed copies read to update.
+then `tools/manifest.py` writes `apps.json` (each app's version, program and changelog, for
+rkit) and `latest.json` (for ride's own updates), published with `rkit-setup.exe` and the
+programs.
 
 | Folder | What it is |
 | --- | --- |
@@ -169,6 +183,8 @@ then publishes `rkit-setup.exe` with a `latest.json` that installed copies read 
 | `agent/` | The helper ride uploads to the server; also an MCP server Claude uses for previews |
 | `proto/` | The protocol between the two |
 | `rterm/` | The terminal that comes with ride |
+| `rkit/` | The hub that starts the apps and updates each on its own |
+| `tools/` | `manifest.py`, which writes a release's `apps.json` and `latest.json` |
 | `installer/` | The Windows setup program |
 
 ## License

@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.9
+
+- **rkit, the suite's hub.** A new app beside ride and rterm, in the Start menu as rkit: open either of them, reopen the folders you used lately in ride (on this computer or on a server), connect to any server in your SSH config, and update each app on its own after reading what's new in it. ride and rterm still start on their own, from the Start menu and Explorer, as before.
+- ride remembers the folders you open, for rkit's list, and takes `--host=NAME` (and `--root=PATH`) to connect to a server straight away.
+- ride and rterm have version numbers and changelogs of their own from now on; rterm's is in rkit.
+
 ## 0.9.8
 
 - **rterm's panes have their own tabs.** Split the window and every pane gets a row of tabs above it, so you switch terminals right where they are; with one pane they stay up in the title bar.
