@@ -288,13 +288,107 @@ fn tribib_url() -> String {
     .unwrap_or_else(|| "http://127.0.0.1:3848/mcp".into())
 }
 
+/// Where Tribib's installer puts the app, for this user.
+fn tribib_exe() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(base)
+            .join("Programs")
+            .join("tribib-desktop")
+            .join("Tribib.exe"),
+    )
+}
+
+fn tribib_installed() -> bool {
+    tribib_exe().is_some_and(|exe| exe.exists())
+}
+
+/// Where Tribib publishes its Windows releases; its own app updates from here too.
+const TRIBIB_RELEASES: &str = "https://s3.tribib.com/desktop/win";
+
+/// Tribib being installed: bytes downloaded so far, of how many, and how it ended.
+pub(super) struct TribibInstall {
+    done: Arc<std::sync::atomic::AtomicU64>,
+    total: Arc<std::sync::atomic::AtomicU64>,
+    result: channels::Receiver<Result<(), String>>,
+}
+
+/// Downloads Tribib's latest installer from Tribib, checks it against the checksum Tribib
+/// publishes with it, and runs it.
+fn install_tribib(
+    done: &std::sync::atomic::AtomicU64,
+    total: &std::sync::atomic::AtomicU64,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha512};
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+    let manifest = ureq::get(&format!("{TRIBIB_RELEASES}/latest.yml"))
+        .call()
+        .map_err(|e| format!("couldn't reach Tribib: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    // The top-level `path:` and `sha512:` of electron-builder's manifest.
+    let field = |key: &str| {
+        manifest
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|v| v.trim().trim_matches('\'').trim_matches('"').to_string())
+    };
+    let (Some(file), Some(checksum)) = (field("path:"), field("sha512:")) else {
+        return Err("Tribib's release list isn't as expected".into());
+    };
+    if file.contains(['/', '\\']) || !file.ends_with(".exe") {
+        return Err("Tribib's release list names an unexpected file".into());
+    }
+    let mut response = ureq::get(&format!("{TRIBIB_RELEASES}/{file}"))
+        .call()
+        .map_err(|e| format!("couldn't download Tribib: {e}"))?;
+    if let Some(size) = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+    {
+        total.store(size, Ordering::Relaxed);
+    }
+    let path = std::env::temp_dir().join(&file);
+    let mut out = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut reader = response.body_mut().as_reader();
+    let mut hasher = Sha512::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+        out.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+        done.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    drop(out);
+    if chat::base64(&hasher.finalize()) != checksum {
+        let _ = std::fs::remove_file(&path);
+        return Err(
+            "the download doesn't match the checksum Tribib published; nothing was installed"
+                .into(),
+        );
+    }
+    // Tribib's own installer, quietly: it installs for this user only, as it does by hand.
+    let status = std::process::Command::new(&path)
+        .arg("/S")
+        .status()
+        .map_err(|e| format!("couldn't run Tribib's installer: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    if !status.success() || !tribib_installed() {
+        return Err("Tribib's installer didn't finish".into());
+    }
+    Ok(())
+}
+
 /// Starts the Tribib app, if it is installed where its installer puts it.
 fn open_tribib() -> Result<(), String> {
-    let base = std::env::var_os("LOCALAPPDATA").ok_or("no LOCALAPPDATA")?;
-    let exe = PathBuf::from(base)
-        .join("Programs")
-        .join("tribib-desktop")
-        .join("Tribib.exe");
+    let exe = tribib_exe().ok_or("no LOCALAPPDATA")?;
     if !exe.exists() {
         return Err("Tribib isn't installed where ride looks for it".into());
     }
@@ -643,24 +737,9 @@ impl App {
         // would open behind it too.
         let menu_open = egui::Popup::is_any_open(ui.ctx());
         let covered = self.dialog.is_some() || self.palette.open || menu_open;
-        if !self.embed_off {
-            if let Some(parent) = parent {
-                let gone = self
-                    .held
-                    .as_ref()
-                    .is_some_and(|h| !crate::embed::alive(h, parent));
-                if gone {
-                    self.held = None;
-                }
-                // Looked for now and then, not every frame: it walks every window.
-                if self.held.is_none() && self.now - self.embed_tried > 1.0 {
-                    self.embed_tried = self.now;
-                    if let Some(window) = crate::embed::find(&Self::embed_program()) {
-                        self.held = crate::embed::hold(window, parent);
-                    }
-                }
-            }
-        }
+        let _ = parent;
+        // Opening the Designer starts Tribib, if ride hasn't already.
+        self.tribib_wanted = true;
         if let Some(held) = &self.held {
             let scale = ui.ctx().pixels_per_point();
             let r = area.shrink(1.0);
@@ -680,28 +759,161 @@ impl App {
         // Tribib isn't held: its picture, or what to do.
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink(10.0)));
         if self.canvas.error.is_some() || !self.embed_off {
-            inner.add_space(40.0);
-            inner.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("Tribib shows here, inside ride, once it is running.")
-                        .color(theme::STRONG()),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Its own window moves in; \"Give Tribib its own window back\" moves it out again.")
-                        .small()
-                        .color(theme::COMMENT()),
-                );
-                ui.add_space(10.0);
-                if ui.button(format!("{}  Open Tribib", icons::PLAY)).clicked() {
-                    if let Err(error) = open_tribib() {
-                        self.status = error;
-                    }
-                }
-            });
+            self.tribib_setup(&mut inner);
             return;
         }
         self.canvas_picture(&mut inner);
+    }
+
+    /// Without Tribib in the middle: install it, or start it, and say what is going on.
+    fn tribib_setup(&mut self, ui: &mut Ui) {
+        use std::sync::atomic::Ordering;
+        // An install under way, or just finished.
+        if let Some(install) = &self.tribib_install {
+            if let Ok(result) = install.result.try_recv() {
+                self.tribib_install = None;
+                match result {
+                    Ok(()) => {
+                        self.status = "Tribib is installed".into();
+                        // Its installer opens it; it is taken in as it appears.
+                        self.tribib_spawned = true;
+                        self.tribib_started = self.now;
+                    }
+                    Err(error) => self.tribib_error = Some(error),
+                }
+            }
+        }
+        let installed = tribib_installed();
+        ui.add_space(48.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(440.0);
+            if let Some(install) = &self.tribib_install {
+                let (done, total) = (
+                    install.done.load(Ordering::Relaxed),
+                    install.total.load(Ordering::Relaxed),
+                );
+                ui.label(RichText::new("Installing Tribib").size(17.0).color(theme::STRONG()));
+                ui.add_space(8.0);
+                let part = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                let text = if total > 0 && done >= total {
+                    "Running Tribib's installer…".to_string()
+                } else {
+                    format!("Downloading from Tribib… {:.0} MB of {:.0} MB", done as f64 / 1e6, total as f64 / 1e6)
+                };
+                ui.add(egui::ProgressBar::new(part).desired_width(360.0));
+                ui.label(RichText::new(text).small().color(theme::COMMENT()));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            } else if !installed {
+                ui.label(RichText::new("Tribib isn't installed").size(17.0).color(theme::STRONG()));
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "The Designer works in Tribib, inside ride. ride downloads Tribib's latest installer from Tribib, checks it, and installs it for you. Tribib keeps itself up to date after that.",
+                        )
+                        .color(theme::COMMENT()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                let button = egui::Button::new(
+                    RichText::new(format!("{}  Install Tribib", icons::DOWNLOAD)).color(Color32::WHITE),
+                )
+                .fill(theme::ACCENT().gamma_multiply(0.85));
+                if ui.add(button).clicked() {
+                    self.tribib_error = None;
+                    let done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let (tx, rx) = channels::channel();
+                    let (d, t) = (done.clone(), total.clone());
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(install_tribib(&d, &t));
+                        ctx.request_repaint();
+                    });
+                    self.tribib_install = Some(TribibInstall { done, total, result: rx });
+                }
+            } else {
+                ui.spinner();
+                ui.add_space(6.0);
+                ui.label(RichText::new("Starting Tribib…").size(17.0).color(theme::STRONG()));
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Its window moves in here as soon as it opens. Sign in to Tribib once, in it, and it remembers you.",
+                        )
+                        .color(theme::COMMENT()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(10.0);
+                if ui.button(format!("{}  Start it again", icons::PLAY)).clicked() {
+                    self.tribib_spawned = true;
+                    self.tribib_started = self.now;
+                    if let Err(error) = open_tribib() {
+                        self.tribib_error = Some(error);
+                    }
+                }
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            }
+            if let Some(error) = &self.tribib_error {
+                ui.add_space(10.0);
+                ui.add(
+                    egui::Label::new(RichText::new(error).small().color(theme::ANSI()[1])).wrap(),
+                );
+            }
+        });
+    }
+
+    /// Every frame: Tribib is ride's. ride starts it (as it opens, once Tribib is set up for
+    /// Claude, or when the Designer is first opened), takes its window in from the first
+    /// moment it appears, and keeps it hidden but in the Designer: it has no window or
+    /// taskbar button of its own.
+    pub(super) fn tribib_tick(&mut self) {
+        let Some(parent) = self.ride_window else {
+            return;
+        };
+        if self.embed_off {
+            return;
+        }
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|h| !crate::embed::alive(h, parent))
+        {
+            self.held = None;
+            self.embed_place = None;
+        }
+        if self.held.is_some() {
+            return;
+        }
+        // Looked for often just after ride started it, so it is taken in before it is seen;
+        // otherwise now and then: it walks every window.
+        let starting = self.now - self.tribib_started < 30.0;
+        let every = if starting { 0.1 } else { 1.0 };
+        if self.now - self.embed_tried < every {
+            return;
+        }
+        self.embed_tried = self.now;
+        if let Some(window) = crate::embed::find(&Self::embed_program()) {
+            self.held = crate::embed::hold(window, parent);
+            self.embed_place = None;
+            return;
+        }
+        let set_up = settings::with(|s| {
+            s.mcp_servers
+                .iter()
+                .any(|m| m.on && m.name.eq_ignore_ascii_case("tribib"))
+        });
+        let wanted = self.tribib_wanted || set_up;
+        if wanted && !self.tribib_spawned && tribib_installed() && self.tribib_install.is_none() {
+            self.tribib_spawned = true;
+            self.tribib_started = self.now;
+            if let Err(error) = open_tribib() {
+                self.tribib_error = Some(error);
+            }
+        }
     }
 
     /// Hides Tribib when the Designer isn't shown; ride's other views are under it.
@@ -714,10 +926,15 @@ impl App {
         }
     }
 
-    /// Gives Tribib its own window back, as ride closes.
+    /// As ride closes: a Tribib ride started closes with it, unseen; one that was open
+    /// before gets its own window back.
     pub(super) fn designer_release(&mut self) {
         if let Some(held) = self.held.take() {
-            crate::embed::release(&held);
+            if self.tribib_spawned {
+                crate::embed::close(&held);
+            } else {
+                crate::embed::release(&held);
+            }
         }
     }
 

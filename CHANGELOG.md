@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.3
+
+- **Tribib is part of ride now.** ride starts Tribib itself and keeps its window inside the Designer: it has no window or taskbar button of its own and shows only in the Designer view. A Tribib ride started closes with ride. One you had open already is taken in too, and gets its own window back when ride closes.
+- **Setup installs Tribib**, ticked by default and optional. It is downloaded from Tribib's own releases and checked against the checksum Tribib publishes before it runs; Tribib keeps itself up to date after that. If it can't be had during setup, ride is installed anyway, and the Designer offers it again.
+- Sign in to Tribib once, in the Designer, and it remembers you.
+- The Designer takes Tribib's real window, never one of its overlays: clicks on Tribib's home screen, with your documents, go through again.
+
 ## 0.8.2
 
 - Tribib fills its place in the Designer to the edge: the strip it left at its sides and bottom is gone.

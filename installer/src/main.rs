@@ -254,6 +254,91 @@ struct Options {
     register: bool,
     /// Add "Open with ride" to the right-click menu of files, folders and the desktop.
     context_menu: bool,
+    /// Install Tribib, the design app the Designer works in, from Tribib's own releases.
+    tribib: bool,
+}
+
+/// Where Tribib publishes its Windows releases; its own app updates from here too.
+const TRIBIB_RELEASES: &str = "https://s3.tribib.com/desktop/win";
+
+fn tribib_exe() -> PathBuf {
+    local_app_data()
+        .join("Programs")
+        .join("tribib-desktop")
+        .join("Tribib.exe")
+}
+
+/// Downloads Tribib's latest installer from Tribib, checks it against the checksum Tribib
+/// publishes with it, and runs it for this user, quietly.
+fn install_tribib() -> Result<(), String> {
+    use sha2::{Digest, Sha512};
+    use std::io::Write;
+    let manifest = ureq::get(&format!("{TRIBIB_RELEASES}/latest.yml"))
+        .call()
+        .map_err(|e| format!("couldn't reach Tribib: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    let field = |key: &str| {
+        manifest
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|v| v.trim().trim_matches('\'').trim_matches('"').to_string())
+    };
+    let (Some(file), Some(checksum)) = (field("path:"), field("sha512:")) else {
+        return Err("Tribib's release list isn't as expected".into());
+    };
+    if file.contains(['/', '\\']) || !file.ends_with(".exe") {
+        return Err("Tribib's release list names an unexpected file".into());
+    }
+    let mut response = ureq::get(&format!("{TRIBIB_RELEASES}/{file}"))
+        .call()
+        .map_err(|e| format!("couldn't download Tribib: {e}"))?;
+    let mut reader = response.body_mut().as_reader();
+    let path = std::env::temp_dir().join(&file);
+    let mut out = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha512::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+        out.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+    }
+    drop(out);
+    if base64(&hasher.finalize()) != checksum {
+        let _ = std::fs::remove_file(&path);
+        return Err("the download didn't match Tribib's checksum".into());
+    }
+    let status = quiet(&path.to_string_lossy())
+        .arg("/S")
+        .status()
+        .map_err(|e| format!("couldn't run Tribib's installer: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    if !status.success() || !tribib_exe().exists() {
+        return Err("Tribib's installer didn't finish".into());
+    }
+    Ok(())
+}
+
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Runs an install or uninstall to the end without any interface. True on success.
@@ -281,6 +366,8 @@ fn silent(args: &[String], uninstalling: bool) -> bool {
                 start_menu: shortcuts,
                 register: shortcuts,
                 context_menu: shortcuts,
+                // A silent install asks for it by name.
+                tribib: has("--tribib"),
             },
             tx,
             ctx,
@@ -527,6 +614,17 @@ fn install(options: Options, tx: Sender<Progress>, ctx: Context) {
                 Ok(())
             }
         })?;
+        if options.tribib && !tribib_exe().exists() {
+            // Tribib is a help to ride, not a part of it: if it can't be had now, ride is
+            // installed anyway, and the Designer offers it again.
+            paced(&tx, &ctx, 0.97, "Installing Tribib", || {
+                if let Err(error) = install_tribib() {
+                    let log = local_app_data().join("ride").join("updates");
+                    let _ = std::fs::create_dir_all(&log);
+                    let _ = std::fs::write(log.join("tribib-error.txt"), &error);
+                }
+            });
+        }
         paced(&tx, &ctx, 1.0, "Finishing", || {});
         Ok(())
     };
@@ -648,6 +746,7 @@ impl Setup {
                 start_menu: true,
                 register: true,
                 context_menu: true,
+                tribib: true,
             },
             launch: true,
             remove_data: false,
@@ -907,6 +1006,13 @@ impl Setup {
             &mut self.options.context_menu,
             "Add \"Open with ride\" to the right-click menu",
         );
+        if !tribib_exe().exists() {
+            ui.checkbox(
+                &mut self.options.tribib,
+                "Install Tribib, the design app the Designer works in",
+            )
+            .on_hover_text("Downloaded from Tribib and checked before it runs. Tribib keeps itself up to date.");
+        }
         ui.checkbox(&mut self.launch, "Open ride when setup finishes");
         ui.add_space(14.0);
         let (color, text) = if self.has_ssh {

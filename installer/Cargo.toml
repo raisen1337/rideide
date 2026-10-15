@@ -7,6 +7,9 @@ edition.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
 flate2 = "1"
 rfd = "0.17"
+# Tribib, for the Designer, is downloaded from Tribib and checked before it is run.
+ureq = "3.4.2"
+sha2 = "0.10"
 
 [build-dependencies]
 winresource = "0.1"

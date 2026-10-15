@@ -796,6 +796,13 @@ struct App {
     embed_place: Option<(i32, i32, i32, i32, bool)>,
     embed_tried: f64,
     embed_off: bool,
+    /// Tribib being installed, when it was last started, and what went wrong.
+    tribib_install: Option<designer::TribibInstall>,
+    tribib_started: f64,
+    tribib_error: Option<String>,
+    /// ride started Tribib (it closes with ride), and the Designer has been opened.
+    tribib_spawned: bool,
+    tribib_wanted: bool,
     /// The app's clock (seconds), as of this frame.
     now: f64,
     /// Changelog entries to show once after an update: (version, text).
@@ -1598,6 +1605,11 @@ impl App {
             embed_place: None,
             embed_tried: f64::NEG_INFINITY,
             embed_off: false,
+            tribib_install: None,
+            tribib_started: f64::NEG_INFINITY,
+            tribib_error: None,
+            tribib_spawned: false,
+            tribib_wanted: false,
             now: 0.0,
             whats_new: {
                 // Nothing stored: a fresh install has nothing to catch up on, while a ride
@@ -4992,6 +5004,10 @@ impl App {
                     self.ride_window = Some(h.hwnd.get());
                 }
             }
+        }
+        self.tribib_tick();
+        if self.tribib_started > self.now - 30.0 && self.held.is_none() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if self.view != View::Designer || !online {
             self.designer_away();

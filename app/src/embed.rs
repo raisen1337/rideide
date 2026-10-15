@@ -20,6 +20,18 @@ mod imp {
 
     type EnumProc = unsafe extern "system" fn(isize, isize) -> i32;
 
+    /// WINDOWPLACEMENT: where a window goes when it isn't minimized or maximized.
+    #[repr(C)]
+    #[derive(Default)]
+    struct Placement {
+        length: u32,
+        flags: u32,
+        show: u32,
+        min: [i32; 2],
+        max: [i32; 2],
+        normal: Rect,
+    }
+
     #[link(name = "user32")]
     extern "system" {
         fn EnumWindows(proc: EnumProc, data: isize) -> i32;
@@ -45,9 +57,12 @@ mod imp {
             flags: u32,
         ) -> i32;
         fn GetClassNameW(window: isize, name: *mut u16, size: i32) -> i32;
+        fn GetWindowTextLengthW(window: isize) -> i32;
+        fn GetWindowPlacement(window: isize, placement: *mut Placement) -> i32;
         fn GetClientRect(window: isize, rect: *mut Rect) -> i32;
         fn ClientToScreen(window: isize, point: *mut [i32; 2]) -> i32;
         fn SetWindowRgn(window: isize, region: isize, redraw: i32) -> i32;
+        fn PostMessageW(window: isize, message: u32, wparam: usize, lparam: isize) -> i32;
     }
 
     #[link(name = "gdi32")]
@@ -136,21 +151,46 @@ mod imp {
         1
     }
 
-    /// The main window of a running program (by executable name, e.g. "tribib.exe"): its
-    /// largest visible top-level window without an owner.
+    /// The main window of a running program (by executable name, e.g. "tribib.exe"): of
+    /// its visible top-level windows without an owner, the largest one that is a real
+    /// window. Overlays that let clicks through or never take the keyboard (an app may keep
+    /// one over the screen) are left out, and a minimized window counts by its real size.
     pub fn find(program: &str) -> Option<isize> {
+        const WS_EX_TRANSPARENT: isize = 0x20;
+        const WS_EX_TOOLWINDOW: isize = 0x80;
+        const WS_EX_NOACTIVATE: isize = 0x0800_0000;
         let mut all: Vec<isize> = Vec::new();
         // SAFETY: the callback only pushes into the Vec, which outlives the call.
         unsafe { EnumWindows(collect, &mut all as *mut Vec<isize> as isize) };
         let program = program.to_lowercase();
         all.into_iter()
             .filter(|&w| unsafe { IsWindowVisible(w) != 0 && GetWindow(w, GW_OWNER) == 0 })
+            .filter(|&w| {
+                let ex = unsafe { GetWindowLongPtrW(w, GWL_EXSTYLE) };
+                ex & (WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) == 0
+            })
             .filter(|&w| program_of(w).as_deref() == Some(program.as_str()))
             .filter(|&w| !class_of(w).contains("Tooltip"))
             .max_by_key(|&w| {
-                let mut rect = Rect::default();
-                unsafe { GetWindowRect(w, &mut rect) };
-                (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64
+                let mut placement = Placement {
+                    length: std::mem::size_of::<Placement>() as u32,
+                    ..Placement::default()
+                };
+                // SAFETY: the struct is sized as the call expects and only written to.
+                let r = unsafe {
+                    if GetWindowPlacement(w, &mut placement) != 0 {
+                        placement.normal
+                    } else {
+                        let mut rect = Rect::default();
+                        GetWindowRect(w, &mut rect);
+                        rect
+                    }
+                };
+                let titled = unsafe { GetWindowTextLengthW(w) } > 0;
+                (
+                    titled,
+                    (r.right - r.left) as i64 * (r.bottom - r.top) as i64,
+                )
             })
     }
 
@@ -185,6 +225,8 @@ mod imp {
                 | WS_MAXIMIZEBOX;
             SetWindowLongPtrW(window, GWL_STYLE, (style & !frame) | WS_CHILD);
             SetWindowLongPtrW(window, GWL_EXSTYLE, exstyle & !WS_EX_APPWINDOW);
+            // Hidden until it is put where it goes: it would show at its old place meanwhile.
+            ShowWindow(window, SW_HIDE);
             SetParent(window, parent);
             SetWindowPos(
                 window,
@@ -280,6 +322,24 @@ mod imp {
         *HELD.lock().unwrap() = None;
     }
 
+    /// Closes a window ride started the app of, as its own close button would: given back
+    /// first, still hidden, so it can close the way it always does without being seen.
+    pub fn close(held: &Held) {
+        const WM_CLOSE: u32 = 0x0010;
+        // SAFETY: the calls keep no pointers; a window gone meanwhile makes them do nothing.
+        unsafe {
+            if IsWindow(held.window) != 0 {
+                ShowWindow(held.window, SW_HIDE);
+                SetWindowRgn(held.window, 0, 0);
+                SetParent(held.window, 0);
+                SetWindowLongPtrW(held.window, GWL_STYLE, held.style & !0x1000_0000);
+                SetWindowLongPtrW(held.window, GWL_EXSTYLE, held.exstyle);
+                PostMessageW(held.window, WM_CLOSE, 0, 0);
+            }
+        }
+        *HELD.lock().unwrap() = None;
+    }
+
     /// Gives back whatever is held: for the panic hook and the way out.
     pub fn release_any() {
         let held = HELD.lock().ok().and_then(|h| *h);
@@ -306,6 +366,7 @@ mod imp {
         false
     }
     pub fn release(_held: &Held) {}
+    pub fn close(_held: &Held) {}
     pub fn release_any() {}
 }
 
