@@ -304,6 +304,15 @@ fn see_through(color: Color32, extra: f32) -> Color32 {
     }
 }
 
+/// The colour laid over the blurred backdrop under every pane, as red, green, blue and
+/// alpha: the theme's own background, so what shows through is darkened (or lightened)
+/// toward the theme instead of washing it out.
+pub fn glass_tint() -> [u8; 4] {
+    let bg = current().window_bg;
+    let alpha = 0.5;
+    [bg.r(), bg.g(), bg.b(), (alpha * 255.0) as u8]
+}
+
 /// Fill for the side panels.
 pub fn glass() -> Color32 {
     see_through(current().panel_bg, 0.0)

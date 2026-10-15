@@ -1080,6 +1080,43 @@ mod os {
         ) -> i32;
     }
 
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
+    }
+
+    type SetComposition = unsafe extern "system" fn(isize, *mut CompositionData) -> i32;
+
+    /// `SetWindowCompositionAttribute`, which user32 has but doesn't list for linking.
+    fn set_composition() -> Option<SetComposition> {
+        let user32: Vec<u16> = "user32.dll\0".encode_utf16().collect();
+        // SAFETY: user32 is loaded in every windowed process, the names end in a zero, and
+        // the function found has the signature `SetComposition` describes.
+        unsafe {
+            let module = GetModuleHandleW(user32.as_ptr());
+            let found = GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast());
+            (!found.is_null()).then(|| std::mem::transmute::<_, SetComposition>(found))
+        }
+    }
+
+    /// What `SetWindowCompositionAttribute` takes to give a window a backdrop of its own.
+    #[repr(C)]
+    struct AccentPolicy {
+        state: i32,
+        flags: i32,
+        /// The tint laid over the blur, as 0xAABBGGRR.
+        tint: u32,
+        animation: i32,
+    }
+
+    #[repr(C)]
+    struct CompositionData {
+        attribute: u32,
+        data: *mut AccentPolicy,
+        size: usize,
+    }
+
     #[link(name = "comctl32")]
     extern "system" {
         fn SetWindowSubclass(window: isize, proc: SubclassProc, id: usize, data: usize) -> i32;
@@ -1161,16 +1198,28 @@ mod os {
         true
     }
 
-    /// Turns the blurred backdrop behind the window on or off. `dark` picks its tint.
+    /// Puts a blurred view of what is behind the window under it, tinted with `tint`
+    /// (red, green, blue, alpha), or takes it away when there is no tint. `dark` is for the
+    /// system's own parts of the window.
+    ///
+    /// The blur is the window's own accent rather than the system's acrylic backdrop: that
+    /// one is a pale, thin material that turns milky over anything bright, and goes flat
+    /// whenever the window isn't the active one. This one keeps the theme's colour under
+    /// the panes and stays blurred.
     pub fn set_backdrop(
         window: &impl raw_window_handle::HasWindowHandle,
-        on: bool,
+        tint: Option<[u8; 4]>,
         dark: bool,
     ) -> bool {
         const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
         const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
         const BACKDROP_NONE: i32 = 1;
         const BACKDROP_ACRYLIC: i32 = 3;
+        const WCA_ACCENT_POLICY: u32 = 19;
+        const ACCENT_DISABLED: i32 = 0;
+        const ACCENT_ACRYLIC: i32 = 4;
+        // Tells the accent to use the tint given.
+        const ACCENT_TINTED: i32 = 2;
         let Some(window) = hwnd(window) else {
             return false;
         };
@@ -1179,10 +1228,33 @@ mod os {
             unsafe { DwmSetWindowAttribute(window, attribute, &value, 4) == 0 }
         };
         set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as i32);
+        let mut accent = AccentPolicy {
+            state: if tint.is_some() {
+                ACCENT_ACRYLIC
+            } else {
+                ACCENT_DISABLED
+            },
+            flags: ACCENT_TINTED,
+            tint: tint.map_or(0, |[r, g, b, a]| u32::from_le_bytes([r, g, b, a])),
+            animation: 0,
+        };
+        let mut data = CompositionData {
+            attribute: WCA_ACCENT_POLICY,
+            data: &mut accent,
+            size: std::mem::size_of::<AccentPolicy>(),
+        };
+        // SAFETY: both structs outlive the call, and the size given is the accent's own.
+        let accented = set_composition().is_some_and(|set| unsafe { set(window, &mut data) != 0 });
+        // Where the accent isn't there, the system's acrylic is better than nothing.
+        let fallback = tint.is_some() && !accented;
         set(
             DWMWA_SYSTEMBACKDROP_TYPE,
-            if on { BACKDROP_ACRYLIC } else { BACKDROP_NONE },
-        )
+            if fallback {
+                BACKDROP_ACRYLIC
+            } else {
+                BACKDROP_NONE
+            },
+        ) || accented
     }
 }
 
@@ -1212,7 +1284,7 @@ mod os {
 
     pub fn set_backdrop(
         _window: &impl raw_window_handle::HasWindowHandle,
-        _on: bool,
+        _tint: Option<[u8; 4]>,
         _dark: bool,
     ) -> bool {
         false
@@ -1526,7 +1598,12 @@ impl App {
         let icon_set = stored("icon_set");
         let term_dock = stored("term_dock");
         let was_connected = stored("connected") == "true";
-        let glass_opacity = stored("glass_opacity").parse::<f32>().ok();
+        // RIDE_GLASS_OPACITY overrides the remembered one, for checking the backdrop.
+        let glass_opacity = std::env::var("RIDE_GLASS_OPACITY")
+            .ok()
+            .unwrap_or_else(|| stored("glass_opacity"))
+            .parse::<f32>()
+            .ok();
         let mut app = Self {
             link: Link::Offline,
             host,

@@ -40,7 +40,7 @@ pub(super) struct Themes {
     /// How opaque the panes are while glass is on, 0 to 1.
     pub(super) opacity: f32,
     /// The glass state and tint last given to the window, so it is set only on change.
-    applied: Option<(bool, bool)>,
+    applied: Option<(Option<[u8; 4]>, bool)>,
     /// The window's system frame has been taken over (done once, on the first frame).
     adopted: bool,
     /// Every theme that can be applied, with its colours for the swatches.
@@ -487,14 +487,14 @@ impl App {
             os::adopt_window(frame);
         }
         theme::set_glass(self.themes.glass.then_some(self.themes.opacity));
-        // The backdrop's tint follows whether the theme is dark or light.
         let dark = theme::STRONG() == Color32::WHITE;
-        let wanted = (self.themes.glass, dark);
+        let tint = self.themes.glass.then(theme::glass_tint);
+        let wanted = (tint, dark);
         if self.themes.applied == Some(wanted) {
             return;
         }
         self.themes.applied = Some(wanted);
-        if !os::set_backdrop(frame, self.themes.glass, dark) && self.themes.glass {
+        if !os::set_backdrop(frame, tint, dark) && self.themes.glass {
             self.themes.glass = false;
             theme::set_glass(None);
             self.themes.message = "Glass isn't available on this version of Windows".into();

@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.1
+
+- **Glass looks like glass.** The window used Windows' own acrylic, a pale, thin material that turned milky over anything bright and went flat whenever ride wasn't the active window, so lowering the opacity only made it whiter. It now has a frosted blur of its own, tinted with the theme's background: what is behind shows through as soft colour, the panes stay dark on a dark theme, and it stays blurred when another window has the focus.
+
 ## 0.9.0
 
 - **Inlay hints.** The types and parameter names the language server works out show faintly in the code, as in VS Code: `greet(name: "x")`, `const total: number`. They aren't part of the text, and clicks beside them land where you'd expect. TypeScript gets them set up as VS Code users have them. On and off in Settings → Editor, the Command Palette, or a shortcut of your choosing.
