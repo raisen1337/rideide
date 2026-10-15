@@ -3,6 +3,17 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.0
+
+- **Inlay hints.** The types and parameter names the language server works out show faintly in the code, as in VS Code: `greet(name: "x")`, `const total: number`. They aren't part of the text, and clicks beside them land where you'd expect. TypeScript gets them set up as VS Code users have them. On and off in Settings → Editor, the Command Palette, or a shortcut of your choosing.
+- **Semantic highlighting.** Where a language server can tell them apart, parameters, variables, fields, constants and types each get their own colour. VS Code themes bring their own colours for these.
+- **Sticky scroll.** The first lines of the function, class and blocks the top of the view is inside stay pinned above the code; click one to go to it. Up to 5 lines, which you can change.
+- **Keyboard shortcuts in Settings.** Every shortcut is listed with its keys: click one and press the new keys, remove it, or put it back to the default. Shortcuts with the same keys are pointed out. The Command Palette shows the keys you set.
+- **Settings has a search box**, and the Editor section has more in it: cursor style (line, block, underline), indent guides, matching brackets, show whitespace (never, in the selection, everywhere), rulers at the columns you list, and whether the last line can be scrolled to the top.
+- **Brackets and quotes close themselves.** Typing `(` puts `)` after the cursor, typing `)` steps over it, Backspace between the two takes both, and a selection gets wrapped. Enter between `{}` opens an indented line. Off in Settings if you'd rather not.
+- New in the editor: Alt+Up and Alt+Down move lines, Shift+Alt+Down copies them, Ctrl+Shift+K deletes them, Ctrl+G goes to a line (`:` in the palette), Ctrl+B shows or hides the side bar.
+- Find in file is a small box at the top right again; it had grown to cover the file.
+
 ## 0.8.5
 
 - **Full access mode for Claude.** A fourth mode next to Ask, Edit and Auto: Claude does whatever it asks to do without stopping for you, any command or tool included (pushes and deploys too). Questions it puts to you still come to you, and anything your own Claude Code settings deny stays denied. It is never the default; pick it in the chat, or in Settings for new chats.

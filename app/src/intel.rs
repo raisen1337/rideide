@@ -48,6 +48,22 @@ pub struct Actions {
     selected: usize,
 }
 
+/// An inlay hint where it goes in the buffer, with the hash of its line as it was then:
+/// once the line changes, the hint waits for the server's next word on it.
+pub struct Hint {
+    pub at: Pos,
+    pub label: String,
+    pub hash: u64,
+}
+
+/// A line's text, reduced to a number, to tell whether it changed.
+pub fn line_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// What the language server has to show in one tab, and what the editor noticed for it.
 #[derive(Default)]
 pub struct Intel {
@@ -79,6 +95,16 @@ pub struct Intel {
     accepted: Option<(String, u64)>,
     /// A completion whose details the popup wants.
     want_resolve: Option<usize>,
+    pub hints: Vec<Hint>,
+    /// The server's colours by line: the hash of the line as it was, and the names on it
+    /// (from char, to char, what they are).
+    pub sem: HashMap<usize, (u64, Vec<(usize, usize, lsp::SemKind)>)>,
+    /// The revision and refresh generation hints and colours were last asked for.
+    hints_asked: Option<(u64, u64)>,
+    sem_asked: Option<(u64, u64)>,
+    /// The revision last seen and when it was first seen: they are asked for once typing
+    /// pauses.
+    changed: (u64, f64),
 }
 
 impl Intel {
@@ -902,6 +928,7 @@ impl App {
             }
         }
 
+        self.intel_decorations(index, name, ctx);
         let tab = &mut self.tabs[index];
         if let Some(wanted) = tab.view.intel.want_resolve.take() {
             if let Some(item) = tab
@@ -915,6 +942,56 @@ impl App {
                 let uid = tab.uid;
                 self.lsp.resolve_completion(name, uid, &item);
             }
+        }
+    }
+
+    /// Asks for the inlay hints and colours of a tab once typing has paused.
+    fn intel_decorations(&mut self, index: usize, name: &str, ctx: &Context) {
+        let (want_hints, want_sem) = settings::with(|s| (s.inlay_hints, s.semantic_highlighting));
+        let Some(server) = self.lsp.ready(name) else {
+            return;
+        };
+        let (can_hints, can_sem) = (server.can("inlayHintProvider"), server.colours());
+        let key = Some((self.tabs[index].buf.revision, self.lsp.refresh_gen));
+        let tab = &mut self.tabs[index];
+        let revision = tab.buf.revision;
+        let intel = &mut tab.view.intel;
+        if intel.changed.0 != revision {
+            intel.changed = (revision, self.now);
+        }
+        if !want_hints {
+            intel.hints.clear();
+            intel.hints_asked = None;
+        }
+        if !want_sem {
+            intel.sem.clear();
+            intel.sem_asked = None;
+        }
+        let ask_hints = want_hints && can_hints && intel.hints_asked != key;
+        let ask_sem = want_sem && can_sem && intel.sem_asked != key;
+        if !ask_hints && !ask_sem {
+            return;
+        }
+        let wait = 0.4 - (self.now - intel.changed.1);
+        if wait > 0.0 {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            return;
+        }
+        if self.lsp.synced(name, &tab.path) != Some(revision) {
+            return;
+        }
+        let (path, uid, lines) = (tab.path.clone(), tab.uid, tab.buf.line_count() as u32);
+        if ask_hints {
+            intel.hints_asked = key;
+        }
+        if ask_sem {
+            intel.sem_asked = key;
+        }
+        if ask_hints {
+            self.lsp.inlay_hints(name, &path, uid, revision, lines);
+        }
+        if ask_sem {
+            self.lsp.semantic_tokens(name, &path, uid, revision);
         }
     }
 
@@ -1312,6 +1389,62 @@ impl App {
                     }
                 }
                 Event::Diagnostics => {}
+                Event::InlayHints {
+                    tab,
+                    revision,
+                    hints,
+                } => {
+                    let Some(tab) = self.tabs.iter_mut().find(|t| t.uid == tab) else {
+                        continue;
+                    };
+                    // One for an older text is asked again.
+                    if tab.buf.revision != revision {
+                        continue;
+                    }
+                    let buf = &tab.buf;
+                    let mut hints: Vec<Hint> = hints
+                        .iter()
+                        .map(|h| {
+                            let at = pos_in(buf, h.at);
+                            Hint {
+                                at,
+                                label: h.label.clone(),
+                                hash: line_hash(buf.line(at.line)),
+                            }
+                        })
+                        .collect();
+                    hints.sort_by_key(|h| h.at);
+                    tab.view.intel.hints = hints;
+                }
+                Event::Semantic {
+                    tab,
+                    revision,
+                    tokens,
+                } => {
+                    let Some(tab) = self.tabs.iter_mut().find(|t| t.uid == tab) else {
+                        continue;
+                    };
+                    if tab.buf.revision != revision {
+                        continue;
+                    }
+                    let buf = &tab.buf;
+                    let mut sem: HashMap<usize, (u64, Vec<(usize, usize, lsp::SemKind)>)> =
+                        HashMap::new();
+                    for token in tokens {
+                        let line = token.line as usize;
+                        if line >= buf.line_count() {
+                            continue;
+                        }
+                        let text = buf.line(line);
+                        let from = lsp::col_of(text, token.start);
+                        let to = lsp::col_of(text, token.start + token.len);
+                        sem.entry(line)
+                            .or_insert_with(|| (line_hash(text), Vec::new()))
+                            .1
+                            .push((from, to, token.kind));
+                    }
+                    tab.view.intel.sem = sem;
+                }
                 Event::Message(text) => self.status = text,
             }
         }

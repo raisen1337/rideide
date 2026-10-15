@@ -451,21 +451,166 @@ impl Buffer {
         self.anchor = self.pos_at(anchor);
     }
 
+    /// Text typed. A bracket or quote gets its closing partner, typing a closing one that is
+    /// already next steps over it, and an opening one typed over a selection wraps it.
+    pub fn type_text(&mut self, text: &str) {
+        let mut chars = text.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            return self.insert(text);
+        };
+        if !crate::settings::with(|s| s.auto_close) {
+            return self.insert(text);
+        }
+        let line: Vec<char> = self.lines[self.cursor.line].chars().collect();
+        let next = line.get(self.cursor.col).copied();
+        let prev = self
+            .cursor
+            .col
+            .checked_sub(1)
+            .and_then(|i| line.get(i))
+            .copied();
+        if !self.has_selection()
+            && next == Some(c)
+            && matches!(c, ')' | ']' | '}' | '"' | '\'' | '`')
+            && prev != Some('\\')
+        {
+            return self.move_right(false);
+        }
+        let close = match c {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '"' | '\'' | '`' => c,
+            _ => return self.insert(text),
+        };
+        if self.has_selection() {
+            let (start, end) = self.selection();
+            let inner = self.selected_text();
+            self.insert(&format!("{c}{inner}{close}"));
+            self.anchor = Pos::new(start.line, start.col + 1);
+            self.cursor = if start.line == end.line {
+                Pos::new(end.line, end.col + 1)
+            } else {
+                end
+            };
+            return;
+        }
+        let quote = c == close;
+        // Only before a space, the end of the line or a closing bracket: elsewhere the
+        // partner would be in the way.
+        let room = next.is_none_or(|n| n.is_whitespace() || ")]},;:".contains(n));
+        // A quote after a word is an apostrophe, and `&'a` is a Rust lifetime.
+        let after_word = prev.is_some_and(|p| p.is_alphanumeric() || p == '_' || p == c);
+        let lifetime = c == '\'' && prev.is_some_and(|p| p == '&' || p == '<');
+        if !room || quote && (after_word || lifetime) {
+            return self.insert(text);
+        }
+        self.insert(&format!("{c}{close}"));
+        self.cursor.col -= 1;
+        self.anchor = self.cursor;
+    }
+
     pub fn newline(&mut self) {
         if !crate::settings::with(|s| s.auto_indent) {
             return self.insert("\n");
         }
-        let (start, _) = self.selection();
+        let (start, end) = self.selection();
         let line = &self.lines[start.line];
         let indent: String = line
             .chars()
             .take(start.col)
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
-        self.insert(&format!("\n{indent}"));
+        let before = line.chars().take(start.col).collect::<String>();
+        let opener = before.trim_end().chars().last();
+        let after = self.lines[end.line].chars().nth(end.col);
+        let unit = self.indent_unit();
+        match (opener, after) {
+            // Between a pair of brackets: the closing one goes a line further down.
+            (Some('{'), Some('}')) | (Some('['), Some(']')) | (Some('('), Some(')')) => {
+                self.insert(&format!("\n{indent}{unit}\n{indent}"));
+                let line = start.line + 1;
+                self.set_cursor(Pos::new(line, char_len(&indent) + char_len(&unit)), false);
+            }
+            (Some('{' | '[' | '('), _) => self.insert(&format!("\n{indent}{unit}")),
+            _ => self.insert(&format!("\n{indent}")),
+        }
+    }
+
+    /// Copies the lines of the selection (or the cursor's) below them.
+    pub fn duplicate_lines(&mut self) {
+        let (first, last) = self.selected_lines();
+        let block = self.lines[first..=last].join("\n");
+        let (cursor, anchor) = (self.cursor, self.anchor);
+        let at = Pos::new(last, self.line_len(last));
+        self.edit(at, at, &format!("\n{block}"));
+        let shift = last - first + 1;
+        self.cursor = Pos::new(cursor.line + shift, cursor.col);
+        self.anchor = Pos::new(anchor.line + shift, anchor.col);
+    }
+
+    /// Moves the lines of the selection (or the cursor's) one line up or down.
+    pub fn move_selected_lines(&mut self, delta: isize) {
+        let (first, last) = self.selected_lines();
+        if delta < 0 && first == 0 || delta > 0 && last + 1 >= self.lines.len() {
+            return;
+        }
+        let (cursor, anchor) = (self.cursor, self.anchor);
+        let (from, to, moved) = if delta < 0 {
+            let mut moved = self.lines[first..=last].to_vec();
+            moved.push(self.lines[first - 1].clone());
+            (first - 1, last, moved)
+        } else {
+            let mut moved = vec![self.lines[last + 1].clone()];
+            moved.extend_from_slice(&self.lines[first..=last]);
+            (first, last + 1, moved)
+        };
+        let end = Pos::new(to, self.line_len(to));
+        self.edit(Pos::new(from, 0), end, &moved.join("\n"));
+        let step = |p: Pos| Pos::new(p.line.saturating_add_signed(delta), p.col);
+        self.cursor = step(cursor);
+        self.anchor = step(anchor);
+    }
+
+    /// Removes the lines of the selection (or the cursor's).
+    pub fn delete_lines(&mut self) {
+        let (first, last) = self.selected_lines();
+        let col = self.cursor.col;
+        let (start, end) = if last + 1 < self.lines.len() {
+            (Pos::new(first, 0), Pos::new(last + 1, 0))
+        } else if first > 0 {
+            (
+                Pos::new(first - 1, self.line_len(first - 1)),
+                Pos::new(last, self.line_len(last)),
+            )
+        } else {
+            (Pos::new(0, 0), Pos::new(last, self.line_len(last)))
+        };
+        self.edit(start, end, "");
+        let line = first.min(self.lines.len() - 1);
+        self.set_cursor(Pos::new(line, col), false);
     }
 
     pub fn backspace(&mut self, word: bool) {
+        if !self.has_selection() && !word && crate::settings::with(|s| s.auto_close) {
+            let c = self.cursor;
+            let line: Vec<char> = self.lines[c.line].chars().collect();
+            let pair = c.col > 0
+                && matches!(
+                    (line.get(c.col - 1), line.get(c.col)),
+                    (Some('('), Some(')'))
+                        | (Some('['), Some(']'))
+                        | (Some('{'), Some('}'))
+                        | (Some('"'), Some('"'))
+                        | (Some('\''), Some('\''))
+                        | (Some('`'), Some('`'))
+                );
+            if pair {
+                self.anchor = Pos::new(c.line, c.col - 1);
+                self.cursor = Pos::new(c.line, c.col + 1);
+                return self.insert("");
+            }
+        }
         if !self.has_selection() {
             let start = if word {
                 self.word_left_of(self.cursor)
@@ -916,5 +1061,79 @@ mod tests {
         let mut b = Buffer::new("let foo_bar = 1;");
         b.select_word_at(Pos::new(0, 6));
         assert_eq!(b.selected_text(), "foo_bar");
+    }
+
+    #[test]
+    fn brackets_and_quotes_close_themselves() {
+        let mut b = Buffer::new("");
+        b.type_text("f");
+        b.type_text("(");
+        assert_eq!((b.text().as_str(), b.cursor), ("f()", Pos::new(0, 2)));
+        b.type_text("\"");
+        b.type_text("a");
+        b.type_text("\"");
+        // The closing quote typed steps over the one put in.
+        assert_eq!((b.text().as_str(), b.cursor), ("f(\"a\")", Pos::new(0, 5)));
+        b.type_text(")");
+        assert_eq!((b.text().as_str(), b.cursor), ("f(\"a\")", Pos::new(0, 6)));
+        // An apostrophe after a word stays alone; a Rust lifetime too.
+        let mut b = Buffer::new("don");
+        b.set_cursor(Pos::new(0, 3), false);
+        b.type_text("'");
+        assert_eq!(b.text(), "don'");
+        let mut b = Buffer::new("&");
+        b.set_cursor(Pos::new(0, 1), false);
+        b.type_text("'");
+        assert_eq!(b.text(), "&'");
+        // Not in front of a word.
+        let mut b = Buffer::new("x");
+        b.type_text("(");
+        assert_eq!(b.text(), "(x");
+        // Backspace between an empty pair takes both.
+        let mut b = Buffer::new("");
+        b.type_text("[");
+        b.backspace(false);
+        assert_eq!(b.text(), "");
+        // A selection is wrapped, and stays selected.
+        let mut b = Buffer::new("a + b");
+        b.select_all();
+        b.type_text("(");
+        assert_eq!(
+            (b.text().as_str(), b.selected_text().as_str()),
+            ("(a + b)", "a + b")
+        );
+    }
+
+    #[test]
+    fn enter_between_braces_opens_an_indented_line() {
+        let mut b = Buffer::new("fn x() {}");
+        b.set_cursor(Pos::new(0, 8), false);
+        b.newline();
+        let indent = b.indent_unit();
+        assert_eq!(b.text(), format!("fn x() {{\n{indent}\n}}"));
+        assert_eq!(b.cursor, Pos::new(1, indent.chars().count()));
+    }
+
+    #[test]
+    fn lines_move_copy_and_go() {
+        let mut b = Buffer::new("a\nb\nc");
+        b.set_cursor(Pos::new(1, 1), false);
+        b.move_selected_lines(-1);
+        assert_eq!((b.text().as_str(), b.cursor), ("b\na\nc", Pos::new(0, 1)));
+        b.move_selected_lines(-1);
+        assert_eq!(b.text(), "b\na\nc");
+        b.move_selected_lines(1);
+        b.move_selected_lines(1);
+        assert_eq!((b.text().as_str(), b.cursor), ("a\nc\nb", Pos::new(2, 1)));
+        b.duplicate_lines();
+        assert_eq!(
+            (b.text().as_str(), b.cursor),
+            ("a\nc\nb\nb", Pos::new(3, 1))
+        );
+        b.delete_lines();
+        b.delete_lines();
+        assert_eq!(b.text(), "a\nc");
+        b.undo();
+        assert_eq!(b.text(), "a\nc\nb");
     }
 }

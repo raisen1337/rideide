@@ -18,6 +18,7 @@ mod highlight;
 mod icons;
 mod iconsets;
 mod intel;
+mod keys;
 mod lsp;
 mod markdown;
 mod nav;
@@ -2239,6 +2240,18 @@ impl App {
                     self.side = Side::Search;
                     self.run_search();
                 }
+                // RIDE_FIND=QUERY opens the find box of the open file, to look at it.
+                if let Ok(query) = std::env::var("RIDE_FIND") {
+                    self.find = Some(query);
+                }
+                // RIDE_SETTINGS=N opens section N of the settings.
+                if let Some(section) = std::env::var("RIDE_SETTINGS")
+                    .ok()
+                    .and_then(|n| n.parse().ok())
+                {
+                    self.view = View::Settings;
+                    self.settings_section = section;
+                }
                 // RIDE_DIALOG=delete|rename opens that dialog, to look at it.
                 match std::env::var("RIDE_DIALOG").as_deref() {
                     Ok("delete") => {
@@ -3253,18 +3266,27 @@ impl App {
     // ---- ui ----
 
     fn shortcuts(&mut self, ctx: &Context) {
-        let pressed = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::P) {
+        // As set in Settings → Keyboard shortcuts.
+        let pressed = |id: &str| ctx.input_mut(|i| keys::take(i, id));
+        if pressed("palette.commands") {
             self.open_palette(false);
         }
-        if pressed(Modifiers::COMMAND, Key::Comma) {
+        if pressed("view.shortcuts") {
+            self.view = View::Settings;
+            self.settings_section = settings::SHORTCUTS;
+        }
+        if pressed("terminal.new") {
+            self.view = View::Code;
+            self.new_term();
+        }
+        if pressed("view.settings") {
             self.view = if self.view == View::Settings {
                 View::Code
             } else {
                 View::Settings
             };
         }
-        if pressed(Modifiers::COMMAND, Key::Backtick) {
+        if pressed("view.terminal") {
             self.show_term = !(self.show_term && self.term_focused);
             self.panel_tab = chrome::PanelTab::Terminal;
             if let Some(term) = self.terms.get_mut(self.active_term) {
@@ -3280,26 +3302,57 @@ impl App {
         if self.term_focused {
             return;
         }
-        if self.online() && pressed(Modifiers::COMMAND, Key::P) {
+        if self.online() && pressed("palette.files") {
             self.open_palette(true);
         }
         let active = self.docked_active();
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
+        if pressed("palette.symbols") {
             self.open_palette_with("@");
         }
-        if pressed(Modifiers::SHIFT | Modifiers::ALT, Key::F) {
+        if active.is_some() && pressed("palette.line") {
+            self.open_palette_with(":");
+        }
+        if pressed("view.files") {
+            self.show_side = !self.show_side;
+        }
+        if pressed("view.chat") {
+            self.show_chat = !self.show_chat;
+        }
+        if pressed("chat.new") {
+            self.chat_stop();
+            self.chat.reset();
+            self.show_chat = true;
+        }
+        if pressed("editor.inlayHints") {
+            settings::change(|s| s.inlay_hints = !s.inlay_hints);
+        }
+        if pressed("view.minimap") {
+            settings::change(|s| s.minimap = !s.minimap);
+        }
+        if pressed("view.stickyScroll") {
+            settings::change(|s| s.sticky_scroll = !s.sticky_scroll);
+        }
+        if let Some(index) = active {
+            if pressed("editor.foldAll") {
+                self.tabs[index].view.fold_all();
+            }
+            if pressed("editor.unfoldAll") {
+                self.tabs[index].view.unfold_all();
+            }
+        }
+        if pressed("editor.format") {
             if let Some(index) = active {
                 self.format_document(index);
             }
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
+        if pressed("search.replace") {
             self.open_search();
             self.search.show_replace = true;
             self.search.focus_replace = true;
         }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
+        if pressed("search.folder") {
             self.toggle_search();
-        } else if pressed(Modifiers::COMMAND, Key::F) {
+        } else if pressed("editor.find") {
             if let Some(index) = active {
                 let selected = self.tabs[index].buf.selected_text();
                 let seed = if selected.is_empty() || selected.contains('\n') {
@@ -3311,12 +3364,12 @@ impl App {
                 self.focus_find = true;
             }
         }
-        if pressed(Modifiers::COMMAND, Key::S) {
+        if pressed("file.save") {
             if let Some(index) = active {
                 self.save_tab(index);
             }
         }
-        if pressed(Modifiers::COMMAND, Key::W) {
+        if pressed("file.close") {
             if let Some(index) = active {
                 self.close_tab(index, false);
             }
@@ -4422,8 +4475,11 @@ impl App {
                     bottom: 2,
                 })
                 .show(ui, |ui| {
-                    // A compact box at the right, like the find widget of most editors.
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // A compact box at the right, like the find widget of most editors. Its row
+                    // is only as tall as the box: laid out in all the room left, it took the
+                    // height of the editor.
+                    let row = vec2(ui.available_width(), 0.0);
+                    ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Min), |ui| {
                         Frame::NONE
                             .fill(theme::tint(10))
                             .stroke((1.0, theme::tint(34)))

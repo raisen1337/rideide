@@ -75,6 +75,36 @@ pub struct Signature {
     pub doc: String,
 }
 
+/// A note the server puts in the code: the type it worked out for a name, or the name of
+/// the parameter an argument is for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlayHint {
+    pub at: LPos,
+    /// With a space before or after, when the server asks for one.
+    pub label: String,
+}
+
+/// What the server says a name is, for its colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemKind {
+    Type,
+    Param,
+    Variable,
+    Property,
+    Constant,
+    Func,
+    Keyword,
+}
+
+/// A name the server coloured: its line, and where it is in UTF-16 units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemToken {
+    pub line: u32,
+    pub start: u32,
+    pub len: u32,
+    pub kind: SemKind,
+}
+
 /// A quick fix or refactoring the server offers.
 #[derive(Clone, Debug)]
 pub struct CodeAction {
@@ -131,6 +161,14 @@ pub enum Pending {
     Diagnostics {
         path: String,
     },
+    InlayHints {
+        tab: u64,
+        revision: u64,
+    },
+    Semantic {
+        tab: u64,
+        revision: u64,
+    },
     Other,
 }
 
@@ -179,6 +217,16 @@ pub enum Event {
         edits: Vec<TextEdit>,
     },
     Diagnostics,
+    InlayHints {
+        tab: u64,
+        revision: u64,
+        hints: Vec<InlayHint>,
+    },
+    Semantic {
+        tab: u64,
+        revision: u64,
+        tokens: Vec<SemToken>,
+    },
     /// Something to tell the user.
     Message(String),
 }
@@ -235,6 +283,13 @@ impl Server {
     /// What it is busy with, for the status bar.
     pub fn busy(&self) -> Option<&str> {
         self.progress.values().next().map(String::as_str)
+    }
+
+    /// Whether it colours a whole file on request, in a way ride can read.
+    pub fn colours(&self) -> bool {
+        let provider = &self.caps["semanticTokensProvider"];
+        let full = &provider["full"];
+        provider["legend"]["tokenTypes"].is_array() && !full.is_null() && *full != false
     }
 
     fn resolves_completions(&self) -> bool {
@@ -301,6 +356,8 @@ pub struct Lsp {
     pub dismissed: HashSet<String>,
     /// Servers being installed in a terminal; they are started again when that is done.
     pub installing: HashSet<String>,
+    /// Bumped when a server says its hints or colours are out of date everywhere.
+    pub refresh_gen: u64,
     out: Vec<Request>,
     root: String,
 }
@@ -630,6 +687,23 @@ impl Lsp {
         self.request(name, method, params, pending);
     }
 
+    /// Asks for the inlay hints of a whole file.
+    pub fn inlay_hints(&mut self, name: &str, path: &str, tab: u64, revision: u64, lines: u32) {
+        let params = json!({
+            "textDocument": { "uri": uri(path) },
+            "range": range_json(LPos::default(), LPos { line: lines, ch: 0 }),
+        });
+        let pending = Pending::InlayHints { tab, revision };
+        self.request(name, "textDocument/inlayHint", params, pending);
+    }
+
+    /// Asks for the colours of a whole file.
+    pub fn semantic_tokens(&mut self, name: &str, path: &str, tab: u64, revision: u64) {
+        let params = json!({ "textDocument": { "uri": uri(path) } });
+        let pending = Pending::Semantic { tab, revision };
+        self.request(name, "textDocument/semanticTokens/full", params, pending);
+    }
+
     /// Asks for completions typed after `trigger`, such as a `.`.
     pub fn complete(
         &mut self,
@@ -884,6 +958,31 @@ impl Lsp {
                     events.push(Event::Diagnostics);
                 }
             }
+            Pending::InlayHints { tab, revision } => {
+                let hints = result
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(parse_hint)
+                    .collect();
+                events.push(Event::InlayHints {
+                    tab,
+                    revision,
+                    hints,
+                });
+            }
+            Pending::Semantic { tab, revision } => {
+                let Some(server) = self.server(name) else {
+                    return;
+                };
+                let legend = &server.caps["semanticTokensProvider"]["legend"];
+                let tokens = decode_tokens(&result["data"], legend);
+                events.push(Event::Semantic {
+                    tab,
+                    revision,
+                    tokens,
+                });
+            }
             Pending::Other => {}
         }
     }
@@ -917,8 +1016,8 @@ impl Lsp {
     ) {
         let result = match method {
             "workspace/configuration" => {
-                let count = params["items"].as_array().map_or(0, Vec::len);
-                Value::Array(vec![Value::Null; count])
+                let items = params["items"].as_array().cloned().unwrap_or_default();
+                Value::Array(items.iter().map(|item| configuration(item)).collect())
             }
             "workspace/applyEdit" => {
                 let edit = parse_workspace_edit(&params["edit"]);
@@ -942,12 +1041,14 @@ impl Lsp {
                 let folder = self.root.trim_end_matches('/').to_string();
                 json!([{ "uri": uri(&folder), "name": base_name(&folder) }])
             }
+            "workspace/semanticTokens/refresh" | "workspace/inlayHint/refresh" => {
+                self.refresh_gen += 1;
+                Value::Null
+            }
             "client/registerCapability"
             | "client/unregisterCapability"
             | "window/workDoneProgress/create"
             | "window/showMessageRequest"
-            | "workspace/semanticTokens/refresh"
-            | "workspace/inlayHint/refresh"
             | "workspace/codeLens/refresh" => Value::Null,
             _ => {
                 let message = json!({
@@ -1023,6 +1124,24 @@ impl Lsp {
     }
 }
 
+/// A setting a server asks the editor for. Only TypeScript's inlay hints are set, as VS
+/// Code users have them; anything else is left to the server's defaults.
+fn configuration(item: &Value) -> Value {
+    match item["section"].as_str().unwrap_or("") {
+        "typescript" | "javascript" | "js/ts" => json!({
+            "inlayHints": {
+                "parameterNames": { "enabled": "all", "suppressWhenArgumentMatchesName": true },
+                "parameterTypes": { "enabled": false },
+                "variableTypes": { "enabled": true, "suppressWhenTypeMatchesName": true },
+                "propertyDeclarationTypes": { "enabled": true },
+                "functionLikeReturnTypes": { "enabled": true },
+                "enumMemberValues": { "enabled": true },
+            },
+        }),
+        _ => Value::Null,
+    }
+}
+
 /// What ride tells servers it can do.
 fn capabilities() -> Value {
     json!({
@@ -1034,6 +1153,8 @@ fn capabilities() -> Value {
             "workspaceFolders": true,
             "didChangeConfiguration": { "dynamicRegistration": false },
             "diagnostics": { "refreshSupport": true },
+            "semanticTokens": { "refreshSupport": true },
+            "inlayHint": { "refreshSupport": true },
         },
         "window": { "workDoneProgress": true, "showMessage": {} },
         "textDocument": {
@@ -1073,6 +1194,25 @@ fn capabilities() -> Value {
             },
             "publishDiagnostics": { "relatedInformation": false, "versionSupport": false },
             "diagnostic": { "dynamicRegistration": false, "relatedDocumentSupport": false },
+            "inlayHint": { "dynamicRegistration": false },
+            "semanticTokens": {
+                "dynamicRegistration": false,
+                "requests": { "range": false, "full": { "delta": false } },
+                "tokenTypes": [
+                    "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+                    "parameter", "variable", "property", "enumMember", "event", "function",
+                    "method", "macro", "keyword", "modifier", "comment", "string", "number",
+                    "regexp", "operator", "decorator",
+                ],
+                "tokenModifiers": [
+                    "declaration", "definition", "readonly", "static", "deprecated", "abstract",
+                    "async", "modification", "documentation", "defaultLibrary",
+                ],
+                "formats": ["relative"],
+                "overlappingTokenSupport": false,
+                "multilineTokenSupport": false,
+                "augmentsSyntaxTokens": true,
+            },
         },
     })
 }
@@ -1454,6 +1594,89 @@ fn parse_signature(v: &Value) -> Option<Signature> {
     Some(Signature { label, active, doc })
 }
 
+fn parse_hint(v: &Value) -> Option<InlayHint> {
+    let at = parse_lpos(&v["position"])?;
+    let mut label = match &v["label"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["value"].as_str()).collect(),
+        _ => return None,
+    };
+    // A type spelled out in full can run across the screen.
+    if label.chars().count() > 48 {
+        label = label.chars().take(47).collect::<String>() + "…";
+    }
+    let label = label.replace(['\n', '\r'], " ");
+    if label.trim().is_empty() {
+        return None;
+    }
+    let left = if v["paddingLeft"] == true { " " } else { "" };
+    let right = if v["paddingRight"] == true { " " } else { "" };
+    Some(InlayHint {
+        at,
+        label: format!("{left}{label}{right}"),
+    })
+}
+
+/// What a token type is, for its colour; `None` for those the syntax colours already
+/// cover (strings, comments, numbers) and those ride doesn't know.
+fn sem_kind(name: &str, readonly: bool) -> Option<SemKind> {
+    Some(match name {
+        "namespace" | "type" | "class" | "enum" | "interface" | "struct" | "typeParameter"
+        | "builtinType" | "typeAlias" | "union" | "trait" => SemKind::Type,
+        "parameter" | "selfParameter" => SemKind::Param,
+        "variable" if readonly => SemKind::Constant,
+        "variable" => SemKind::Variable,
+        "property" | "field" if readonly => SemKind::Constant,
+        "property" | "field" => SemKind::Property,
+        "enumMember" | "constParameter" => SemKind::Constant,
+        "function" | "method" | "macro" | "decorator" | "attribute" => SemKind::Func,
+        "keyword" | "modifier" | "selfKeyword" | "selfTypeKeyword" => SemKind::Keyword,
+        _ => return None,
+    })
+}
+
+/// Reads the server's colours: groups of five numbers, each place given from the one before.
+fn decode_tokens(data: &Value, legend: &Value) -> Vec<SemToken> {
+    let names: Vec<&str> = legend["tokenTypes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| v.as_str().unwrap_or(""))
+        .collect();
+    let readonly_bit = legend["tokenModifiers"]
+        .as_array()
+        .and_then(|m| m.iter().position(|v| v == "readonly"))
+        .map(|i| 1u64 << i);
+    let numbers: Vec<u64> = data
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    let (mut line, mut start) = (0u32, 0u32);
+    let mut tokens = Vec::new();
+    for group in numbers.chunks_exact(5) {
+        let (delta_line, delta_start) = (group[0] as u32, group[1] as u32);
+        if delta_line > 0 {
+            line += delta_line;
+            start = delta_start;
+        } else {
+            start += delta_start;
+        }
+        let name = names.get(group[3] as usize).copied().unwrap_or("");
+        let readonly = readonly_bit.is_some_and(|bit| group[4] & bit != 0);
+        if let Some(kind) = sem_kind(name, readonly) {
+            tokens.push(SemToken {
+                line,
+                start,
+                len: group[2] as u32,
+                kind,
+            });
+        }
+    }
+    tokens
+}
+
 fn parse_action(v: &Value) -> CodeAction {
     // A bare command has a string `command`; a code action may carry a command object.
     let command = match &v["command"] {
@@ -1656,6 +1879,58 @@ mod tests {
         assert_eq!(take_message(&mut input).unwrap()["id"], 1);
         assert_eq!(take_message(&mut input).unwrap()["method"], "x");
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn colours_are_read_from_their_relative_places() {
+        let legend = json!({
+            "tokenTypes": ["variable", "parameter", "comment", "function"],
+            "tokenModifiers": ["declaration", "readonly"],
+        });
+        // A parameter at 2:4, a constant 6 further on, a comment (left to the syntax
+        // colours), then a function on line 5.
+        let data = json!([2, 4, 3, 1, 0, 0, 6, 5, 0, 2, 0, 8, 4, 2, 0, 3, 1, 6, 3, 0]);
+        let tokens = decode_tokens(&data, &legend);
+        assert_eq!(
+            tokens,
+            vec![
+                SemToken {
+                    line: 2,
+                    start: 4,
+                    len: 3,
+                    kind: SemKind::Param
+                },
+                SemToken {
+                    line: 2,
+                    start: 10,
+                    len: 5,
+                    kind: SemKind::Constant
+                },
+                SemToken {
+                    line: 5,
+                    start: 1,
+                    len: 6,
+                    kind: SemKind::Func
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn hints_take_either_label_and_their_padding() {
+        let hint = parse_hint(&json!({
+            "position": { "line": 1, "character": 5 },
+            "label": [{ "value": "count" }, { "value": ":" }],
+            "paddingRight": true,
+        }))
+        .unwrap();
+        assert_eq!(hint.label, "count: ");
+        assert_eq!(hint.at, LPos { line: 1, ch: 5 });
+        let typed = parse_hint(&json!({
+            "position": { "line": 0, "character": 3 }, "label": ": number", "kind": 1,
+        }))
+        .unwrap();
+        assert_eq!(typed.label, ": number");
     }
 
     #[test]
@@ -1981,6 +2256,51 @@ mod tests {
         let (a, b) = signature.active.unwrap();
         let param: String = signature.label.chars().skip(a).take(b - a).collect();
         assert_eq!(param, "name: string");
+
+        // Colours: `name` in `return name;` is a parameter.
+        if lsp.ready("ts").is_some_and(Server::colours) {
+            lsp.semantic_tokens("ts", &path, 1, 2);
+            let mut tokens = Vec::new();
+            eprintln!("stage 9");
+            pump(&mut lsp, &mut |_, e| match e {
+                Event::Semantic { tokens: t, .. } => {
+                    tokens = t.clone();
+                    true
+                }
+                _ => false,
+            });
+            assert!(
+                tokens
+                    .iter()
+                    .any(|t| t.line == 1 && t.start == 9 && t.kind == SemKind::Param),
+                "{tokens:?}"
+            );
+        } else {
+            eprintln!("the server gives no colours");
+        }
+
+        // Inlay hints, when the server gives them.
+        if lsp.ready("ts").is_some_and(|s| s.can("inlayHintProvider")) {
+            lsp.inlay_hints("ts", &path, 1, 2, 7);
+            let mut hints = Vec::new();
+            eprintln!("stage 10");
+            pump(&mut lsp, &mut |_, e| match e {
+                Event::InlayHints { hints: h, .. } => {
+                    hints = h.clone();
+                    true
+                }
+                _ => false,
+            });
+            // The name of the parameter `"x"` is given for, from the settings ride answers with.
+            assert!(
+                hints
+                    .iter()
+                    .any(|h| h.at == LPos { line: 3, ch: 6 } && h.label == "name: "),
+                "{hints:?}"
+            );
+        } else {
+            eprintln!("the server gives no inlay hints");
+        }
 
         let _ = child.kill();
         let _ = std::fs::remove_dir_all(&dir);

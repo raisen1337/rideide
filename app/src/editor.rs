@@ -90,6 +90,9 @@ pub struct EditorState {
     view_top: f32,
     view_h: f32,
     scroll_to: Option<f32>,
+    /// The bracket at the cursor and the one it pairs with, for the revision and cursor
+    /// they were found for.
+    brackets: Option<(u64, Pos, Option<(Pos, Pos)>)>,
 }
 
 impl EditorState {
@@ -293,35 +296,238 @@ fn color(kind: Kind) -> Color32 {
     }
 }
 
-fn layout_line(line: &str, lang: &Lang, state: State, font: &FontId) -> LayoutJob {
+fn sem_color(kind: crate::lsp::SemKind) -> Color32 {
+    use crate::lsp::SemKind;
+    match kind {
+        SemKind::Type => theme::TYPE(),
+        SemKind::Param => theme::PARAM(),
+        SemKind::Variable => theme::VARIABLE(),
+        SemKind::Property => theme::PROPERTY(),
+        SemKind::Constant => theme::CONSTANT(),
+        SemKind::Func => theme::FUNC(),
+        SemKind::Keyword => theme::KEYWORD(),
+    }
+}
+
+/// The language server's colours for a line, while the line is as it was when it gave them.
+fn line_sem(st: &EditorState, buf: &Buffer, line: usize) -> Vec<(usize, usize, Color32)> {
+    match st.intel.sem.get(&line) {
+        Some((hash, names)) if *hash == crate::intel::line_hash(buf.line(line)) => names
+            .iter()
+            .map(|&(from, to, kind)| (from, to, sem_color(kind)))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The inlay hints of a line, while it is as it was when they came: where each goes (the
+/// char it comes before) and its text.
+fn line_hints(st: &EditorState, buf: &Buffer, line: usize) -> Vec<(usize, String)> {
+    let hints = &st.intel.hints;
+    let from = hints.partition_point(|h| h.at.line < line);
+    let to = hints.partition_point(|h| h.at.line <= line);
+    if from == to || buf.line(line).len() > LONG_LINE {
+        return Vec::new();
+    }
+    let hash = crate::intel::line_hash(buf.line(line));
+    hints[from..to]
+        .iter()
+        .filter(|h| h.hash == hash)
+        .map(|h| (h.at.col, h.label.clone()))
+        .collect()
+}
+
+/// Columns taken by the hints before char `col`: a hint at the cursor's place is drawn
+/// after the cursor.
+fn hint_shift(hints: &[(usize, String)], col: usize) -> usize {
+    hints
+        .iter()
+        .filter(|h| h.0 < col)
+        .map(|h| h.1.chars().count())
+        .sum()
+}
+
+/// A screen column on a line with hints, as a column of its text; one inside a hint is
+/// the hint's place.
+fn without_hints(text: &str, hints: &[(usize, String)], vcol: f32) -> f32 {
+    let mut shift = 0.0;
+    for (col, label) in hints {
+        let start = visual_col(text, *col) as f32 + shift;
+        if vcol < start {
+            break;
+        }
+        let width = label.chars().count() as f32;
+        if vcol < start + width {
+            return visual_col(text, *col) as f32;
+        }
+        shift += width;
+    }
+    vcol - shift
+}
+
+/// A line laid out in its colours: the syntax's, the language server's for the names it
+/// knows, and its inlay hints among the text.
+fn layout_line(
+    line: &str,
+    lang: &Lang,
+    state: State,
+    font: &FontId,
+    sem: &[(usize, usize, Color32)],
+    hints: &[(usize, String)],
+) -> LayoutJob {
     let mut spans = Vec::new();
     lex(lang, line, state, &mut spans);
 
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
-    let (mut start, mut vcol) = (0, 0);
+    let hint_format = TextFormat {
+        font_id: font.clone(),
+        color: theme::COMMENT(),
+        background: theme::tint(14),
+        ..Default::default()
+    };
+    let flush = |job: &mut LayoutJob, run: &mut String, colour: Color32| {
+        if !run.is_empty() {
+            job.append(run, 0.0, TextFormat::simple(font.clone(), colour));
+            run.clear();
+        }
+    };
+    let mut run = String::new();
+    let mut run_colour = theme::TEXT();
+    let mut next_hint = 0;
+    let (mut start, mut vcol, mut index) = (0, 0, 0);
     for (end, kind) in spans {
-        let format = TextFormat::simple(font.clone(), color(kind));
-        let segment = &line[start..end];
-        if segment.contains('\t') {
-            let mut expanded = String::new();
-            for c in segment.chars() {
-                let w = char_width(c, vcol);
-                if c == '\t' {
-                    expanded.extend(std::iter::repeat_n(' ', w));
-                } else {
-                    expanded.push(c);
-                }
-                vcol += w;
+        let base = color(kind);
+        // Strings, comments and keywords keep the syntax's colours; names may get the server's.
+        let name = matches!(kind, Kind::Text | Kind::Func | Kind::Type);
+        for c in line[start..end].chars() {
+            while let Some((_, label)) = hints.get(next_hint).filter(|h| h.0 <= index) {
+                flush(&mut job, &mut run, run_colour);
+                job.append(label, 0.0, hint_format.clone());
+                next_hint += 1;
             }
-            job.append(&expanded, 0.0, format);
-        } else {
-            vcol += segment.chars().count();
-            job.append(segment, 0.0, format);
+            let colour = if name {
+                sem.iter()
+                    .find(|s| index >= s.0 && index < s.1)
+                    .map_or(base, |s| s.2)
+            } else {
+                base
+            };
+            if colour != run_colour {
+                flush(&mut job, &mut run, run_colour);
+                run_colour = colour;
+            }
+            let w = char_width(c, vcol);
+            if c == '\t' {
+                run.extend(std::iter::repeat_n(' ', w));
+            } else {
+                run.push(c);
+            }
+            vcol += w;
+            index += 1;
         }
         start = end;
     }
+    flush(&mut job, &mut run, run_colour);
+    for (_, label) in hints.get(next_hint..).unwrap_or(&[]) {
+        job.append(label, 0.0, hint_format.clone());
+    }
     job
+}
+
+/// The bracket next to the cursor (after it, or else before it) and the one it pairs with.
+fn matching_brackets(buf: &Buffer, cursor: Pos) -> Option<(Pos, Pos)> {
+    let line: Vec<char> = buf.line(cursor.line).chars().collect();
+    for col in [Some(cursor.col), cursor.col.checked_sub(1)]
+        .into_iter()
+        .flatten()
+    {
+        let Some(&c) = line.get(col) else { continue };
+        let (open, close, forward) = match c {
+            '(' => ('(', ')', true),
+            '[' => ('[', ']', true),
+            '{' => ('{', '}', true),
+            ')' => ('(', ')', false),
+            ']' => ('[', ']', false),
+            '}' => ('{', '}', false),
+            _ => continue,
+        };
+        let at = Pos::new(cursor.line, col);
+        let mut depth = 0i32;
+        // Far enough for any block one would look at; a runaway search would be felt.
+        let lines = if forward {
+            (cursor.line..buf.line_count().min(cursor.line + 3000)).collect::<Vec<_>>()
+        } else {
+            (cursor.line.saturating_sub(3000)..=cursor.line)
+                .rev()
+                .collect()
+        };
+        for l in lines {
+            let chars: Vec<char> = buf.line(l).chars().collect();
+            let cols: Vec<usize> = if forward {
+                let from = if l == cursor.line { col } else { 0 };
+                (from..chars.len()).collect()
+            } else {
+                let to = if l == cursor.line {
+                    col + 1
+                } else {
+                    chars.len()
+                };
+                (0..to).rev().collect()
+            };
+            for i in cols {
+                let ch = chars[i];
+                if ch == open {
+                    depth += if forward { 1 } else { -1 };
+                } else if ch == close {
+                    depth += if forward { -1 } else { 1 };
+                }
+                if depth == 0 {
+                    return Some((at, Pos::new(l, i)));
+                }
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// The first lines of the blocks the top of the view is inside, outermost first: they stay
+/// pinned above the code (sticky scroll).
+fn sticky_lines(st: &EditorState, first_row: usize, max: usize) -> Vec<usize> {
+    let mut sticky: Vec<usize> = Vec::new();
+    while sticky.len() < max {
+        // The line just under the pinned ones.
+        let Some(&probe) = st.rows.get(first_row + sticky.len()) else {
+            break;
+        };
+        let next = (0..probe)
+            .filter(|&s| st.fold_end(s).is_some_and(|end| end >= probe))
+            .filter(|s| !sticky.contains(s))
+            .find(|&s| st.row_of(s) < first_row + sticky.len());
+        match next {
+            Some(line) => sticky.push(line),
+            None => break,
+        }
+    }
+    sticky
+}
+
+/// How far a line is indented, in screen columns; a blank line counts as indented like
+/// the lines around it.
+fn indent_of(buf: &Buffer, line: usize) -> usize {
+    let measure = |l: usize| {
+        let text = buf.line(l);
+        let blank = text.trim().is_empty();
+        let ws = text.chars().take_while(|c| c.is_whitespace()).count();
+        (!blank).then(|| visual_col(text, ws))
+    };
+    if let Some(indent) = measure(line) {
+        return indent;
+    }
+    let before = (line.saturating_sub(100)..line).rev().find_map(measure);
+    let after = (line + 1..buf.line_count().min(line + 100)).find_map(measure);
+    before.unwrap_or(0).max(after.unwrap_or(0))
 }
 
 /// Lexer states down to `line`, from where they were last filled.
@@ -503,6 +709,53 @@ mod tests {
     }
 
     #[test]
+    fn the_blocks_above_the_view_stay_pinned() {
+        let buf = Buffer::new("a {\n  b {\n    c\n    d\n    e\n  }\n}\nf");
+        let st = state_for(&buf);
+        // Scrolled so line 3 (`d`) is at the top: inside `a {` and `b {`.
+        assert_eq!(sticky_lines(&st, 3, 5), [0, 1]);
+        assert_eq!(sticky_lines(&st, 3, 1), [0]);
+        // At the top nothing is above the view.
+        assert!(sticky_lines(&st, 0, 5).is_empty());
+        assert!(sticky_lines(&st, 7, 5).is_empty());
+    }
+
+    #[test]
+    fn brackets_pair_up_across_lines() {
+        let buf = Buffer::new("f(a, [b]) {\n  g();\n}");
+        assert_eq!(
+            matching_brackets(&buf, Pos::new(0, 1)),
+            Some((Pos::new(0, 1), Pos::new(0, 8)))
+        );
+        assert_eq!(
+            matching_brackets(&buf, Pos::new(0, 7)),
+            Some((Pos::new(0, 7), Pos::new(0, 5)))
+        );
+        // Just after a closing one, with none after the cursor.
+        assert_eq!(
+            matching_brackets(&buf, Pos::new(0, 9)),
+            Some((Pos::new(0, 8), Pos::new(0, 1)))
+        );
+        assert_eq!(
+            matching_brackets(&buf, Pos::new(2, 0)),
+            Some((Pos::new(2, 0), Pos::new(0, 10)))
+        );
+        assert_eq!(matching_brackets(&buf, Pos::new(1, 2)), None);
+    }
+
+    #[test]
+    fn clicks_beside_inlay_hints_land_on_the_text() {
+        let text = "greet(\"x\")";
+        let hints = vec![(6, "name: ".to_string())];
+        // Before the hint, inside it, and on the text after it.
+        assert_eq!(without_hints(text, &hints, 3.0), 3.0);
+        assert_eq!(without_hints(text, &hints, 8.0), 6.0);
+        assert_eq!(without_hints(text, &hints, 13.0), 7.0);
+        assert_eq!(hint_shift(&hints, 6), 0);
+        assert_eq!(hint_shift(&hints, 7), 6);
+    }
+
+    #[test]
     fn folds_move_with_lines_added_above() {
         let buf = Buffer::new("x\na {\n  b\n}");
         let mut st = state_for(&buf);
@@ -569,9 +822,14 @@ fn code(
         st.view_top = viewport.min.y;
         st.view_h = viewport.height();
         // Room below the last line, so it can be scrolled up to the middle of the view.
+        let below = if prefs.scroll_past_end {
+            viewport.height() - row_h * 3.0
+        } else {
+            row_h
+        };
         let size = vec2(
             gutter_w + (st.max_cols + 8) as f32 * cw,
-            st.rows.len() as f32 * row_h + viewport.height() - row_h * 3.0,
+            st.rows.len() as f32 * row_h + below,
         )
         .max(viewport.size());
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
@@ -595,24 +853,30 @@ fn code(
             ui.ctx().set_cursor_icon(CursorIcon::Text);
         }
         resp.context_menu(|ui| {
-            for (label, choice) in [
-                ("Go to definition    F12", Action::Definition(buf.cursor)),
-                ("Find references    Shift+F12", Action::References),
-                ("Rename symbol    F2", Action::Rename),
-                ("Quick fix…    Ctrl+.", Action::CodeActions),
+            for (label, id, choice) in [
+                (
+                    "Go to definition",
+                    "editor.definition",
+                    Action::Definition(buf.cursor),
+                ),
+                ("Find references", "editor.references", Action::References),
+                ("Rename symbol", "editor.rename", Action::Rename),
+                ("Quick fix…", "editor.quickFix", Action::CodeActions),
             ] {
-                if ui.button(label).clicked() {
+                let label = format!("{label}    {}", crate::keys::shown(id));
+                if ui.button(label.trim_end()).clicked() {
                     action = Some(choice);
                     ui.close();
                 }
             }
             ui.separator();
-            for (label, choice) in [
-                ("Edit with Claude    Ctrl+K", Action::InlineEdit),
-                ("Explain with Claude", Action::Explain),
-                ("Add selection to chat", Action::AddToChat),
+            for (label, id, choice) in [
+                ("Edit with Claude", "editor.inlineEdit", Action::InlineEdit),
+                ("Explain with Claude", "", Action::Explain),
+                ("Add selection to chat", "", Action::AddToChat),
             ] {
-                if ui.button(label).clicked() {
+                let label = format!("{label}    {}", crate::keys::shown(id));
+                if ui.button(label.trim_end()).clicked() {
                     action = Some(choice);
                     ui.close();
                 }
@@ -625,6 +889,16 @@ fn code(
         });
 
         let before = (buf.cursor, buf.revision, buf.line_count());
+        let hints_then: std::collections::HashMap<usize, Vec<(usize, String)>> = st.rows
+            [first_row..last_row]
+            .iter()
+            .map(|&line| (line, line_hints(st, buf, line)))
+            .filter(|(_, hints)| !hints.is_empty())
+            .collect();
+        let text_col = |buf: &Buffer, line: usize, x: f32| match hints_then.get(&line) {
+            Some(hints) => without_hints(buf.line(line), hints, (x - text_x) / cw),
+            None => (x - text_x) / cw,
+        };
 
         // ---- mouse ----
         let row_at = |st: &EditorState, p: egui::Pos2| {
@@ -632,7 +906,7 @@ fn code(
         };
         let hit = |st: &EditorState, buf: &Buffer, p: egui::Pos2| {
             let line = st.rows[row_at(st, p)].min(buf.line_count() - 1);
-            let vcol = ((p.x - text_x) / cw).round().max(0.0) as usize;
+            let vcol = text_col(buf, line, p.x).round().max(0.0) as usize;
             Pos::new(line, col_at_visual(buf.line(line), vcol))
         };
         if let Some(p) = resp.interact_pointer_pos() {
@@ -676,9 +950,10 @@ fn code(
             .and_then(|p| {
                 let row = row_at(st, p);
                 let line = st.rows[row].min(buf.line_count() - 1);
-                let vcol = ((p.x - text_x) / cw).floor().max(0.0) as usize;
+                let vcol = text_col(buf, line, p.x).floor().max(0.0) as usize;
                 let col = col_under(buf.line(line), vcol)?;
-                let x = text_x + visual_col(buf.line(line), col) as f32 * cw;
+                let shift = hints_then.get(&line).map_or(0, |h| hint_shift(h, col));
+                let x = text_x + (visual_col(buf.line(line), col) + shift) as f32 * cw;
                 let y = origin.y + row as f32 * row_h;
                 Some((
                     Pos::new(line, col),
@@ -727,7 +1002,7 @@ fn code(
                 }
                 match event {
                     Event::Text(text) => {
-                        buf.insert(&text);
+                        buf.type_text(&text);
                         let mut chars = text.chars();
                         st.intel.typed = chars.next().filter(|_| chars.next().is_none());
                     }
@@ -747,6 +1022,32 @@ fn code(
                         ..
                     } => {
                         let (sel, cmd) = (modifiers.shift, modifiers.command);
+                        // The shortcuts, as set in Settings → Keyboard shortcuts.
+                        if let Some(id) = crate::keys::editor_command(key, modifiers) {
+                            match id {
+                                "editor.inlineEdit" => action = Some(Action::InlineEdit),
+                                "editor.definition" => {
+                                    action = Some(Action::Definition(buf.cursor))
+                                }
+                                "editor.references" => action = Some(Action::References),
+                                "editor.rename" => action = Some(Action::Rename),
+                                "editor.quickFix" => action = Some(Action::CodeActions),
+                                "editor.complete" => action = Some(Action::Complete),
+                                "editor.fold" => st.fold_at(buf.cursor.line),
+                                "editor.unfold" => st.unfold_at(buf.cursor.line),
+                                "editor.comment" => {
+                                    if let Some(prefix) = lang.line_comment.first() {
+                                        buf.toggle_comment(prefix);
+                                    }
+                                }
+                                "editor.duplicateLine" => buf.duplicate_lines(),
+                                "editor.moveLineUp" => buf.move_selected_lines(-1),
+                                "editor.moveLineDown" => buf.move_selected_lines(1),
+                                "editor.deleteLine" => buf.delete_lines(),
+                                _ => {}
+                            }
+                            continue;
+                        }
                         match key {
                             Key::ArrowLeft if cmd => buf.move_word_left(sel),
                             Key::ArrowRight if cmd => buf.move_word_right(sel),
@@ -781,19 +1082,6 @@ fn code(
                             Key::Z if cmd && sel => buf.redo(),
                             Key::Z if cmd => buf.undo(),
                             Key::Y if cmd => buf.redo(),
-                            Key::K if cmd => action = Some(Action::InlineEdit),
-                            Key::F12 if sel => action = Some(Action::References),
-                            Key::F12 => action = Some(Action::Definition(buf.cursor)),
-                            Key::F2 => action = Some(Action::Rename),
-                            Key::Period if cmd => action = Some(Action::CodeActions),
-                            Key::Space if cmd => action = Some(Action::Complete),
-                            Key::OpenBracket if cmd && sel => st.fold_at(buf.cursor.line),
-                            Key::CloseBracket if cmd && sel => st.unfold_at(buf.cursor.line),
-                            Key::Slash if cmd => {
-                                if let Some(prefix) = lang.line_comment.first() {
-                                    buf.toggle_comment(prefix);
-                                }
-                            }
                             _ => {}
                         }
                     }
@@ -842,8 +1130,16 @@ fn code(
 
         // ---- paint ----
         let painter = ui.painter();
+        let hints: std::collections::HashMap<usize, Vec<(usize, String)>> = visible
+            .iter()
+            .map(|&line| (line, line_hints(st, buf, line)))
+            .filter(|(_, hints)| !hints.is_empty())
+            .collect();
         let line_y = |st: &EditorState, line: usize| origin.y + st.row_of(line) as f32 * row_h;
-        let col_x = |buf: &Buffer, p: Pos| text_x + visual_col(buf.line(p.line), p.col) as f32 * cw;
+        let col_x = |buf: &Buffer, p: Pos| {
+            let shift = hints.get(&p.line).map_or(0, |h| hint_shift(h, p.col));
+            text_x + (visual_col(buf.line(p.line), p.col) + shift) as f32 * cw
+        };
 
         if !buf.has_selection() && prefs.highlight_line {
             let y = line_y(st, buf.cursor.line);
@@ -852,6 +1148,40 @@ fn code(
                 0.0,
                 theme::CURRENT_LINE(),
             );
+        }
+
+        for column in crate::settings::rulers() {
+            let x = (text_x + column as f32 * cw).round() + 0.5;
+            painter.line_segment(
+                [pos2(x, view.min.y), pos2(x, view.max.y)],
+                (1.0, theme::tint(12)),
+            );
+        }
+        if prefs.indent_guides {
+            let step = prefs.tab_width.max(1);
+            // The block the cursor is in: its guide is a shade brighter.
+            let cursor_line = buf.cursor.line;
+            let active = (cursor_line.saturating_sub(2000)..cursor_line)
+                .rev()
+                .find(|&s| st.fold_end(s).is_some_and(|end| end >= cursor_line))
+                .map(|s| (s, st.fold_end(s).unwrap_or(s), indent_of(buf, s)));
+            for &line in &visible {
+                if buf.line(line).len() > LONG_LINE {
+                    continue;
+                }
+                let indent = indent_of(buf, line);
+                let y = line_y(st, line);
+                let mut column = 0;
+                while column < indent {
+                    let lit =
+                        active.is_some_and(|(s, end, at)| at == column && line > s && line <= end);
+                    let x = (text_x + column as f32 * cw).round() + 0.5;
+                    let shade = if lit { 44 } else { 16 };
+                    painter
+                        .line_segment([pos2(x, y), pos2(x, y + row_h)], (1.0, theme::tint(shade)));
+                    column += step;
+                }
+            }
         }
 
         let (sel_start, sel_end) = buf.selection();
@@ -889,9 +1219,51 @@ fn code(
                     .collect();
                 let galley = painter.layout_no_wrap(shown, font.clone(), theme::TEXT());
                 painter.galley(pos + vec2(skip as f32 * cw, 0.0), galley, theme::TEXT());
-            } else if !text.is_empty() {
-                let galley = painter.layout_job(layout_line(text, lang, st.states[line], &font));
+            } else if !text.is_empty() || hints.contains_key(&line) {
+                let sem = line_sem(st, buf, line);
+                let no_hints = Vec::new();
+                let line_hints = hints.get(&line).unwrap_or(&no_hints);
+                let job = layout_line(text, lang, st.states[line], &font, &sem, line_hints);
+                let galley = painter.layout_job(job);
                 painter.galley(pos, galley, theme::TEXT());
+            }
+            // Spaces and tabs, faintly: everywhere, or in the selection.
+            let marks = match prefs.whitespace {
+                crate::settings::Whitespace::All => true,
+                crate::settings::Whitespace::Selection => {
+                    buf.has_selection() && line >= sel_start.line && line <= sel_end.line
+                }
+                crate::settings::Whitespace::None => false,
+            };
+            if marks && text.len() <= LONG_LINE {
+                let mark = theme::COMMENT().gamma_multiply(0.55);
+                let mut vcol = 0;
+                for (col, c) in text.chars().enumerate() {
+                    let w = char_width(c, vcol);
+                    vcol += w;
+                    let p = Pos::new(line, col);
+                    let in_selection = prefs.whitespace == crate::settings::Whitespace::All
+                        || p >= sel_start && p < sel_end;
+                    if !in_selection || !(c == ' ' || c == '\t') {
+                        continue;
+                    }
+                    let x = col_x(buf, p);
+                    let mid = y + row_h / 2.0;
+                    if c == ' ' {
+                        painter.circle_filled(pos2(x + cw / 2.0, mid), 1.0, mark);
+                    } else {
+                        let end = x + w as f32 * cw - 3.0;
+                        painter.line_segment([pos2(x + 2.0, mid), pos2(end, mid)], (1.0, mark));
+                        painter.line_segment(
+                            [pos2(end - 3.0, mid - 3.0), pos2(end, mid)],
+                            (1.0, mark),
+                        );
+                        painter.line_segment(
+                            [pos2(end - 3.0, mid + 3.0), pos2(end, mid)],
+                            (1.0, mark),
+                        );
+                    }
+                }
             }
             // A folded block: a small mark after its first line stands for what is hidden.
             if st.folded.contains(&line) {
@@ -962,6 +1334,26 @@ fn code(
             painter.galley(tag.min + vec2(4.0, 1.0), label, Color32::BLACK);
         }
 
+        if prefs.bracket_match {
+            let key = (buf.revision, buf.cursor);
+            if st.brackets.as_ref().map(|b| (b.0, b.1)) != Some(key) {
+                st.brackets = Some((key.0, key.1, matching_brackets(buf, buf.cursor)));
+            }
+            if let Some((_, _, Some((a, b)))) = st.brackets {
+                for p in [a, b].into_iter().filter(|p| visible.contains(&p.line)) {
+                    let x = col_x(buf, p);
+                    let rect = Rect::from_min_size(pos2(x, line_y(st, p.line)), vec2(cw, row_h));
+                    painter.rect_filled(rect, 2.0, theme::tint(12));
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
+                        (1.0, theme::tint(70)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
         let cursor_x = col_x(buf, buf.cursor);
         let cursor_rect = Rect::from_min_size(
             pos2(cursor_x - 1.0, line_y(st, buf.cursor.line)),
@@ -977,7 +1369,34 @@ fn code(
             let blink_on =
                 !prefs.cursor_blink || ui.input(|i| i.time) % 1.0 < 0.5 || st.reveal_cursor;
             if blink_on {
-                painter.rect_filled(cursor_rect, 0.0, theme::CURSOR());
+                let y = cursor_rect.min.y;
+                match prefs.cursor_style {
+                    crate::settings::CursorStyle::Line => {
+                        painter.rect_filled(cursor_rect, 0.0, theme::CURSOR());
+                    }
+                    crate::settings::CursorStyle::Underline => {
+                        painter.rect_filled(
+                            Rect::from_min_size(pos2(cursor_x, y + row_h - 2.0), vec2(cw, 2.0)),
+                            0.0,
+                            theme::CURSOR(),
+                        );
+                    }
+                    crate::settings::CursorStyle::Block => {
+                        let block = Rect::from_min_size(pos2(cursor_x, y), vec2(cw, row_h));
+                        painter.rect_filled(block, 0.0, theme::CURSOR());
+                        // The char under it, in the background's colour.
+                        let under = buf.line(buf.cursor.line).chars().nth(buf.cursor.col);
+                        if let Some(c) = under.filter(|c| !c.is_whitespace()) {
+                            painter.text(
+                                pos2(cursor_x, y + pad_y),
+                                egui::Align2::LEFT_TOP,
+                                c,
+                                font.clone(),
+                                theme::EDITOR_BG(),
+                            );
+                        }
+                    }
+                }
             }
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(500));
@@ -1144,10 +1563,71 @@ fn code(
             );
         }
 
+        // Sticky scroll: the first lines of the blocks the top of the view is in, pinned.
+        let sticky = if prefs.sticky_scroll && first_row > 0 {
+            sticky_lines(st, first_row, prefs.sticky_lines)
+        } else {
+            Vec::new()
+        };
+        if !sticky.is_empty() {
+            let area =
+                Rect::from_min_size(view.min, vec2(view.width(), sticky.len() as f32 * row_h));
+            painter.rect_filled(area, 0.0, theme::EDITOR_BG());
+            let text_clip =
+                Rect::from_min_max(pos2(view.min.x + gutter_w - cw * 0.5, area.min.y), area.max)
+                    .intersect(painter.clip_rect());
+            for (index, &line) in sticky.iter().enumerate() {
+                let y = area.min.y + index as f32 * row_h;
+                let text = buf.line(line);
+                if text.len() <= LONG_LINE && line < st.states.len() {
+                    let sem = line_sem(st, buf, line);
+                    let job = layout_line(text, lang, st.states[line], &font, &sem, &[]);
+                    let galley = painter.layout_job(job);
+                    painter.with_clip_rect(text_clip).galley(
+                        pos2(text_x, y + pad_y),
+                        galley,
+                        theme::TEXT(),
+                    );
+                }
+                if prefs.line_numbers {
+                    painter.text(
+                        pos2(numbers_right, y + pad_y),
+                        egui::Align2::RIGHT_TOP,
+                        line + 1,
+                        font.clone(),
+                        theme::LINE_NUMBER(),
+                    );
+                }
+            }
+            painter.line_segment(
+                [area.left_bottom(), area.right_bottom()],
+                (1.0, theme::tint(28)),
+            );
+            let pinned = ui.interact(area, ui.id().with("sticky"), Sense::click());
+            if pinned.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+            if let Some(p) = pinned.interact_pointer_pos().filter(|_| pinned.clicked()) {
+                let index = ((p.y - area.min.y) / row_h).floor().max(0.0) as usize;
+                if let Some(&line) = sticky.get(index) {
+                    let indent = buf
+                        .line(line)
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+                    buf.set_cursor(Pos::new(line, indent), false);
+                    st.scroll_to = Some(st.row_of(line) as f32 * row_h);
+                    resp.request_focus();
+                }
+            }
+        }
+
         if st.reveal_cursor {
             st.reveal_cursor = false;
+            // Kept clear of the pinned lines above.
+            let pinned = (sticky.len() as f32 + 1.0) * row_h;
             let target = Rect::from_min_max(
-                cursor_rect.min - vec2(gutter_w + cw * 2.0, row_h),
+                cursor_rect.min - vec2(gutter_w + cw * 2.0, pinned),
                 cursor_rect.max + vec2(cw * 4.0, row_h),
             );
             ui.scroll_to_rect(target, None);

@@ -37,6 +37,11 @@ pub struct Palette {
     pub number: Color32,
     pub comment: Color32,
     pub punct: Color32,
+    /// Colours only a language server can tell apart (semantic highlighting).
+    pub variable: Color32,
+    pub param: Color32,
+    pub property: Color32,
+    pub constant: Color32,
     pub term_fg: Color32,
     /// The 16 ANSI colours: normal, then bright.
     pub ansi: [Color32; 16],
@@ -104,6 +109,10 @@ pub const GRAPHITE: Palette = Palette {
     number: rgb(0xc98f8f),
     comment: rgb(0x6a6f76),
     punct: rgb(0xa9a9a9),
+    variable: rgb(0xc4ccd6),
+    param: rgb(0xc9b3dd),
+    property: rgb(0xa7c3c8),
+    constant: rgb(0xd0a4a4),
     term_fg: rgb(0xd6d6d6),
     ansi: DARK_ANSI,
 };
@@ -127,6 +136,10 @@ pub const SLATE: Palette = Palette {
     number: rgb(0xe0a57c),
     comment: rgb(0x626a7a),
     punct: rgb(0xa3abba),
+    variable: rgb(0xc3cde0),
+    param: rgb(0xcfb6f2),
+    property: rgb(0x99c6dc),
+    constant: rgb(0xe8b48f),
     term_fg: rgb(0xd3d8e2),
     ..GRAPHITE
 };
@@ -151,6 +164,10 @@ pub const DAY: Palette = Palette {
     number: rgb(0xb3462e),
     comment: rgb(0x9a9a9a),
     punct: rgb(0x555555),
+    variable: rgb(0x1f3b5c),
+    param: rgb(0x7a3e9d),
+    property: rgb(0x2c5d75),
+    constant: rgb(0xa8432d),
     term_fg: rgb(0x1f1f1f),
     ansi: LIGHT_ANSI,
 };
@@ -224,6 +241,18 @@ pub fn COMMENT() -> Color32 {
 }
 pub fn PUNCT() -> Color32 {
     current().punct
+}
+pub fn VARIABLE() -> Color32 {
+    current().variable
+}
+pub fn PARAM() -> Color32 {
+    current().param
+}
+pub fn PROPERTY() -> Color32 {
+    current().property
+}
+pub fn CONSTANT() -> Color32 {
+    current().constant
 }
 /// The terminal's default background as programs see it; the pane behind supplies the fill.
 pub fn TERM_BG() -> Color32 {
@@ -566,6 +595,42 @@ pub fn from_vscode(theme: &Value) -> Palette {
             .unwrap_or(fallback)
     };
 
+    // A theme's own colours for what language servers tell apart, then the TextMate scopes
+    // that mean the same.
+    let semantic = |names: &[&str]| {
+        names.iter().find_map(|name| {
+            let rule = &theme["semanticTokenColors"][*name];
+            let text = rule.as_str().or(rule["foreground"].as_str())?;
+            hex(text, editor_bg)
+        })
+    };
+    let variable = semantic(&["variable"])
+        .unwrap_or_else(|| token(&["variable.other.readwrite", "variable"], text));
+    let param =
+        semantic(&["parameter"]).unwrap_or_else(|| token(&["variable.parameter"], variable));
+    let property = semantic(&["property"]).unwrap_or_else(|| {
+        token(
+            &[
+                "variable.other.property",
+                "variable.other.object.property",
+                "support.variable.property",
+                "meta.object-literal.key",
+            ],
+            variable,
+        )
+    });
+    let number = token(&["constant.numeric", "constant"], text);
+    let constant = semantic(&["enumMember", "variable.readonly"]).unwrap_or_else(|| {
+        token(
+            &[
+                "variable.other.constant",
+                "variable.other.enummember",
+                "constant.other",
+            ],
+            number,
+        )
+    });
+
     let ansi_names = [
         "Black",
         "Red",
@@ -645,12 +710,16 @@ pub fn from_vscode(theme: &Value) -> Palette {
             text,
         ),
         string: token(&["string.quoted", "string"], text),
-        number: token(&["constant.numeric", "constant"], text),
+        number,
         comment: token(&["comment.line", "comment"], mix(editor_bg, text, 0.45)),
         punct: token(
             &["punctuation", "keyword.operator"],
             mix(editor_bg, text, 0.75),
         ),
+        variable,
+        param,
+        property,
+        constant,
         term_fg: first(&["terminal.foreground"]).unwrap_or(text),
         ansi,
     };
@@ -721,6 +790,10 @@ fn legible(mut p: Palette) -> Palette {
         &mut p.string,
         &mut p.number,
         &mut p.punct,
+        &mut p.variable,
+        &mut p.param,
+        &mut p.property,
+        &mut p.constant,
         &mut p.cursor,
         &mut p.term_fg,
     ] {

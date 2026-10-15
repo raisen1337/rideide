@@ -13,6 +13,21 @@ pub enum Indent {
     Tabs,
 }
 
+/// Where spaces and tabs are shown as faint marks.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Whitespace {
+    None,
+    Selection,
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum CursorStyle {
+    Line,
+    Block,
+    Underline,
+}
+
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CatchUp {
     Off,
@@ -234,6 +249,27 @@ pub struct Settings {
     /// The file's path and the function the cursor is in, above the code.
     pub breadcrumbs: bool,
     pub format_on_save: bool,
+    /// Types and parameter names the language server infers, shown faintly in the code.
+    pub inlay_hints: bool,
+    /// Colours from the language server, which knows a parameter from a field.
+    pub semantic_highlighting: bool,
+    /// The first lines of the blocks the top of the view is in stay at the top.
+    pub sticky_scroll: bool,
+    pub sticky_lines: usize,
+    /// Faint vertical lines at each indentation step.
+    pub indent_guides: bool,
+    /// The bracket matching the one at the cursor is marked.
+    pub bracket_match: bool,
+    /// Brackets and quotes get their closing partner as they are typed.
+    pub auto_close: bool,
+    pub whitespace: Whitespace,
+    /// Columns to draw a faint vertical line at, such as "80, 120".
+    pub rulers: String,
+    pub cursor_style: CursorStyle,
+    /// The last line can be scrolled up to the top of the view.
+    pub scroll_past_end: bool,
+    /// Keyboard shortcuts changed from their defaults: command id to keys, "" for none.
+    pub keybindings: std::collections::BTreeMap<String, String>,
     /// Which program formats which files; run on the host, text in on stdin, out on stdout.
     pub formatters: Vec<Formatter>,
     /// Completion, problems, go to definition and the rest, from language servers.
@@ -290,6 +326,18 @@ impl Default for Settings {
             blame: true,
             breadcrumbs: true,
             format_on_save: false,
+            inlay_hints: true,
+            semantic_highlighting: true,
+            sticky_scroll: true,
+            sticky_lines: 5,
+            indent_guides: true,
+            bracket_match: true,
+            auto_close: true,
+            whitespace: Whitespace::Selection,
+            rulers: String::new(),
+            cursor_style: CursorStyle::Line,
+            scroll_past_end: true,
+            keybindings: Default::default(),
             formatters: default_formatters(),
             language_servers_on: true,
             language_servers: default_servers(),
@@ -367,7 +415,19 @@ fn sane(mut s: Settings) -> Settings {
     s.max_open_mb = s.max_open_mb.clamp(1, 200);
     s.scrollback = s.scrollback.clamp(100, 200_000);
     s.team_budget = s.team_budget.clamp(1, 500);
+    s.sticky_lines = s.sticky_lines.clamp(1, 10);
     s
+}
+
+/// The columns rulers are drawn at.
+pub fn rulers() -> Vec<usize> {
+    with(|s| {
+        s.rulers
+            .split([',', ' '])
+            .filter_map(|c| c.trim().parse().ok())
+            .filter(|&c| c > 0 && c < 1000)
+            .collect()
+    })
 }
 
 fn save(settings: &Settings) -> std::io::Result<()> {
@@ -385,7 +445,7 @@ pub fn chat_mode() -> chat::Mode {
     with(|s| chat::Mode::from_key(&s.chat_mode))
 }
 
-const SECTIONS: [&str; 8] = [
+const SECTIONS: [&str; 9] = [
     "Appearance",
     "Editor",
     "Files",
@@ -394,7 +454,71 @@ const SECTIONS: [&str; 8] = [
     "Connection",
     "Updates",
     "Account",
+    "Keyboard shortcuts",
 ];
+/// The section of the keyboard shortcuts.
+pub const SHORTCUTS: usize = 8;
+/// The order the sections are listed in.
+const ORDER: [usize; 9] = [0, 1, SHORTCUTS, 2, 3, 4, 5, 6, 7];
+
+thread_local! {
+    /// What the settings are searched for, the section whose title is still to be shown
+    /// above the first row that matches, and whether any row did.
+    static SEARCH: RefCell<(String, Option<&'static str>, bool)> =
+        RefCell::new((String::new(), None, false));
+}
+
+/// Whether the search matches any of `texts`: every word of it is in one of them.
+fn found(texts: &[&str]) -> bool {
+    SEARCH.with(|search| {
+        let query = search.borrow().0.to_lowercase();
+        let all = texts.join(" ").to_lowercase();
+        query.split_whitespace().all(|word| all.contains(word))
+    })
+}
+
+fn searching() -> bool {
+    SEARCH.with(|search| !search.borrow().0.trim().is_empty())
+}
+
+/// Shows the title of the section a matching row is in, before its first one.
+fn found_in_section(ui: &mut Ui) {
+    let title = SEARCH.with(|search| {
+        let mut search = search.borrow_mut();
+        search.2 = true;
+        search.1.take()
+    });
+    if let Some(title) = title {
+        ui.add_space(6.0);
+        ui.label(RichText::new(title).size(18.0).color(theme::STRONG()));
+        ui.add_space(10.0);
+    }
+}
+
+/// A part of the page other than a row (a list, a heading): shown when the search
+/// matches what it is about.
+fn part(ui: &mut Ui, about: &str) -> bool {
+    if !found(&[about]) {
+        return false;
+    }
+    found_in_section(ui);
+    true
+}
+
+/// A heading over a group of rows.
+fn heading(ui: &mut Ui, text: &str) {
+    if searching() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .small()
+            .strong()
+            .color(theme::COMMENT()),
+    );
+    ui.add_space(8.0);
+}
 const MODELS: [(&str, &str); 4] = [
     ("haiku", "Haiku"),
     ("sonnet", "Sonnet"),
@@ -404,6 +528,10 @@ const MODELS: [(&str, &str); 4] = [
 
 /// One row of the page: what the setting is, a line on what it does, and its control.
 fn row(ui: &mut Ui, title: &str, help: &str, control: impl FnOnce(&mut Ui)) {
+    if !found(&[title, help]) {
+        return;
+    }
+    found_in_section(ui);
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() - 300.0).max(160.0));
@@ -553,13 +681,17 @@ impl App {
                             .strong()
                             .color(theme::COMMENT()),
                     );
-                    ui.add_space(4.0);
-                    for (index, name) in SECTIONS.iter().enumerate() {
-                        let selected = self.settings_section == index;
+                    ui.add_space(6.0);
+                    self.settings_search_box(ui);
+                    ui.add_space(8.0);
+                    for index in ORDER {
+                        let name = &SECTIONS[index];
+                        let selected = self.settings_section == index && !searching();
                         let button = egui::Button::selectable(selected, *name)
                             .min_size(vec2(ui.available_width(), 0.0));
                         if ui.add(button).clicked() {
                             self.settings_section = index;
+                            SEARCH.with(|search| search.borrow_mut().0.clear());
                         }
                     }
                     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -578,12 +710,35 @@ impl App {
             }))
             .show(ui, |ui| {
                 ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.set_max_width(760.0);
+                    ui.set_max_width(if self.settings_section == SHORTCUTS {
+                        900.0
+                    } else {
+                        760.0
+                    });
+                    if width < 620.0 {
+                        self.settings_search_box(ui);
+                        ui.add_space(10.0);
+                    }
+                    if searching() {
+                        // Every section, each titled above its first row that matches.
+                        SEARCH.with(|search| search.borrow_mut().2 = false);
+                        for section in ORDER {
+                            SEARCH.with(|search| search.borrow_mut().1 = Some(SECTIONS[section]));
+                            self.settings_section_rows(ui, section, &mut s);
+                        }
+                        SEARCH.with(|search| search.borrow_mut().1 = None);
+                        if !SEARCH.with(|search| search.borrow().2) {
+                            ui.label(
+                                RichText::new("No setting matches that.").color(theme::COMMENT()),
+                            );
+                        }
+                        return;
+                    }
                     // On a narrow window all sections follow each other, as there is no list to pick from.
                     let shown: Vec<usize> = if width >= 620.0 {
                         vec![self.settings_section]
                     } else {
-                        (0..SECTIONS.len()).collect()
+                        ORDER.to_vec()
                     };
                     for section in shown {
                         ui.label(
@@ -607,8 +762,239 @@ impl App {
         }
     }
 
+    fn settings_search_box(&mut self, ui: &mut Ui) {
+        // RIDE_SETTINGS_SEARCH=TEXT searches the settings, to look at the result.
+        static ASKED: std::sync::Once = std::sync::Once::new();
+        ASKED.call_once(|| {
+            if let Ok(text) = std::env::var("RIDE_SETTINGS_SEARCH") {
+                SEARCH.with(|search| search.borrow_mut().0 = text);
+            }
+        });
+        let mut text = SEARCH.with(|search| search.borrow().0.clone());
+        let edit = chrome::field(ui, "settings_search", &mut text, "Search settings", 1);
+        if edit.changed() {
+            SEARCH.with(|search| search.borrow_mut().0 = text);
+        }
+    }
+
+    fn language_server_rows(&mut self, ui: &mut Ui, s: &mut Settings) {
+        ui.add_space(14.0);
+        row(
+                    ui,
+                    "Language servers",
+                    "Completion, problems, hover, go to definition (F12), references (Shift+F12), rename (F2) and quick fixes (Ctrl+.), from the same programs VS Code uses. They run on the host; ride offers to install one the first time a file needs it.",
+                    |ui| toggle(ui, &mut s.language_servers_on),
+                );
+        if !part(ui, "language servers lsp command install extensions") {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.label(
+                    RichText::new(
+                        "Name, file extensions, the command that starts it on the host (speaking LSP on stdin and stdout), and the one that installs it.",
+                    )
+                    .small()
+                    .color(theme::COMMENT()),
+                );
+        ui.add_space(6.0);
+        let mut remove = None;
+        for (index, server) in s.language_servers.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.name)
+                        .desired_width(90.0)
+                        .hint_text("name"),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.exts)
+                        .desired_width(120.0)
+                        .hint_text("extensions")
+                        .font(egui::TextStyle::Monospace),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.command)
+                        .desired_width((ui.available_width() - 40.0).max(120.0))
+                        .hint_text("command")
+                        .font(egui::TextStyle::Monospace),
+                );
+                if icon_button(ui, icons::CLOSE, "Remove") {
+                    remove = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(98.0);
+                ui.label(RichText::new("install").small().color(theme::COMMENT()));
+                ui.add(
+                    egui::TextEdit::singleline(&mut server.install)
+                        .desired_width((ui.available_width() - 40.0).max(120.0))
+                        .hint_text("command that installs it")
+                        .font(egui::TextStyle::Monospace),
+                );
+            });
+            ui.add_space(4.0);
+        }
+        if let Some(index) = remove {
+            s.language_servers.remove(index);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Add a language server").clicked() {
+                s.language_servers.push(LangServer::default());
+            }
+            if ui.button("Restore the defaults").clicked() {
+                s.language_servers = default_servers();
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    /// Every command with a shortcut: its keys, a way to change them, and the commands
+    /// that would clash.
+    fn shortcut_rows(&mut self, ui: &mut Ui, s: &mut Settings) {
+        let recording_id = ui.id().with("recording_shortcut");
+        let mut recording: Option<String> = ui.data(|d| d.get_temp(recording_id)).flatten();
+        // The keys pressed while one is being recorded become its shortcut; Escape alone
+        // gives up.
+        if let Some(id) = recording.clone() {
+            let pressed = ui.input_mut(|i| {
+                let found = i.events.iter().find_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some(keys::Combo::from_event(*key, *modifiers)),
+                    _ => None,
+                });
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
+                found
+            });
+            if let Some(combo) = pressed {
+                let plain_escape = combo.key == Key::Escape && !combo.ctrl && !combo.alt;
+                if !plain_escape {
+                    let default = keys::command(&id).map_or("", |c| c.default);
+                    let text = combo.to_string();
+                    if text == default {
+                        s.keybindings.remove(&id);
+                    } else {
+                        s.keybindings.insert(id.clone(), text);
+                    }
+                }
+                recording = None;
+            }
+        }
+        if !searching() {
+            ui.label(
+                RichText::new(
+                    "Click a shortcut, then press the keys you want for it. Escape gives up. Shortcuts in the editor work while it has the keyboard; the others anywhere but in a terminal, except those marked always.",
+                )
+                .small()
+                .color(theme::COMMENT()),
+            );
+            ui.add_space(10.0);
+        }
+        // The current settings, rather than the stored ones, decide what clashes.
+        let bindings = s.keybindings.clone();
+        let combo_of = |id: &str| match bindings.get(id) {
+            Some(text) => keys::Combo::parse(text),
+            None => keys::command(id).and_then(|c| keys::Combo::parse(c.default)),
+        };
+        for command in keys::COMMANDS {
+            let combo = combo_of(command.id);
+            let shown = combo.map(|c| c.to_string()).unwrap_or_default();
+            if !found(&[
+                command.label,
+                command.id,
+                &shown,
+                "keyboard shortcut keybinding",
+            ]) {
+                continue;
+            }
+            found_in_section(ui);
+            let changed = s.keybindings.contains_key(command.id);
+            let clashes: Vec<&str> = keys::COMMANDS
+                .iter()
+                .filter(|other| other.id != command.id && combo.is_some())
+                .filter(|other| combo_of(other.id) == combo)
+                .map(|other| other.label)
+                .collect();
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - 330.0).max(160.0));
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(command.label).color(theme::STRONG()));
+                    let mut note = match command.when {
+                        keys::When::Editor => "in the editor".to_string(),
+                        keys::When::Always => "always".to_string(),
+                        keys::When::Window => String::new(),
+                    };
+                    if !clashes.is_empty() {
+                        if !note.is_empty() {
+                            note.push_str(" Â· ");
+                        }
+                        note.push_str(&format!("same keys as {}", clashes.join(", ")));
+                    }
+                    let color = if clashes.is_empty() {
+                        theme::COMMENT()
+                    } else {
+                        theme::ANSI()[3]
+                    };
+                    ui.label(
+                        RichText::new(format!("{}  {note}", command.id))
+                            .small()
+                            .color(color),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if changed && icon_button(ui, icons::REFRESH, "Back to the default") {
+                        s.keybindings.remove(command.id);
+                    }
+                    if combo.is_some() && icon_button(ui, icons::CLOSE, "Remove the shortcut") {
+                        s.keybindings.insert(command.id.to_string(), String::new());
+                    }
+                    let waiting = recording.as_deref() == Some(command.id);
+                    let text = if waiting {
+                        "Press the keysâ€¦".to_string()
+                    } else if shown.is_empty() {
+                        "Not set".to_string()
+                    } else {
+                        shown.clone()
+                    };
+                    let mut chip = RichText::new(text).monospace();
+                    if waiting {
+                        chip = chip.color(theme::ACCENT());
+                    } else if shown.is_empty() {
+                        chip = chip.color(theme::COMMENT());
+                    } else if changed {
+                        chip = chip.color(theme::STRONG());
+                    }
+                    let button = egui::Button::new(chip)
+                        .min_size(vec2(150.0, 0.0))
+                        .selected(waiting);
+                    if ui.add(button).on_hover_text("Change the keys").clicked() {
+                        recording = if waiting {
+                            None
+                        } else {
+                            Some(command.id.to_string())
+                        };
+                    }
+                });
+            });
+            ui.add_space(6.0);
+        }
+        if !searching() {
+            ui.add_space(8.0);
+            if !s.keybindings.is_empty() && ui.button("Reset every shortcut").clicked() {
+                s.keybindings.clear();
+            }
+        }
+        keys::set_recording(recording.is_some());
+        ui.data_mut(|d| d.insert_temp(recording_id, recording));
+    }
+
     fn settings_section_rows(&mut self, ui: &mut Ui, section: usize, s: &mut Settings) {
         match section {
+            SHORTCUTS => self.shortcut_rows(ui, s),
             0 => {
                 row(
                     ui,
@@ -654,6 +1040,7 @@ impl App {
                 );
             }
             1 => {
+                heading(ui, "Typing");
                 row(
                     ui,
                     "Tab width",
@@ -680,6 +1067,13 @@ impl App {
                     "A new line starts at the indentation of the one before.",
                     |ui| toggle(ui, &mut s.auto_indent),
                 );
+                row(
+                    ui,
+                    "Close brackets and quotes",
+                    "Typing ( [ { \" ' or ` adds its partner after the cursor; typing the partner steps over it, and Backspace between the two takes both. An opening one typed over a selection wraps it.",
+                    |ui| toggle(ui, &mut s.auto_close),
+                );
+                heading(ui, "Display");
                 row(ui, "Line numbers", "Show them beside the code.", |ui| {
                     toggle(ui, &mut s.line_numbers)
                 });
@@ -695,6 +1089,81 @@ impl App {
                     "Off keeps the cursor steady.",
                     |ui| toggle(ui, &mut s.cursor_blink),
                 );
+                row(ui, "Cursor style", "How the cursor is drawn.", |ui| {
+                    pick(
+                        ui,
+                        "cursor_style",
+                        &mut s.cursor_style,
+                        &[
+                            (CursorStyle::Line, "Line"),
+                            (CursorStyle::Block, "Block"),
+                            (CursorStyle::Underline, "Underline"),
+                        ],
+                    );
+                });
+                row(
+                    ui,
+                    "Sticky scroll",
+                    "The first lines of the functions and blocks the top of the view is inside stay pinned above the code. Click one to go to it.",
+                    |ui| toggle(ui, &mut s.sticky_scroll),
+                );
+                row(
+                    ui,
+                    "Sticky scroll lines",
+                    "At most this many lines stay pinned.",
+                    |ui| {
+                        ui.add(egui::Slider::new(&mut s.sticky_lines, 1..=10));
+                    },
+                );
+                row(
+                    ui,
+                    "Indent guides",
+                    "Faint vertical lines at each indentation step; the block the cursor is in is a shade brighter.",
+                    |ui| toggle(ui, &mut s.indent_guides),
+                );
+                row(
+                    ui,
+                    "Matching brackets",
+                    "Marks the bracket that pairs with the one at the cursor.",
+                    |ui| toggle(ui, &mut s.bracket_match),
+                );
+                row(
+                    ui,
+                    "Show whitespace",
+                    "Faint dots for spaces and arrows for tabs.",
+                    |ui| {
+                        pick(
+                            ui,
+                            "whitespace",
+                            &mut s.whitespace,
+                            &[
+                                (Whitespace::None, "Never"),
+                                (Whitespace::Selection, "In the selection"),
+                                (Whitespace::All, "Everywhere"),
+                            ],
+                        );
+                    },
+                );
+                row(
+                    ui,
+                    "Rulers",
+                    "Columns to draw a faint vertical line at, such as 80, 120. Empty for none.",
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut s.rulers)
+                                .desired_width(170.0)
+                                .hint_text("80, 120")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                    },
+                );
+                row(
+                    ui,
+                    "Scroll past the last line",
+                    "The last line can be scrolled up to the top of the view.",
+                    |ui| toggle(ui, &mut s.scroll_past_end),
+                );
+                heading(ui, "Saving");
                 row(
                     ui,
                     "Trim trailing spaces on save",
@@ -743,12 +1212,28 @@ impl App {
                     "The file's folders and the function you are in, above the code. Click one to jump.",
                     |ui| toggle(ui, &mut s.breadcrumbs),
                 );
+                heading(ui, "Language features");
+                row(
+                    ui,
+                    "Inlay hints",
+                    "Types and parameter names the language server works out, shown faintly in the code. They aren't part of the text.",
+                    |ui| toggle(ui, &mut s.inlay_hints),
+                );
+                row(
+                    ui,
+                    "Semantic highlighting",
+                    "Colours from the language server, on top of the usual ones: it knows a parameter from a local, a field, a constant or a type.",
+                    |ui| toggle(ui, &mut s.semantic_highlighting),
+                );
                 row(
                     ui,
                     "Format on save",
                     "Runs the file's formatter before saving. Shift+Alt+F formats without saving.",
                     |ui| toggle(ui, &mut s.format_on_save),
                 );
+                if !part(ui, "formatters formatter prettier rustfmt black") {
+                    return self.language_server_rows(ui, s);
+                }
                 ui.add_space(4.0);
                 ui.label(RichText::new("Formatters").color(theme::STRONG()));
                 ui.label(
@@ -790,70 +1275,7 @@ impl App {
                         s.formatters = default_formatters();
                     }
                 });
-                ui.add_space(14.0);
-                row(
-                    ui,
-                    "Language servers",
-                    "Completion, problems, hover, go to definition (F12), references (Shift+F12), rename (F2) and quick fixes (Ctrl+.), from the same programs VS Code uses. They run on the host; ride offers to install one the first time a file needs it.",
-                    |ui| toggle(ui, &mut s.language_servers_on),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "Name, file extensions, the command that starts it on the host (speaking LSP on stdin and stdout), and the one that installs it.",
-                    )
-                    .small()
-                    .color(theme::COMMENT()),
-                );
-                ui.add_space(6.0);
-                let mut remove = None;
-                for (index, server) in s.language_servers.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut server.name)
-                                .desired_width(90.0)
-                                .hint_text("name"),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut server.exts)
-                                .desired_width(120.0)
-                                .hint_text("extensions")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut server.command)
-                                .desired_width((ui.available_width() - 40.0).max(120.0))
-                                .hint_text("command")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if icon_button(ui, icons::CLOSE, "Remove") {
-                            remove = Some(index);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(98.0);
-                        ui.label(RichText::new("install").small().color(theme::COMMENT()));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut server.install)
-                                .desired_width((ui.available_width() - 40.0).max(120.0))
-                                .hint_text("command that installs it")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                    });
-                    ui.add_space(4.0);
-                }
-                if let Some(index) = remove {
-                    s.language_servers.remove(index);
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Add a language server").clicked() {
-                        s.language_servers.push(LangServer::default());
-                    }
-                    if ui.button("Restore the defaults").clicked() {
-                        s.language_servers = default_servers();
-                    }
-                });
-                ui.add_space(10.0);
+                self.language_server_rows(ui, s);
             }
             2 => {
                 row(
@@ -965,6 +1387,9 @@ impl App {
                     },
                 );
                 row(ui, "Notifications", "A Windows notification when Claude or an agent finishes while ride is in the background.", |ui| toggle(ui, &mut s.notifications));
+                if !part(ui, "mcp servers tribib tools") {
+                    return;
+                }
                 ui.add_space(14.0);
                 ui.label(RichText::new("MCP servers").color(theme::STRONG()));
                 ui.label(
@@ -1015,6 +1440,14 @@ impl App {
                 });
             }
             7 => {
+                if searching()
+                    && !part(
+                        ui,
+                        "account github sign in nickname live editing together cursor",
+                    )
+                {
+                    return;
+                }
                 let mut live = s.live_editing;
                 let mut nickname = s.nickname.clone();
                 self.account_rows(ui, &mut live, &mut nickname);

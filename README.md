@@ -65,6 +65,13 @@ There is no API key to paste into ride.
   across files (F2) and quick fixes (Ctrl+.). TypeScript/JavaScript, Python, Lua, Rust, Go,
   C/C++, PHP, JSON, CSS, HTML, Bash and YAML are set up; ride offers to install a server the
   first time a file needs one, and you can add others in Settings.
+- Inlay hints (the types and parameter names the server works out, faintly in the code) and
+  semantic highlighting (a parameter, a field, a constant and a type each in their own colour).
+- Sticky scroll: the first lines of the function and blocks you're scrolled into stay pinned
+  above the code.
+- Indent guides, matching brackets, rulers, visible whitespace, and brackets and quotes that
+  close themselves.
+- Every keyboard shortcut can be changed in Settings, which also has a search box.
 - Search and replace in the whole folder (Ctrl+Shift+F, Ctrl+Shift+H), with regular
   expressions, a preview of each change, and files left out with a click.
 - Split the editor into columns and rows by dragging a tab to the edge of another pane.

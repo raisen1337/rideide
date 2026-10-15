@@ -35,6 +35,13 @@ enum Command {
     UnfoldAll,
     ToggleMinimap,
     ToggleBreadcrumbs,
+    ToggleInlayHints,
+    ToggleStickyScroll,
+    ToggleSemantic,
+    /// Opens Settings at the keyboard shortcuts.
+    Shortcuts,
+    /// The palette with `:` typed, for a line number.
+    AskLine,
     /// Lists the open file's symbols (the palette with `@`).
     GoToSymbol,
     GoToLine(usize),
@@ -55,7 +62,7 @@ struct Entry {
     icon_color: Color32,
     /// "Group: what it does"; the group is shown dimmed.
     label: String,
-    keys: &'static str,
+    keys: String,
     /// A dim note at the right, for Marketplace results.
     detail: String,
     command: Command,
@@ -139,7 +146,8 @@ impl App {
     /// Every command that makes sense right now.
     fn commands(&self) -> Vec<Entry> {
         let mut list: Vec<Entry> = Vec::new();
-        let mut add = |icon: char, label: &str, keys: &'static str, command: Command| {
+        // `keys` names the command's shortcut, as Settings â†’ Keyboard shortcuts has it.
+        let mut add = |icon: char, label: &str, keys: &str, command: Command| {
             let icon_color = if label.starts_with("Claude") {
                 theme::CLAUDE()
             } else {
@@ -149,52 +157,62 @@ impl App {
                 icon,
                 icon_color,
                 label: label.to_string(),
-                keys,
+                keys: crate::keys::shown(keys),
                 detail: String::new(),
                 command,
             });
         };
         let online = self.online();
         if online {
-            add(icons::SEARCH, "Go to file…", "Ctrl+P", Command::GoToFile);
+            add(
+                icons::SEARCH,
+                "Go to file…",
+                "palette.files",
+                Command::GoToFile,
+            );
         }
         if self.docked_active().is_some() {
-            add(icons::SAVE, "File: Save", "Ctrl+S", Command::Save);
-            add(icons::CLOSE, "File: Close tab", "Ctrl+W", Command::CloseTab);
+            add(icons::SAVE, "File: Save", "file.save", Command::Save);
+            add(
+                icons::CLOSE,
+                "File: Close tab",
+                "file.close",
+                Command::CloseTab,
+            );
             add(
                 icons::SEARCH,
                 "Editor: Find in file",
-                "Ctrl+F",
+                "editor.find",
                 Command::Find,
             );
             add(
                 icons::SPARKLE,
                 "Claude: Edit selection",
-                "Ctrl+K",
+                "editor.inlineEdit",
                 Command::InlineEdit,
             );
             add(
                 icons::EDIT,
                 "Editor: Format document",
-                "Shift+Alt+F",
+                "editor.format",
                 Command::FormatDocument,
             );
             add(
                 icons::METHOD,
                 "Go to symbol in file…",
-                "Ctrl+Shift+O",
+                "palette.symbols",
                 Command::GoToSymbol,
             );
             add(
                 icons::CHEVRON_RIGHT,
                 "Editor: Fold all",
-                "",
+                "editor.foldAll",
                 Command::FoldAll,
             );
             add(
                 icons::CHEVRON_DOWN,
                 "Editor: Unfold all",
-                "",
+                "editor.unfoldAll",
                 Command::UnfoldAll,
             );
             if online {
@@ -218,7 +236,7 @@ impl App {
         add(
             icons::EYE,
             &format!("View: Turn the minimap {}", on_off(minimap)),
-            "",
+            "view.minimap",
             Command::ToggleMinimap,
         );
         add(
@@ -231,7 +249,7 @@ impl App {
             add(
                 icons::SEARCH,
                 "Search: Search in folder",
-                "Ctrl+Shift+F",
+                "search.folder",
                 Command::SearchFolder,
             );
             add(icons::CODE, "View: Code", "", Command::ViewCode);
@@ -239,19 +257,19 @@ impl App {
             add(
                 icons::FILES,
                 "View: Toggle files panel",
-                "",
+                "view.files",
                 Command::ToggleFiles,
             );
             add(
                 icons::TERMINAL,
                 "View: Toggle terminal",
-                "Ctrl+`",
+                "view.terminal",
                 Command::ToggleTerminal,
             );
             add(
                 icons::SPARKLE,
                 "View: Toggle Claude chat",
-                "",
+                "view.chat",
                 Command::ToggleChat,
             );
             add(
@@ -263,10 +281,10 @@ impl App {
             add(
                 icons::TERMINAL,
                 "Terminal: New terminal",
-                "",
+                "terminal.new",
                 Command::NewTerminal,
             );
-            add(icons::ADD, "Claude: New chat", "", Command::NewChat);
+            add(icons::ADD, "Claude: New chat", "chat.new", Command::NewChat);
             add(
                 icons::COMMIT,
                 "Claude: Write a commit message",
@@ -322,10 +340,44 @@ impl App {
             "",
             Command::ToggleGlass,
         );
+        let (hints, sticky, semantic) =
+            settings::with(|s| (s.inlay_hints, s.sticky_scroll, s.semantic_highlighting));
+        add(
+            icons::EYE,
+            &format!("Editor: Turn inlay hints {}", on_off(hints)),
+            "editor.inlayHints",
+            Command::ToggleInlayHints,
+        );
+        add(
+            icons::EYE,
+            &format!("View: Turn sticky scroll {}", on_off(sticky)),
+            "view.stickyScroll",
+            Command::ToggleStickyScroll,
+        );
+        add(
+            icons::PALETTE,
+            &format!("Editor: Turn semantic highlighting {}", on_off(semantic)),
+            "",
+            Command::ToggleSemantic,
+        );
+        if self.docked_active().is_some() {
+            add(
+                icons::CHEVRON_RIGHT,
+                "Go to lineâ€¦",
+                "palette.line",
+                Command::AskLine,
+            );
+        }
+        add(
+            icons::GEAR,
+            "Preferences: Keyboard shortcuts",
+            "view.shortcuts",
+            Command::Shortcuts,
+        );
         add(
             icons::GEAR,
             "Settings: Open settings",
-            "Ctrl+,",
+            "view.settings",
             Command::Settings,
         );
         add(
@@ -429,6 +481,16 @@ impl App {
             }
             Command::ToggleMinimap => settings::change(|s| s.minimap = !s.minimap),
             Command::ToggleBreadcrumbs => settings::change(|s| s.breadcrumbs = !s.breadcrumbs),
+            Command::ToggleInlayHints => settings::change(|s| s.inlay_hints = !s.inlay_hints),
+            Command::ToggleStickyScroll => settings::change(|s| s.sticky_scroll = !s.sticky_scroll),
+            Command::ToggleSemantic => {
+                settings::change(|s| s.semantic_highlighting = !s.semantic_highlighting)
+            }
+            Command::Shortcuts => {
+                self.view = View::Settings;
+                self.settings_section = settings::SHORTCUTS;
+            }
+            Command::AskLine => return self.open_palette_with(":"),
             Command::FoldAll | Command::UnfoldAll => {
                 if let Some(index) = self.docked_active() {
                     let view = &mut self.tabs[index].view;
@@ -488,6 +550,38 @@ impl App {
         self.preview_theme(ctx, None);
     }
 
+    /// With `:` typed first, the line whose number follows.
+    fn line_entries(&self) -> Option<Vec<Entry>> {
+        let wanted = self.palette.query.strip_prefix(':')?;
+        if self.palette.files_mode {
+            return None;
+        }
+        let index = self.docked_active()?;
+        let count = self.tabs[index].buf.line_count();
+        let entry = match wanted.trim().parse::<usize>() {
+            Ok(line) if line >= 1 => {
+                let line = line.min(count);
+                Entry {
+                    icon: icons::CHEVRON_RIGHT,
+                    icon_color: theme::COMMENT(),
+                    label: format!("Go to line {line}"),
+                    keys: String::new(),
+                    detail: format!("of {count}"),
+                    command: Command::GoToLine(line - 1),
+                }
+            }
+            _ => Entry {
+                icon: icons::CHEVRON_RIGHT,
+                icon_color: theme::COMMENT(),
+                label: format!("Type a line number, 1 to {count}"),
+                keys: String::new(),
+                detail: String::new(),
+                command: Command::AskLine,
+            },
+        };
+        Some(vec![entry])
+    }
+
     /// With `@` typed first, the open file's functions and types, narrowed by what
     /// follows; otherwise `None`.
     fn symbol_entries(&self) -> Option<Vec<Entry>> {
@@ -517,7 +611,7 @@ impl App {
                     icon,
                     icon_color,
                     label: s.name.clone(),
-                    keys: "",
+                    keys: String::new(),
                     detail: format!("line {}", s.line + 1),
                     command: Command::GoToLine(s.line),
                 }
@@ -605,7 +699,7 @@ impl App {
                     },
                     icon_color: theme::COMMENT(),
                     label: format!("Marketplace: {}", hit.name),
-                    keys: "",
+                    keys: String::new(),
                     detail,
                     command: Command::InstallExtension(hit.id.clone(), hit.icons),
                 }
@@ -630,7 +724,9 @@ impl App {
             self.request_then(request, Pending::PaletteFiles { query });
         }
 
-        let entries: Vec<Entry> = if let Some(found) = self.symbol_entries() {
+        let entries: Vec<Entry> = if let Some(found) = self.line_entries() {
+            found
+        } else if let Some(found) = self.symbol_entries() {
             found
         } else if self.palette.files_mode {
             let root = self.root.clone();
@@ -643,7 +739,7 @@ impl App {
                         icon,
                         icon_color,
                         label: file.clone(),
-                        keys: "",
+                        keys: String::new(),
                         detail: String::new(),
                         command: match self.palette.compare {
                             Some(_) => Command::Compare(join(&root, file)),
