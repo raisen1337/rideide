@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.2
+
+- Clicking the box in the middle of the title bar opens the file finder again. The click that opened it was also taken as a click outside it, so it closed in the same moment and only flickered.
+
 ## 0.9.1
 
 - **Glass looks like glass.** The window used Windows' own acrylic, a pale, thin material that turned milky over anything bright and went flat whenever ride wasn't the active window, so lowering the opacity only made it whiter. It now has a frosted blur of its own, tinted with the theme's background: what is behind shows through as soft colour, the panes stay dark on a dark theme, and it stays blurred when another window has the focus.

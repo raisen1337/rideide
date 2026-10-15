@@ -94,6 +94,9 @@ pub(super) struct Palette {
     resting: (usize, f64),
     /// A row to highlight once the list is that long (RIDE_PALETTE_ROW).
     want_row: Option<usize>,
+    /// Opened since it was last drawn. The click that opened it (on the title bar's box)
+    /// is then still this frame's click, and mustn't count as a click outside it.
+    just_opened: bool,
     /// Picking the file to compare this one with, rather than one to open.
     compare: Option<String>,
     /// Searching the Marketplace, rather than picking a command.
@@ -106,6 +109,7 @@ impl App {
             open: true,
             files_mode,
             focus: true,
+            just_opened: true,
             ..Palette::default()
         };
     }
@@ -863,7 +867,9 @@ impl App {
                 .map(|entry| entry.command.clone())
                 .or(run);
         }
-        let clicked_away = ctx.input(|i| i.pointer.primary_clicked())
+        let just_opened = std::mem::take(&mut self.palette.just_opened);
+        let clicked_away = !just_opened
+            && ctx.input(|i| i.pointer.primary_clicked())
             && ctx
                 .input(|i| i.pointer.interact_pos())
                 .is_some_and(|p| !area.rect.contains(p));
