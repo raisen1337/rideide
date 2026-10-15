@@ -614,14 +614,24 @@ fn tool_icon(name: &str) -> char {
     }
 }
 
+/// Shell to run before `claude` on a Linux or macOS host, so it is found wherever it was
+/// installed. Commands there run in a login shell, which doesn't read the part of
+/// `~/.bashrc` that nvm and Claude Code's installer add themselves to (it stops early
+/// for shells that aren't interactive), so `claude` works in the terminal but wasn't
+/// found from ride. The usual places are added after the PATH the host already has.
+pub const FIND_CLAUDE: &str = "export PATH=\"$PATH:$HOME/.local/bin:$HOME/.claude/local:\
+    $HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.volta/bin:/usr/local/bin\"; \
+    for d in \"$HOME\"/.nvm/versions/node/*/bin \"$HOME\"/.local/share/fnm/aliases/default/bin; \
+    do [ -d \"$d\" ] && PATH=\"$PATH:$d\"; done; ";
+
 impl Chat {
     /// How the process is started, apart from the session. A change means a restart.
     pub fn config(&self) -> String {
         // Claude Code keeps what files looked like before each message only when asked to.
         let checkpoints = if local_shell() {
-            "$env:CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING='true'; "
+            "$env:CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING='true'; ".to_string()
         } else {
-            "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true exec "
+            format!("{FIND_CLAUDE}CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true exec ")
         };
         // `--permission-prompt-tool stdio` makes it ask here before doing what its mode
         // doesn't allow outright; `--replay-user-messages` tells the id of each message.
@@ -1724,7 +1734,8 @@ impl Chat {
             return;
         }
         let text = if code == Some(127) || stderr.contains("command not found") {
-            "Claude Code isn't installed on this host. Install it there, then try again."
+            "Claude Code wasn't found on this host (looked on the PATH and in ~/.local/bin, nvm, \
+             npm, bun and volta). Install it there, then try again."
                 .to_string()
         } else if stderr.trim().is_empty() {
             format!("claude exited unexpectedly (code {code:?})")

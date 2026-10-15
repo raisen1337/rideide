@@ -172,8 +172,13 @@ impl App {
             return;
         }
         // Default permission mode: it can read and search, but not change anything.
+        let find = if chat::local_shell() {
+            ""
+        } else {
+            chat::FIND_CLAUDE
+        };
         let command = format!(
-            "exec claude -p --input-format stream-json --output-format stream-json --verbose \
+            "{find}exec claude -p --input-format stream-json --output-format stream-json --verbose \
              --permission-mode default --model {model}{partial}"
         );
         let proc = self.request(Request::ProcOpen {

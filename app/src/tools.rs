@@ -678,11 +678,12 @@ impl App {
             .map(|line| format!("'{}'", line.replace('\'', "'\\''")))
             .collect();
         let command = format!(
-            "r=$HOME/.cache/ride; [ -f $r/mcp-v1 ] || {{ command -v claude >/dev/null 2>&1 && [ -x $r/ride-agent ] \
+            "{}r=$HOME/.cache/ride; [ -f $r/mcp-v1 ] || {{ command -v claude >/dev/null 2>&1 && [ -x $r/ride-agent ] \
              && {{ claude mcp get ride >/dev/null 2>&1 || claude mcp add --scope user ride -- $r/ride-agent mcp >/dev/null 2>&1; }} \
              && mkdir -p $HOME/.claude \
              && {{ grep -q 'Previews and demos (ride)' $HOME/.claude/CLAUDE.md 2>/dev/null || printf '%s\\n' '' {} >> $HOME/.claude/CLAUDE.md; }} \
              && touch $r/mcp-v1; }}",
+            chat::FIND_CLAUDE,
             note.join(" ")
         );
         self.start_shell_job(JobKind::Quiet, command);

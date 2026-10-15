@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.3
+
+- Chat and Agents find Claude Code on Linux and macOS hosts where it works in the terminal but ride said it wasn't installed. ride starts it through a login shell, which skips the part of `~/.bashrc` where nvm and Claude Code's installer put themselves on the PATH; it now also looks in `~/.local/bin`, nvm's and fnm's Node versions, and npm's, bun's and volta's folders.
+
 ## 0.9.2
 
 - Clicking the box in the middle of the title bar opens the file finder again. The click that opened it was also taken as a click outside it, so it closed in the same moment and only flickered.
