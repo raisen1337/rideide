@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.8.2
+
+- Tribib fills its place in the Designer to the edge: the strip it left at its sides and bottom is gone.
+- The document list above Tribib, and any other list or menu, opens in front of it: Tribib steps aside while one is open.
+
 ## 0.8.1
 
 - **Tribib inside ride.** The Designer now holds the Tribib app itself in its middle: your projects, the canvas, every tool, used right there as in Tribib. The chat with Claude is at the right, the design sessions at the left. Open Tribib (or have it open) and it moves in; the button at the top right of it gives it its own window back, and "Bring Tribib in" takes it in again.

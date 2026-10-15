@@ -639,7 +639,10 @@ impl App {
         ui.advance_cursor_after_rect(area);
         let parent = self.ride_window;
         // What lies over the middle hides Tribib: it would cover a dialog or the palette.
-        let covered = self.dialog.is_some() || self.palette.open;
+        // A list or menu of ride's that is open (the document list above, a chat menu)
+        // would open behind it too.
+        let menu_open = egui::Popup::is_any_open(ui.ctx());
+        let covered = self.dialog.is_some() || self.palette.open || menu_open;
         if !self.embed_off {
             if let Some(parent) = parent {
                 let gone = self

@@ -45,6 +45,14 @@ mod imp {
             flags: u32,
         ) -> i32;
         fn GetClassNameW(window: isize, name: *mut u16, size: i32) -> i32;
+        fn GetClientRect(window: isize, rect: *mut Rect) -> i32;
+        fn ClientToScreen(window: isize, point: *mut [i32; 2]) -> i32;
+        fn SetWindowRgn(window: isize, region: isize, redraw: i32) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
     }
 
     #[link(name = "kernel32")]
@@ -191,23 +199,51 @@ mod imp {
         }
     }
 
+    /// How far in from its window's edges the part a window draws begins, on each side.
+    /// A frameless app keeps an invisible border it doesn't draw, even as a child.
+    fn insets(window: isize) -> Rect {
+        // SAFETY: the calls write only into the structs given.
+        unsafe {
+            let (mut outer, mut client) = (Rect::default(), Rect::default());
+            GetWindowRect(window, &mut outer);
+            GetClientRect(window, &mut client);
+            let mut corner = [0i32, 0];
+            ClientToScreen(window, &mut corner);
+            Rect {
+                left: corner[0] - outer.left,
+                top: corner[1] - outer.top,
+                right: outer.right - (corner[0] + client.right),
+                bottom: outer.bottom - (corner[1] + client.bottom),
+            }
+        }
+    }
+
     /// Where the held window is, in its parent's client pixels; hidden with `show` false.
+    /// What it draws fills the place exactly: its undrawn border lies outside, cut off.
     pub fn place(held: &Held, x: i32, y: i32, w: i32, h: i32, show: bool) {
-        // SAFETY: the calls keep no pointers.
+        // SAFETY: the calls keep no pointers; the region is handed over to the system.
         unsafe {
             if !show {
                 ShowWindow(held.window, SW_HIDE);
                 return;
             }
-            SetWindowPos(
-                held.window,
-                0,
-                x,
-                y,
-                w.max(1),
-                h.max(1),
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+            let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+            SetWindowPos(held.window, 0, x, y, w.max(1), h.max(1), flags);
+            let edge = insets(held.window);
+            if edge != Rect::default()
+                && edge.left.max(edge.top).max(edge.right).max(edge.bottom) < 40
+            {
+                let (w2, h2) = (
+                    w.max(1) + edge.left + edge.right,
+                    h.max(1) + edge.top + edge.bottom,
+                );
+                SetWindowPos(held.window, 0, x - edge.left, y - edge.top, w2, h2, flags);
+                // Only the drawn part shows; the border would lie over ride's panels.
+                let region = CreateRectRgn(edge.left, edge.top, w2 - edge.right, h2 - edge.bottom);
+                if region != 0 {
+                    SetWindowRgn(held.window, region, 1);
+                }
+            }
         }
     }
 
@@ -225,6 +261,7 @@ mod imp {
                 *HELD.lock().unwrap() = None;
                 return;
             }
+            SetWindowRgn(held.window, 0, 1);
             SetParent(held.window, 0);
             SetWindowLongPtrW(held.window, GWL_STYLE, held.style);
             SetWindowLongPtrW(held.window, GWL_EXSTYLE, held.exstyle);
