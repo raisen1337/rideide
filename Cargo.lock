@@ -2602,6 +2602,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4090,16 +4100,18 @@ dependencies = [
 
 [[package]]
 name = "rdrop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "flate2",
  "image",
+ "md-5",
  "raw-window-handle",
  "resvg",
  "rodio",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "winresource",
 ]
@@ -4267,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.10"
+version = "0.9.11"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4297,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.13"
+version = "0.9.14"
 dependencies = [
  "flate2",
  "ignore",
@@ -4310,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.13"
+version = "0.9.14"
 dependencies = [
  "postcard",
  "serde",
@@ -4347,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.13"
+version = "0.9.14"
 dependencies = [
  "eframe",
  "flate2",

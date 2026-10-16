@@ -1834,9 +1834,17 @@ impl App {
         let flag = |name: &str| {
             std::env::args().find_map(|arg| arg.strip_prefix(name).map(str::to_string))
         };
+        // `--open=FILE` with it opens that file there (rdrop's "Edit in ride"); its folder is
+        // the root when no `--root=` says otherwise.
         if let Some(host) = flag("--host=").filter(|h| !h.trim().is_empty()) {
-            if let Some(root) = flag("--root=") {
+            let file = flag("--open=").filter(|f| !f.trim().is_empty());
+            if let Some(root) =
+                flag("--root=").or_else(|| file.as_deref().map(|f| parent(f).to_string()))
+            {
                 app.saved = Some((host.clone(), root));
+            }
+            if file.is_some() {
+                app.open_on_connect = file;
             }
             app.host = host;
             app.view = View::Code;

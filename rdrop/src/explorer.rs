@@ -40,6 +40,15 @@ pub(super) struct Props {
     pub item: Item,
     pub mode: u32,
     pub octal: String,
+    /// Owner and group by name, and where a link points, asked of the server's shell.
+    pub owner: String,
+    pub group: String,
+    pub owner_was: String,
+    pub group_was: String,
+    pub target: String,
+    pub details: Option<std::sync::mpsc::Receiver<(String, String, String)>>,
+    /// Changes go to everything inside a folder too.
+    pub recursive: bool,
 }
 
 impl App {
@@ -60,6 +69,8 @@ impl App {
             || self.preview.is_some()
             || self.props.is_some()
             || self.renaming.is_some()
+            || self.compare.is_some()
+            || self.palette.is_some()
             || typing(ctx)
         {
             return;
@@ -95,6 +106,11 @@ impl App {
         if pressed(Key::N, ctrl_shift) || pressed(Key::F7, Modifiers::NONE) {
             self.new_folder(id);
         }
+        if pressed(Key::E, ctrl) {
+            if let Some(name) = names.first() {
+                self.open_in_ride(id, name);
+            }
+        }
         if pressed(Key::F2, Modifiers::NONE) {
             if let Some(name) = names.first() {
                 self.start_rename(id, name);
@@ -110,7 +126,16 @@ impl App {
                 self.open_props(id, name);
             }
         }
-        if pressed(Key::Backspace, Modifiers::NONE) || pressed(Key::ArrowUp, Modifiers::ALT) {
+        let searching = self.pane(id).is_some_and(|p| p.search.is_some());
+        if pressed(Key::F, ctrl) || pressed(Key::F3, Modifiers::NONE) {
+            if let Some(p) = self.pane_mut(id) {
+                p.focus_search = true;
+            }
+        }
+        if searching && pressed(Key::Backspace, Modifiers::NONE) {
+            self.end_search(id);
+        } else if pressed(Key::Backspace, Modifiers::NONE) || pressed(Key::ArrowUp, Modifiers::ALT)
+        {
             if let Some(up) = up {
                 self.go(id, up);
             }
@@ -199,9 +224,60 @@ impl App {
             }
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if let Some(p) = self.pane_mut(id) {
+            let searching = self
+                .pane(id)
+                .is_some_and(|p| p.search.is_some() && p.selected.is_empty());
+            if searching {
+                self.end_search(id);
+            } else if let Some(p) = self.pane_mut(id) {
                 p.selected.clear();
             }
+        }
+    }
+
+    /// Opens an item in ride, where it is: a file here or on a server to edit (saving
+    /// writes it straight back), a folder as ride's folder. ride reaches servers by their
+    /// name in the SSH config, so saved sites can't go to it.
+    pub(super) fn open_in_ride(&mut self, id: u64, name: &str) {
+        let Some(pane) = self.pane(id) else { return };
+        let Some(item) = pane.items.iter().find(|i| i.name == name) else {
+            return;
+        };
+        let path = pane.child(name);
+        let mut args: Vec<String> = Vec::new();
+        match &pane.place {
+            Some(Place::Local) => args.push(path.clone()),
+            Some(Place::Server(host)) if host.starts_with("site:") => {
+                self.status = "ride connects to servers in your SSH config; add this one there to edit in ride".into();
+                return;
+            }
+            Some(Place::Server(host)) => {
+                args.push(format!("--host={host}"));
+                if item.is_dir {
+                    args.push(format!("--root={path}"));
+                } else {
+                    args.push(format!("--root={}", pane.path));
+                    args.push(format!("--open={path}"));
+                }
+            }
+            None => return,
+        }
+        // ride sits beside rdrop once installed; otherwise Windows finds it by its App Path.
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("ride.exe")))
+            .filter(|p| p.exists());
+        let started = match beside {
+            Some(exe) => std::process::Command::new(exe)
+                .args(&args)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            None => winshell::start("ride", &args),
+        };
+        match started {
+            Ok(()) => self.note = format!("Opened {name} in ride"),
+            Err(e) => self.status = format!("ride couldn't be started: {e}"),
         }
     }
 
@@ -676,17 +752,58 @@ impl App {
             return;
         };
         let mode = item.perms.unwrap_or(0) & 0o7777;
+        // Owner, group and a link's target need the server's shell: asked on the side.
+        let details = match &pane.place {
+            Some(Place::Server(host)) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (host, path, repaint) = (host.clone(), pane.child(name), self.ctx.clone());
+                std::thread::spawn(move || {
+                    let q = sftp::quote(&path);
+                    let script = format!("stat -c '%U\t%G' -- {q}; readlink -- {q}; true");
+                    if let Some(out) = sftp::run(&host, &script) {
+                        let mut lines = out.lines();
+                        let (owner, group) = lines
+                            .next()
+                            .and_then(|l| l.split_once('\t'))
+                            .map(|(o, g)| (o.to_string(), g.to_string()))
+                            .unwrap_or_default();
+                        let target = lines.next().unwrap_or("").to_string();
+                        let _ = tx.send((owner, group, target));
+                        repaint.request_repaint();
+                    }
+                });
+                Some(rx)
+            }
+            _ => None,
+        };
         self.props = Some(Props {
             pane: id,
             name: name.to_string(),
             item,
             mode,
             octal: format!("{mode:03o}"),
+            owner: String::new(),
+            group: String::new(),
+            owner_was: String::new(),
+            group_was: String::new(),
+            target: String::new(),
+            details,
+            recursive: false,
         });
     }
 
     pub(super) fn props_dialog(&mut self, ctx: &Context) {
         let Some(props) = &mut self.props else { return };
+        if let Some((owner, group, target)) =
+            props.details.as_ref().and_then(|rx| rx.try_recv().ok())
+        {
+            props.details = None;
+            props.owner_was = owner.clone();
+            props.group_was = group.clone();
+            props.owner = owner;
+            props.group = group;
+            props.target = target;
+        }
         let remote = self
             .panes
             .iter()
@@ -707,7 +824,14 @@ impl App {
             .unwrap_or_default();
         let offset = self.offset;
         let original = props.item.perms.unwrap_or(0) & 0o7777;
-        let can = remote && props.item.perms.is_some() && props.mode != original;
+        let owned = !props.owner_was.is_empty();
+        let ownership_changed = owned
+            && !props.owner.trim().is_empty()
+            && !props.group.trim().is_empty()
+            && (props.owner.trim() != props.owner_was || props.group.trim() != props.group_was);
+        let can = remote
+            && props.item.perms.is_some()
+            && (props.mode != original || ownership_changed || props.recursive);
         let answer = ui::Dialog {
             id: "props",
             icon: if props.item.is_dir {
@@ -759,9 +883,50 @@ impl App {
                     }
                     row(ui, "Modified", time_text(props.item.mtime, offset));
                     if props.item.link {
-                        row(ui, "Link", "A symbolic link".into());
+                        let text = if props.target.is_empty() {
+                            "A symbolic link".to_string()
+                        } else {
+                            format!("A symbolic link to {}", props.target)
+                        };
+                        row(ui, "Link", text);
                     }
                 });
+            if remote {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Owned by")
+                        .size(12.0)
+                        .strong()
+                        .color(theme::MUTED()),
+                );
+                if props.details.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Asking the server…")
+                                .size(12.0)
+                                .color(theme::COMMENT()),
+                        );
+                    });
+                } else if owned {
+                    ui::pair(
+                        ui,
+                        |ui| {
+                            ui::field(ui, "owner", "User", &mut props.owner, "root", false);
+                        },
+                        |ui| {
+                            ui::field(ui, "group", "Group", &mut props.group, "root", false);
+                        },
+                        170.0,
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("This server doesn't say who owns its files (no shell).")
+                            .size(12.0)
+                            .color(theme::COMMENT()),
+                    );
+                }
+            }
             if remote && props.item.perms.is_some() {
                 ui.add_space(4.0);
                 ui.label(
@@ -808,6 +973,14 @@ impl App {
                         .size(12.5)
                         .color(theme::COMMENT()),
                 );
+                if props.item.is_dir && owned {
+                    ui::switch(
+                        ui,
+                        &mut props.recursive,
+                        "Also everything inside",
+                        "chmod -R and chown -R",
+                    );
+                }
             }
             false
         });
@@ -816,7 +989,38 @@ impl App {
             ui::Answer::Cancel => self.props = None,
             ui::Answer::Confirm | ui::Answer::Other => {
                 let props = self.props.take().unwrap();
-                if remote && props.mode != original {
+                let host = match self.pane(props.pane).and_then(|p| p.place.clone()) {
+                    Some(Place::Server(h)) => h,
+                    _ => return,
+                };
+                if props.recursive || ownership_changed {
+                    // Through the shell: SFTP has no "everything inside", and takes owners
+                    // only as numbers.
+                    let q = sftp::quote(&path);
+                    let r = if props.recursive { "-R " } else { "" };
+                    let mut script = String::from("set -e; ");
+                    if props.mode != original || props.recursive {
+                        script.push_str(&format!("chmod {r}{:o} -- {q}; ", props.mode));
+                    }
+                    if ownership_changed || props.recursive && owned {
+                        let who = format!("{}:{}", props.owner.trim(), props.group.trim());
+                        script.push_str(&format!("chown {r}{} -- {q}; ", sftp::quote(&who)));
+                    }
+                    script.push_str("echo rdrop-ok");
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let repaint = self.ctx.clone();
+                    let name = props.name.clone();
+                    std::thread::spawn(move || {
+                        let ok = sftp::run(&host, &script).is_some_and(|o| o.contains("rdrop-ok"));
+                        let _ = tx.send(if ok {
+                            Ok(format!("Changed {name}"))
+                        } else {
+                            Err(format!("{name} couldn't be changed: the server refused (only root can give files away)"))
+                        });
+                        repaint.request_repaint();
+                    });
+                    self.shell_jobs.push((props.pane, rx));
+                } else if props.mode != original {
                     if let Some(c) = self.pane(props.pane).and_then(|p| p.conn.as_ref()) {
                         c.ask(Ask::Chmod(path, props.mode));
                     }

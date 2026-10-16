@@ -1,6 +1,6 @@
 [package]
 name = "rdrop"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 
@@ -16,6 +16,9 @@ rodio = "0.23.0"
 # Folders as one tar stream through ssh.
 tar = { version = "0.4", default-features = false }
 flate2 = "1"
+# Checksums: SHA-256 to check copies, MD5 for the blocks of a delta (as perl makes them).
+sha2 = "0.10"
+md-5 = "0.10"
 
 [build-dependencies]
 winresource = "0.1"

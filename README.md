@@ -153,15 +153,37 @@ passwords are encrypted by Windows for your account.
 - Folders go as one compressed stream through ssh, packed and unpacked by tar on the server:
   400 small files go up in under a second, where file by file over SFTP (as other clients
   do it) takes about a minute. Servers without a shell or tar get the folder over SFTP.
+- Only what changed goes: a file already at the other end is compared block by block, as rsync
+  does, and only the blocks that differ are sent. Files of 64 MB and more go over four
+  connections at once, transfers carry on where they stopped, and copies are checked with
+  SHA-256 at both ends.
 - Transfers run in the background, three at a time, while you keep browsing; the bar at the
-  bottom shows how far they are and opens the full list.
+  bottom shows how far they are and opens the full list. Files already there are overwritten,
+  replaced only by newer ones, skipped or kept beside the copy, as you choose, and transfers
+  not finished when rdrop closes are there to resume the next time.
+- Search a folder by name or inside files (Ctrl+F); on a server the search runs there.
+- Compare two folders, here or on servers, and sync them one way or both ways, after seeing
+  every file that would be copied or deleted.
+- Watch a folder here and have what you save in it go up to a server on its own.
+- Edit a file on a server in ride (Ctrl+E): saving writes it back there directly.
+- Every command, server and place in a palette, with Ctrl+Shift+P or Ctrl+K.
 - It works like Explorer: Ctrl+C, Ctrl+X and Ctrl+V (with Explorer's own clipboard), Delete to
   the Recycle Bin and Shift+Delete for good, F2 or a slow click to rename in place, This PC with
   the drives, large icons with thumbnails, and the arrow keys and typing to move through a list.
 - Double-click a file to see it: pictures, sound with a player, code in colour, logs that follow
   what is written to them, and the bytes of anything else. Files on a server open in their app
   and go back up when saved.
-- Permissions on servers, shown and changed from Properties; hidden files with Ctrl+H.
+- Permissions, owner and group on servers, shown and changed from Properties (with everything
+  inside a folder, if you like); hidden files with Ctrl+H.
+- From a terminal or a script, with the same engine:
+
+  ```powershell
+  rdrop ls   vps:/var/www
+  rdrop put  .\dist vps:/var/www/site          # a folder, as one stream
+  rdrop get  vps:/var/log/nginx/access.log     # into the folder you are in
+  rdrop cp   vps:/srv/backups other:/srv       # server to server
+  rdrop sync .\site vps:/var/www/site --delete --dry-run
+  ```
 
 ## rterm
 

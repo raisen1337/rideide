@@ -362,6 +362,42 @@ pub fn switch(ui: &mut Ui, on: &mut bool, label: &str, detail: &str) -> bool {
     changed
 }
 
+/// A row of choices where one is picked, as the rule for files that are already there.
+pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, value: &mut T, choices: &[(T, &str)]) -> bool {
+    let mut changed = false;
+    Frame::NONE
+        .fill(theme::tint(8))
+        .corner_radius(8)
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (choice, label) in choices {
+                    let on = *value == *choice;
+                    let text = RichText::new(*label).size(12.0).color(if on {
+                        theme::TEXT()
+                    } else {
+                        theme::COMMENT()
+                    });
+                    let b = egui::Button::new(text)
+                        .fill(if on {
+                            theme::tint(26)
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .stroke(Stroke::NONE)
+                        .corner_radius(6)
+                        .min_size(vec2(0.0, 24.0));
+                    if ui.add(b).clicked() && !on {
+                        *value = *choice;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
+}
+
 /// A quiet box for a note, a warning or a list, inside a dialog.
 pub fn callout(ui: &mut Ui, color: Color32, body: impl FnOnce(&mut Ui)) {
     Frame::NONE

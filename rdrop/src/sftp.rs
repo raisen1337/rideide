@@ -610,6 +610,27 @@ impl Session {
         Ok(out)
     }
 
+    /// Cuts or grows a file to `size` bytes.
+    pub fn set_size(&mut self, path: &str, size: u64) -> Result<()> {
+        let id = self.id();
+        let mut p = Out::new(SETSTAT, id);
+        let attrs = Attrs {
+            size: Some(size),
+            ..Attrs::default()
+        };
+        p.str(path).attrs(&attrs);
+        self.expect_ok(p.finish())
+    }
+
+    /// Renames over a file that is there: SFTP's own rename refuses to, so it goes first.
+    pub fn replace(&mut self, from: &str, to: &str) -> Result<()> {
+        if self.rename(from, to).is_ok() {
+            return Ok(());
+        }
+        let _ = self.remove(to);
+        self.rename(from, to)
+    }
+
     /// Sets a file's permissions, as `chmod` does.
     pub fn chmod(&mut self, path: &str, mode: u32) -> Result<()> {
         let id = self.id();
@@ -622,7 +643,7 @@ impl Session {
         self.expect_ok(p.finish())
     }
 
-    fn download_range(
+    pub fn download_range(
         &mut self,
         path: &str,
         start: u64,
@@ -712,16 +733,32 @@ impl Session {
         &mut self,
         path: &str,
         input: &mut (impl Read + ?Sized),
+        progress: impl FnMut(u64) -> bool,
+    ) -> Result<()> {
+        self.upload_at(path, 0, true, input, progress)
+    }
+
+    /// Writes what `input` gives into the file from `start` on: the rest of a transfer
+    /// that stopped, one part of a file written by several sessions, or the blocks a delta
+    /// changes. `truncate` empties the file first. `progress` gets the bytes written.
+    pub fn upload_at(
+        &mut self,
+        path: &str,
+        start: u64,
+        truncate: bool,
+        input: &mut (impl Read + ?Sized),
         mut progress: impl FnMut(u64) -> bool,
     ) -> Result<()> {
         let id = self.id();
         let mut p = Out::new(OPEN, id);
-        p.str(path)
-            .u32(OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)
-            .attrs(&Attrs::default());
+        let mut flags = OPEN_WRITE | OPEN_CREATE;
+        if truncate {
+            flags |= OPEN_TRUNCATE;
+        }
+        p.str(path).u32(flags).attrs(&Attrs::default());
         let handle = self.handle(p.finish())?;
         let result = (|| {
-            let mut offset = 0u64;
+            let mut offset = start;
             let mut pending = 0usize;
             let mut buffer = vec![0u8; CHUNK];
             let mut done = false;
@@ -758,7 +795,7 @@ impl Session {
                 let (kind, body) = self.receive()?;
                 pending -= 1;
                 check_status(kind, body.get(4..).unwrap_or_default())?;
-                if !progress(offset.saturating_sub((pending * CHUNK) as u64)) {
+                if !progress((offset - start).saturating_sub((pending * CHUNK) as u64)) {
                     return Err("Stopped".into());
                 }
             }

@@ -29,14 +29,20 @@ mod theme;
 mod window;
 
 mod bulk;
+mod cli;
+mod compare;
+mod engine;
 mod explorer;
+mod palette;
 mod pane;
 mod preview;
 mod remote;
+mod search;
 mod sftp;
 mod sites;
 mod transfer;
 mod ui;
+mod watch;
 mod winshell;
 
 use eframe::egui::{
@@ -64,6 +70,10 @@ fn main() -> eframe::Result {
     // ssh starting rdrop to ask for a password: answer it and go.
     if sftp::answer_askpass() {
         return Ok(());
+    }
+    // `rdrop ls|cp|get|put|sync|rm|mkdir ...` works from a terminal, without the window.
+    if let Some(code) = cli::run() {
+        std::process::exit(code);
     }
     if std::env::args().any(|arg| arg == "--version") {
         use std::io::Write;
@@ -149,6 +159,14 @@ struct Pane {
     connected: bool,
     /// Folders to go back to.
     back: Vec<String>,
+    /// What is typed in the search box, and whether it looks inside files.
+    search_edit: String,
+    search_contents: bool,
+    /// A search under the folder: while there is one, its results are the items.
+    search: Option<search::Search>,
+    focus_search: bool,
+    /// When the folder here last changed, to list it again when something else changes it.
+    dir_mtime: Option<std::time::SystemTime>,
 }
 
 impl Pane {
@@ -170,6 +188,11 @@ impl Pane {
             conn: None,
             connected: false,
             back: Vec::new(),
+            search_edit: String::new(),
+            search_contents: false,
+            search: None,
+            focus_search: false,
+            dir_mtime: None,
         }
     }
 
@@ -202,6 +225,9 @@ impl Pane {
     }
 
     fn set_items(&mut self, path: String, items: Vec<Item>) {
+        if self.search.is_some() && path == self.path {
+            return;
+        }
         if path != self.path {
             self.jump.0.clear();
             self.selected.clear();
@@ -400,6 +426,10 @@ struct Settings {
     show_hidden: bool,
     /// The last folder on each server, by host.
     remote: HashMap<String, String>,
+    /// What transfers do with files already there, and whether they are checked.
+    transfer: engine::Options,
+    /// Folders here whose changes go up to a server.
+    watches: Vec<watch::WatchSpec>,
 }
 
 fn yes() -> bool {
@@ -411,6 +441,15 @@ fn settings_path() -> Option<PathBuf> {
         PathBuf::from(std::env::var_os("APPDATA")?)
             .join("rdrop")
             .join("settings.json"),
+    )
+}
+
+/// Transfers not finished when rdrop closed, to carry on with.
+fn queue_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("APPDATA")?)
+            .join("rdrop")
+            .join("queue.json"),
     )
 }
 
@@ -482,6 +521,7 @@ enum Drag {
     Place(Place),
 }
 
+#[derive(Clone)]
 enum PaneAct {
     Open(String),
     Back,
@@ -506,6 +546,15 @@ enum PaneAct {
     CopyTo(Vec<String>),
     CopyPaths(Vec<String>),
     Reveal(String),
+    /// Look under the folder for what was typed, by name or (true) inside files.
+    Search(String, bool),
+    EndSearch,
+    /// Compare this pane's folder with the other pane's.
+    Compare,
+    /// Open a file (to edit) or a folder in ride, where it is.
+    Ride(String),
+    /// Send what changes in this folder to the other pane's server folder.
+    Watch,
     StartRows(Vec<String>),
     StartPane,
 }
@@ -546,6 +595,8 @@ struct App {
     paste_down: bool,
     drives: Vec<winshell::Drive>,
     drives_at: f64,
+    /// When the folders here were last checked for changes.
+    dirs_at: f64,
     known: Vec<KnownFolder>,
     thumbs: Thumbs,
     now: f64,
@@ -553,6 +604,20 @@ struct App {
     offset: i64,
     adopted: bool,
     next_id: u64,
+    /// How many jobs there were, and how many had stopped, when the queue was last saved.
+    queue_mark: (usize, usize),
+    /// RDROP_SEARCH: a search for the first pane once it can run.
+    start_search: Option<(u64, String, bool)>,
+    /// Two folders being compared, and the sync that may follow.
+    compare: Option<compare::Compare>,
+    /// RDROP_COMPARE: compare the first two panes once both can be.
+    start_compare: bool,
+    watches: Vec<watch::Watch>,
+    palette: Option<palette::Palette>,
+    /// Commands run in a server's shell for a pane (chown, chmod -R), and how they ended.
+    shell_jobs: Vec<(u64, Receiver<Result<String, String>>)>,
+    /// RDROP_PROPS=NAME: that item's properties, in the first pane, once it is listed.
+    start_props: Option<String>,
 }
 
 impl App {
@@ -595,6 +660,7 @@ impl App {
             paste_down: false,
             drives: winshell::drives(),
             drives_at: 0.0,
+            dirs_at: 0.0,
             known: known_folders(),
             thumbs: Thumbs::default(),
             now: 0.0,
@@ -604,6 +670,16 @@ impl App {
             offset: local_offset(),
             adopted: false,
             next_id: 0,
+            queue_mark: (0, 0),
+            start_search: None,
+            compare: None,
+            start_compare: std::env::var("RDROP_COMPARE").is_ok(),
+            watches: Vec::new(),
+            palette: std::env::var("RDROP_PALETTE")
+                .ok()
+                .map(palette::Palette::with),
+            shell_jobs: Vec::new(),
+            start_props: std::env::var("RDROP_PROPS").ok(),
         };
         // `rdrop FOLDER` starts with that folder here; `--host=NAME` with that server beside it.
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -629,6 +705,32 @@ impl App {
                     view: View::Details,
                 },
             ];
+        }
+        *app.queue.options.lock().unwrap() = app.settings.transfer;
+        app.watches = app
+            .settings
+            .watches
+            .iter()
+            .cloned()
+            .map(watch::Watch::new)
+            .collect();
+        if let Some(path) = queue_path() {
+            app.queue.load(&path);
+            let hosts: Vec<String> = app
+                .queue
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|j| [j.from.clone(), j.to.clone()])
+                .filter_map(|p| match p {
+                    Place::Server(h) => Some(h),
+                    Place::Local => None,
+                })
+                .collect();
+            for host in hosts {
+                app.register(&host);
+            }
         }
         let mut ids = Vec::new();
         for s in &saved {
@@ -658,6 +760,16 @@ impl App {
                 app.open_preview(first, &item);
             }
         }
+        // RDROP_SEARCH=TEXT (or in:TEXT, inside files) searches the first pane at the start;
+        // RDROP_JOBS=1 opens the transfers.
+        if let Ok(q) = std::env::var("RDROP_SEARCH") {
+            let (contents, q) = match q.strip_prefix("in:") {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, q),
+            };
+            app.start_search = Some((app.focus, q, contents));
+        }
+        app.show_jobs = std::env::var("RDROP_JOBS").is_ok();
         // RDROP_DIALOG opens a dialog at the start, to look at it without clicking.
         let focus = app.focus;
         match std::env::var("RDROP_DIALOG").as_deref() {
@@ -801,7 +913,9 @@ impl App {
         let Some(pane) = self.pane_mut(id) else {
             return;
         };
+        pane.search = None;
         if pane.is_local() {
+            pane.dir_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             match list_local(&path) {
                 Ok(items) => pane.set_items(path, items),
                 Err(e) => pane.error = Some(e),
@@ -810,6 +924,42 @@ impl App {
             pane.loading = true;
             pane.path_edit = path.clone();
             conn.ask(Ask::List(path));
+        }
+    }
+
+    /// Starts looking under the pane's folder; the results take the place of its items.
+    fn search(&mut self, id: u64, query: String, contents: bool) {
+        let ctx = self.ctx.clone();
+        let Some(pane) = self.pane_mut(id) else {
+            return;
+        };
+        let Some(place) = pane.place.clone() else {
+            return;
+        };
+        if query.trim().is_empty() || !pane.ready() || (pane.is_local() && pane.path.is_empty()) {
+            return;
+        }
+        pane.search = Some(search::Search::start(
+            &ctx,
+            &place,
+            &pane.path,
+            query.trim(),
+            contents,
+        ));
+        pane.items.clear();
+        pane.selected.clear();
+        pane.anchor = None;
+        pane.error = None;
+    }
+
+    fn end_search(&mut self, id: u64) {
+        let Some(pane) = self.pane_mut(id) else {
+            return;
+        };
+        if pane.search.take().is_some() {
+            pane.search_edit.clear();
+            let path = pane.path.clone();
+            self.open(id, path);
         }
     }
 
@@ -825,6 +975,14 @@ impl App {
     }
 
     fn refresh(&mut self, id: u64) {
+        let again = self
+            .pane(id)
+            .and_then(|p| p.search.as_ref())
+            .map(|s| (s.query.clone(), s.contents));
+        if let Some((query, contents)) = again {
+            self.search(id, query, contents);
+            return;
+        }
         if let Some(path) = self.pane(id).map(|p| p.path.clone()) {
             self.open(id, path);
         }
@@ -942,6 +1100,12 @@ impl App {
                 focus: true,
             });
         }
+        for pane in &mut self.panes {
+            if let Some(found) = pane.search.as_mut().and_then(|s| s.poll()) {
+                pane.items.extend(found);
+                pane.sort_items();
+            }
+        }
         let changed: Vec<(Place, String)> = self.queue.changed.try_iter().collect();
         for (place, folder) in changed {
             let ids: Vec<u64> = self
@@ -956,6 +1120,85 @@ impl App {
                 .collect();
             for id in ids {
                 self.refresh(id);
+            }
+        }
+        if self.start_compare
+            && self.panes.len() > 1
+            && self.panes.iter().all(|p| p.ready() && !p.loading)
+        {
+            self.start_compare = false;
+            let first = self.panes[0].id;
+            self.previous = self.panes[1].id;
+            self.compare_panes(first);
+        }
+        if let Some((id, q, contents)) = self.start_search.clone() {
+            if self
+                .pane(id)
+                .is_some_and(|p| p.ready() && !p.loading && !p.path.is_empty())
+            {
+                self.start_search = None;
+                if let Some(p) = self.pane_mut(id) {
+                    p.search_edit = q.clone();
+                    p.search_contents = contents;
+                }
+                self.search(id, q, contents);
+            }
+        }
+        if let Some(name) = self.start_props.clone() {
+            let first = self.panes.first().map(|p| p.id).unwrap_or(0);
+            if self
+                .pane(first)
+                .is_some_and(|p| p.items.iter().any(|i| i.name == name))
+            {
+                self.start_props = None;
+                self.open_props(first, &name);
+            }
+        }
+        let mut ended = Vec::new();
+        self.shell_jobs.retain(|(pane, rx)| match rx.try_recv() {
+            Ok(result) => {
+                ended.push((*pane, result));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        for (pane, result) in ended {
+            match result {
+                Ok(note) => self.note = note,
+                Err(e) => self.status = e,
+            }
+            self.refresh(pane);
+        }
+        // A folder here that something else changed is listed again, as Explorer does.
+        if self.now - self.dirs_at > 1.0 {
+            self.dirs_at = self.now;
+            let stale: Vec<u64> = self
+                .panes
+                .iter()
+                .filter(|p| p.is_local() && !p.path.is_empty() && p.search.is_none())
+                .filter(|p| {
+                    std::fs::metadata(&p.path).and_then(|m| m.modified()).ok() != p.dir_mtime
+                })
+                .map(|p| p.id)
+                .collect();
+            for id in stale {
+                self.refresh(id);
+            }
+        }
+        if self.panes.iter().any(|p| p.is_local()) {
+            self.ctx
+                .request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        // The queue is kept on disk whenever a job comes or goes, so a crash loses nothing.
+        let mark = {
+            let jobs = self.queue.jobs.lock().unwrap();
+            (jobs.len(), jobs.iter().filter(|j| !j.active()).count())
+        };
+        if mark != self.queue_mark {
+            self.queue_mark = mark;
+            if let Some(path) = queue_path() {
+                self.queue.save(&path);
             }
         }
     }
@@ -1192,6 +1435,7 @@ impl App {
                 {
                     self.local_row(ui, d.0, &d.1, &d.2);
                 }
+                self.watches_ui(ui);
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1396,8 +1640,9 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
-        let width = 520.0;
+        let width = 560.0;
         let mut close = false;
+        let (mut resume, mut resume_all) = (None, false);
         egui::Area::new(egui::Id::new("jobs"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos2(screen.right() - width - 14.0, screen.bottom() - 34.0))
@@ -1411,15 +1656,34 @@ impl App {
                             if ui.small_button(icons::CLOSE.to_string()).clicked() {
                                 close = true;
                             }
-                            if ui.small_button("Clear finished").clicked() {
+                                                        if ui.small_button("Clear finished").clicked() {
                                 self.queue.clear_finished();
                             }
                             if ui.small_button("Stop all").clicked() {
                                 self.queue.stop_all();
                             }
+                            let stopped = self.queue.jobs.lock().unwrap().iter().any(|j| matches!(j.state, State::Stopped | State::Failed(_)));
+                            if stopped && ui.small_button("Resume all").clicked() {
+                                resume_all = true;
+                            }
                         });
                     });
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
+                    let mut opts = *self.queue.options.lock().unwrap();
+                    let before = opts;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Already there").size(12.0).color(theme::COMMENT()));
+                        ui.add_space(4.0);
+                        ui::segmented(ui, &mut opts.conflict, &engine::Conflict::ALL);
+                    });
+                    ui.add_space(2.0);
+                    ui::switch(ui, &mut opts.verify, "Check copies", "SHA-256 at both ends, where the server has sha256sum");
+                    if opts != before {
+                        *self.queue.options.lock().unwrap() = opts;
+                        self.settings.transfer = opts;
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
                     let jobs = self.queue.jobs.lock().unwrap();
                     if jobs.is_empty() {
                         ui.label(RichText::new("Drag files from one pane to another, or from Explorer, to copy them.").size(12.5).color(theme::COMMENT()));
@@ -1431,8 +1695,11 @@ impl App {
                                 ui.label(RichText::new(job.name.as_str()).size(13.0).strong().color(theme::TEXT()));
                                 ui.label(RichText::new(format!("{}  →  {}", job.from.label(), job.to.label())).size(11.5).color(theme::COMMENT()));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if job.active() && ui.small_button(icons::CLOSE.to_string()).on_hover_text("Stop").clicked() {
+                                                                        if job.active() && ui.small_button(icons::CLOSE.to_string()).on_hover_text("Stop").clicked() {
                                         job.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if matches!(job.state, State::Stopped | State::Failed(_)) && ui.small_button("Resume").on_hover_text("Carry on from where it got to").clicked() {
+                                        resume = Some(job.id);
                                     }
                                 });
                             });
@@ -1445,8 +1712,9 @@ impl App {
                                     size_text(job.speed() as u64),
                                     if job.current.is_empty() || job.current == job.name { String::new() } else { format!("  ·  {}", job.current) }
                                 ),
-                                State::Done => format!("Done  ·  {}  ·  {}/s  ·  into {}", size_text(job.total), size_text(job.speed() as u64), job.to_dir),
+                                                                State::Done => format!("Done  ·  {}  ·  {}/s{}  ·  into {}", size_text(job.total), size_text(job.speed() as u64), if job.detail.is_empty() { String::new() } else { format!("  ·  {}", job.detail) }, job.to_dir),
                                 State::Failed(e) => format!("Failed: {e}"),
+                                State::Stopped if !job.detail.is_empty() => format!("Stopped  ·  {}", job.detail),
                                 State::Stopped => "Stopped".to_string(),
                             };
                             let fraction = if job.total > 0 { job.done as f32 / job.total as f32 } else if job.state == State::Done { 1.0 } else { 0.0 };
@@ -1457,6 +1725,12 @@ impl App {
                     });
                 });
             });
+        if let Some(id) = resume {
+            self.queue.resume(id);
+        }
+        if resume_all {
+            self.queue.resume_all();
+        }
         if close || ctx.input(|i| i.key_pressed(Key::Escape)) && self.dialog.is_none() {
             self.show_jobs = false;
         }
@@ -1530,6 +1804,10 @@ impl App {
             PaneAct::NewFolder => self.new_folder(id),
             PaneAct::Paste => self.paste(id),
             PaneAct::Refresh => self.refresh(id),
+            PaneAct::Search(query, contents) => self.search(id, query, contents),
+            PaneAct::EndSearch => self.end_search(id),
+            PaneAct::Compare => self.compare_panes(id),
+            PaneAct::Watch => self.start_watch(id),
             PaneAct::View(view) => {
                 if let Some(p) = self.pane_mut(id) {
                     p.view = view;
@@ -1548,6 +1826,7 @@ impl App {
                 }
             }
             PaneAct::OpenWith(name) => self.open_with_app(id, &name),
+            PaneAct::Ride(name) => self.open_in_ride(id, &name),
             PaneAct::Clip(names, cut) => self.set_clip(id, &names, cut),
             PaneAct::StartRename(name) => self.start_rename(id, &name),
             PaneAct::FinishRename(keep) => self.finish_rename(keep),
@@ -1820,7 +2099,11 @@ impl App {
             return;
         }
         let Some(pane) = self.pane(id) else { return };
-        let (from, to) = (pane.child(old), pane.child(new));
+        let new = match old.rfind(['/', '\\']) {
+            Some(at) if !new.contains(['/', '\\']) => format!("{}{new}", &old[..=at]),
+            _ => new.to_string(),
+        };
+        let (from, to) = (pane.child(old), pane.child(&new));
         if pane.is_local() {
             if let Err(e) = std::fs::rename(&from, &to) {
                 self.status = e.to_string();
@@ -2077,6 +2360,11 @@ impl App {
                 view: p.view,
             })
             .collect();
+        self.settings.transfer = *self.queue.options.lock().unwrap();
+        self.settings.watches = self.watches.iter().map(|w| w.spec.clone()).collect();
+        if let Some(path) = queue_path() {
+            self.queue.save(&path);
+        }
         if let (Some(path), Ok(json)) = (settings_path(), serde_json::to_vec_pretty(&self.settings))
         {
             let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
@@ -2127,8 +2415,16 @@ impl eframe::App for App {
             self.drives_at = self.now;
         }
         self.poll();
+        self.watch_tick();
         self.pending_renames();
         self.opened_tick();
+        let open_palette = ctx.input(|i| {
+            i.modifiers.command
+                && (i.key_pressed(Key::K) || i.modifiers.shift && i.key_pressed(Key::P))
+        });
+        if open_palette && self.dialog.is_none() && self.auth.is_none() && self.compare.is_none() {
+            self.palette = Some(palette::Palette::with(String::new()));
+        }
         self.keys(&ctx);
         // Files dropped from Explorer go into the pane they land on.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -2192,6 +2488,8 @@ impl eframe::App for App {
         self.props_dialog(&ctx);
         self.dialogs(&ctx);
         self.auth_dialog(&ctx);
+        self.compare_ui(&ctx);
+        self.palette_ui(&ctx);
         if self.drag.is_none() {
             resize_edges(&ctx);
         }

@@ -3,6 +3,7 @@
 //! its own, so browsing and starting more goes on while they run.
 
 use crate::bulk;
+use crate::engine::{self, Conflict, Options, Outcome};
 use crate::sftp::{self, Session};
 use eframe::egui::Context;
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use std::time::Instant;
 const WORKERS: usize = 3;
 
 /// Where files are: this computer, or a server by its name in the SSH config.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Place {
     Local,
     Server(String),
@@ -59,6 +60,28 @@ pub struct Job {
     pub stop: Arc<AtomicBool>,
     /// A move (cut and paste): the original goes once the copy is done.
     pub moving: bool,
+    /// What happened beyond copying: files skipped, blocks sent, checksums.
+    pub detail: String,
+    /// A sync: only these files (paths under `from_path`, with `/`) go, each to the same
+    /// path under `to_dir`, over what is there; then these paths under `to_dir` go away.
+    pub only: Vec<String>,
+    pub delete: Vec<String>,
+}
+
+/// A job as it is kept on disk, to carry on after rdrop starts again.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Saved {
+    from: Place,
+    from_path: String,
+    to: Place,
+    to_dir: String,
+    moving: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    only: Vec<String>,
+    #[serde(default)]
+    delete: Vec<String>,
 }
 
 impl Job {
@@ -80,6 +103,8 @@ pub type Jobs = Arc<Mutex<Vec<Job>>>;
 
 pub struct Queue {
     pub jobs: Jobs,
+    /// How conflicts are handled and whether copies are checked, for jobs that start.
+    pub options: Arc<Mutex<Options>>,
     tx: Sender<u64>,
     /// Folders a finished job changed, to list again.
     pub changed: Receiver<(Place, String)>,
@@ -92,13 +117,20 @@ impl Queue {
         let (tx, rx) = channel::<u64>();
         let rx = Arc::new(Mutex::new(rx));
         let (changed_tx, changed) = channel();
+        let options: Arc<Mutex<Options>> = Default::default();
         for _ in 0..WORKERS {
-            let (jobs, rx, changed_tx, repaint) =
-                (jobs.clone(), rx.clone(), changed_tx.clone(), ctx.clone());
-            std::thread::spawn(move || worker(jobs, rx, changed_tx, repaint));
+            let (jobs, rx, changed_tx, repaint, options) = (
+                jobs.clone(),
+                rx.clone(),
+                changed_tx.clone(),
+                ctx.clone(),
+                options.clone(),
+            );
+            std::thread::spawn(move || worker(jobs, rx, changed_tx, repaint, options));
         }
         Queue {
             jobs,
+            options,
             tx,
             changed,
             next: 0,
@@ -107,12 +139,35 @@ impl Queue {
 
     /// Queues copying `from_path` (on `from`) into the folder `to_dir` (on `to`).
     pub fn add(&mut self, from: Place, from_path: String, to: Place, to_dir: String) -> u64 {
-        self.push(from, from_path, to, to_dir, false)
+        self.push(from, from_path, to, to_dir, false, Default::default())
     }
 
     /// Queues moving `from_path` into `to_dir`: copied, then removed where it was.
     pub fn add_move(&mut self, from: Place, from_path: String, to: Place, to_dir: String) -> u64 {
-        self.push(from, from_path, to, to_dir, true)
+        self.push(from, from_path, to, to_dir, true, Default::default())
+    }
+
+    /// Queues a sync: the files listed (under `from_root`) to the same places under
+    /// `to_root`, then the paths in `delete` removed from under `to_root`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_sync(
+        &mut self,
+        from: Place,
+        from_root: String,
+        to: Place,
+        to_root: String,
+        only: Vec<String>,
+        delete: Vec<String>,
+        name: String,
+    ) -> u64 {
+        self.push(
+            from,
+            from_root,
+            to,
+            to_root,
+            false,
+            (only, delete, Some(name)),
+        )
     }
 
     fn push(
@@ -122,14 +177,17 @@ impl Queue {
         to: Place,
         to_dir: String,
         moving: bool,
+        (only, delete, name): (Vec<String>, Vec<String>, Option<String>),
     ) -> u64 {
         self.next += 1;
-        let name = from_path
-            .trim_end_matches(['/', '\\'])
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&from_path)
-            .to_string();
+        let name = name.unwrap_or_else(|| {
+            from_path
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&from_path)
+                .to_string()
+        });
         self.jobs.lock().unwrap().push(Job {
             id: self.next,
             from,
@@ -145,9 +203,107 @@ impl Queue {
             finished: None,
             stop: Arc::new(AtomicBool::new(false)),
             moving,
+            detail: String::new(),
+            only,
+            delete,
         });
         let _ = self.tx.send(self.next);
         self.next
+    }
+
+    /// Starts a stopped or failed job again; it carries on where it got to.
+    pub fn resume(&self, id: u64) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs
+            .iter_mut()
+            .find(|j| j.id == id && matches!(j.state, State::Stopped | State::Failed(_)))
+        {
+            job.state = State::Waiting;
+            job.stop = Arc::new(AtomicBool::new(false));
+            job.done = 0;
+            job.started = None;
+            job.finished = None;
+            let _ = self.tx.send(id);
+        }
+    }
+
+    pub fn resume_all(&self) {
+        let ids: Vec<u64> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| matches!(j.state, State::Stopped | State::Failed(_)))
+            .map(|j| j.id)
+            .collect();
+        for id in ids {
+            self.resume(id);
+        }
+    }
+
+    /// Keeps the jobs not done yet on disk, so they can carry on after a restart.
+    pub fn save(&self, path: &Path) {
+        let saved: Vec<Saved> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| j.state != State::Done)
+            .map(|j| Saved {
+                from: j.from.clone(),
+                from_path: j.from_path.clone(),
+                to: j.to.clone(),
+                to_dir: j.to_dir.clone(),
+                moving: j.moving,
+                name: j.name.clone(),
+                only: j.only.clone(),
+                delete: j.delete.clone(),
+            })
+            .collect();
+        if let Ok(json) = serde_json::to_vec_pretty(&saved) {
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(path));
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Brings back the jobs a last run didn't finish, stopped, to resume when wanted.
+    pub fn load(&mut self, path: &Path) {
+        let saved: Vec<Saved> = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        for s in saved {
+            self.next += 1;
+            let name = if s.name.is_empty() {
+                s.from_path
+                    .trim_end_matches(['/', '\\'])
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&s.from_path)
+                    .to_string()
+            } else {
+                s.name
+            };
+            self.jobs.lock().unwrap().push(Job {
+                id: self.next,
+                from: s.from,
+                from_path: s.from_path,
+                to: s.to,
+                to_dir: s.to_dir,
+                name,
+                total: 0,
+                done: 0,
+                current: String::new(),
+                state: State::Stopped,
+                started: None,
+                finished: None,
+                stop: Arc::new(AtomicBool::new(false)),
+                moving: s.moving,
+                detail: "Not finished last time".into(),
+                only: s.only,
+                delete: s.delete,
+            });
+        }
     }
 
     pub fn clear_finished(&self) {
@@ -166,6 +322,7 @@ fn worker(
     rx: Arc<Mutex<Receiver<u64>>>,
     changed: Sender<(Place, String)>,
     repaint: Context,
+    options: Arc<Mutex<Options>>,
 ) {
     // Sessions stay open between jobs, one per server.
     let mut sessions: HashMap<String, Session> = HashMap::new();
@@ -190,13 +347,15 @@ fn worker(
                     job.to_dir.clone(),
                     job.stop.clone(),
                     job.moving,
+                    job.only.clone(),
+                    job.delete.clone(),
                 ));
             } else if job.state == State::Waiting {
                 job.state = State::Stopped;
             }
         });
         repaint.request_repaint();
-        let Some((from, from_path, to, to_dir, stop, moving)) = info else {
+        let Some((from, from_path, to, to_dir, stop, moving, only, delete)) = info else {
             continue;
         };
         let mut progress = |done: u64, current: &str| {
@@ -210,15 +369,37 @@ fn worker(
             !stop.load(Ordering::Relaxed)
         };
         let mut total = |t: u64| update(&mut |job| job.total = t);
-        let mut result = run(
-            &mut sessions,
-            &from,
-            &from_path,
-            &to,
-            &to_dir,
-            &mut progress,
-            &mut total,
-        );
+        let opts = *options.lock().unwrap();
+        let mut summary = Summary::default();
+        let mut result = if only.is_empty() && delete.is_empty() {
+            run_with(
+                &mut sessions,
+                &opts,
+                &mut summary,
+                &from,
+                &from_path,
+                &to,
+                &to_dir,
+                &mut progress,
+                &mut total,
+            )
+        } else {
+            sync(
+                &mut sessions,
+                &opts,
+                &mut summary,
+                &from,
+                &from_path,
+                &to,
+                &to_dir,
+                &only,
+                &delete,
+                &mut progress,
+                &mut total,
+            )
+        };
+        let detail = summary.text();
+        update(&mut |job| job.detail = detail.clone());
         // A move removes the original only once the copy is whole.
         if moving && result.is_ok() {
             result = match &from {
@@ -288,8 +469,81 @@ struct File {
     mtime: Option<u32>,
 }
 
+/// What a job did besides copying, for its line in the list.
+#[derive(Default)]
+pub struct Summary {
+    skipped: usize,
+    /// Files that went as their changed blocks, and the bytes those blocks came to.
+    delta: usize,
+    delta_bytes: u64,
+    delta_of: u64,
+    verified: usize,
+    streamed: bool,
+    deleted: usize,
+}
+
+impl Summary {
+    pub(crate) fn text(&self) -> String {
+        let mut parts = Vec::new();
+        if self.streamed {
+            parts.push("as one stream".to_string());
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} skipped", self.skipped));
+        }
+        if self.delta > 0 {
+            parts.push(format!(
+                "only the changes: {} of {}",
+                size(self.delta_bytes),
+                size(self.delta_of)
+            ));
+        }
+        if self.deleted > 0 {
+            parts.push(format!("{} deleted", self.deleted));
+        }
+        if self.verified > 0 {
+            parts.push(format!("{} checked by SHA-256", self.verified));
+        }
+        parts.join("  ·  ")
+    }
+}
+
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
+}
+
+#[cfg(test)]
 fn run(
     sessions: &mut HashMap<String, Session>,
+    from: &Place,
+    from_path: &str,
+    to: &Place,
+    to_dir: &str,
+    progress: Progress,
+    total: &mut dyn FnMut(u64),
+) -> Result<(), String> {
+    run_with(
+        sessions,
+        &Options::default(),
+        &mut Summary::default(),
+        from,
+        from_path,
+        to,
+        to_dir,
+        progress,
+        total,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with(
+    sessions: &mut HashMap<String, Session>,
+    opts: &Options,
+    summary: &mut Summary,
     from: &Place,
     from_path: &str,
     to: &Place,
@@ -302,7 +556,20 @@ fn run(
         Place::Local => Path::new(from_path).is_dir(),
         Place::Server(host) => session(sessions, host)?.stat(from_path)?.is_dir(),
     };
-    if is_dir {
+    let name = from_path
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(from_path)
+        .to_string();
+    let there = match to {
+        Place::Local => Path::new(to_dir).join(&name).exists(),
+        Place::Server(host) => session(sessions, host)?
+            .stat(&sftp::join(to_dir, &name))
+            .is_ok(),
+    };
+    if is_dir && (opts.conflict == Conflict::Overwrite || !there) {
+        summary.streamed = true;
         match (from, to) {
             (Place::Local, Place::Server(host)) if bulk::can(host) => {
                 let (mut files, mut dirs) = (Vec::new(), Vec::new());
@@ -320,7 +587,7 @@ fn run(
                 total(size);
                 return bulk::between(a, from_path, b, to_dir, size, progress);
             }
-            _ => {}
+            _ => summary.streamed = false,
         }
     }
     // What there is to copy, and the folders to make for it.
@@ -334,6 +601,115 @@ fn run(
         }
     }
     total(files.iter().map(|f| f.size).sum());
+    copy_files(
+        sessions, opts, summary, from, to, to_dir, &files, &dirs, progress,
+    )
+}
+
+/// A sync: the files listed go to the same paths under `to_root`, replacing what is there
+/// (the comparison already chose them), then the paths in `delete` are removed there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sync(
+    sessions: &mut HashMap<String, Session>,
+    opts: &Options,
+    summary: &mut Summary,
+    from: &Place,
+    from_root: &str,
+    to: &Place,
+    to_root: &str,
+    only: &[String],
+    delete: &[String],
+    progress: Progress,
+    total: &mut dyn FnMut(u64),
+) -> Result<(), String> {
+    let mut files = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    for relative in only {
+        let path = match from {
+            Place::Local => {
+                let mut p = PathBuf::from(from_root);
+                p.extend(relative.split('/'));
+                p.display().to_string()
+            }
+            Place::Server(_) => sftp::join(from_root, relative),
+        };
+        let (size, mtime) = match from {
+            Place::Local => {
+                let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32);
+                (meta.len(), mtime)
+            }
+            Place::Server(host) => {
+                let a = session(sessions, host)?.stat(&path)?;
+                (a.size.unwrap_or(0), a.mtime)
+            }
+        };
+        if let Some((parent, _)) = relative.rsplit_once('/') {
+            let mut acc = String::new();
+            for part in parent.split('/') {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                if !dirs.contains(&acc) {
+                    dirs.push(acc.clone());
+                }
+            }
+        }
+        files.push(File {
+            path,
+            relative: relative.clone(),
+            size,
+            mtime,
+        });
+    }
+    total(files.iter().map(|f| f.size).sum());
+    let opts = Options {
+        conflict: Conflict::Overwrite,
+        ..*opts
+    };
+    copy_files(
+        sessions, &opts, summary, from, to, to_root, &files, &dirs, progress,
+    )?;
+    for relative in delete {
+        match to {
+            Place::Local => {
+                let mut p = PathBuf::from(to_root);
+                p.extend(relative.split('/'));
+                let gone = if p.is_dir() {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                gone.map_err(|e| format!("{}: {e}", p.display()))?;
+            }
+            Place::Server(host) => {
+                session(sessions, host)?.remove_all(&sftp::join(to_root, relative))?;
+            }
+        }
+        summary.deleted += 1;
+    }
+    Ok(())
+}
+
+/// Copies files found under a source to the same relative paths under `to_dir`, making
+/// the folders first, with the rules for what is already there.
+#[allow(clippy::too_many_arguments)]
+fn copy_files(
+    sessions: &mut HashMap<String, Session>,
+    opts: &Options,
+    summary: &mut Summary,
+    from: &Place,
+    to: &Place,
+    to_dir: &str,
+    files: &[File],
+    dirs: &[String],
+    progress: Progress,
+) -> Result<(), String> {
     let target = |relative: &str| match to {
         Place::Local => {
             let mut p = PathBuf::from(to_dir);
@@ -355,7 +731,7 @@ fn run(
             }
         }
     };
-    for dir in &dirs {
+    for dir in dirs {
         let path = target(dir);
         match to {
             Place::Local => std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?,
@@ -368,16 +744,98 @@ fn run(
         }
     }
     let mut before = 0u64;
-    for file in &files {
-        let dest = target(&file.relative);
+    let (dest_local, dest_host) = match to {
+        Place::Local => (true, String::new()),
+        Place::Server(h) => (false, h.clone()),
+    };
+    for file in files {
+        let mut dest = target(&file.relative);
         let name = file
             .relative
             .rsplit('/')
             .next()
             .unwrap_or(&file.relative)
             .to_string();
+        if !dest_local {
+            session(sessions, &dest_host)?;
+        }
+        // What is there already decides what happens.
+        let mut existing = engine::info(sessions, dest_local, &dest_host, &dest);
+        if let Some((_, there_mtime)) = existing {
+            let skip = match opts.conflict {
+                Conflict::Skip => true,
+                Conflict::Newer => there_mtime.unwrap_or(0) >= file.mtime.unwrap_or(0),
+                Conflict::KeepBoth => {
+                    dest = engine::free_name(&dest, &mut |p| {
+                        engine::info(sessions, dest_local, &dest_host, p).is_some()
+                    });
+                    existing = None;
+                    false
+                }
+                Conflict::Overwrite => false,
+            };
+            if skip {
+                summary.skipped += 1;
+                before += file.size;
+                progress(before, &name);
+                continue;
+            }
+        }
         let mut step = |n: u64| progress(before + n, &name);
-        copy_file(sessions, from, &file.path, to, &dest, file.mtime, &mut step)?;
+        let outcome = match (from, to) {
+            (Place::Server(host), Place::Local) => {
+                let s = session(sessions, host)?;
+                engine::download(
+                    s,
+                    host,
+                    &file.path,
+                    file.size,
+                    file.mtime,
+                    &dest,
+                    existing.map(|e| e.0),
+                    &mut step,
+                )?
+            }
+            (Place::Local, Place::Server(host)) => {
+                let s = session(sessions, host)?;
+                engine::upload(
+                    s,
+                    host,
+                    &file.path,
+                    file.size,
+                    file.mtime,
+                    &dest,
+                    existing.map(|e| e.0),
+                    &mut step,
+                )?
+            }
+            _ => {
+                copy_file(sessions, from, &file.path, to, &dest, file.mtime, &mut step)?;
+                Outcome::Copied
+            }
+        };
+        if let Outcome::Delta(sent) = outcome {
+            summary.delta += 1;
+            summary.delta_bytes += sent;
+            summary.delta_of += file.size;
+        }
+        // Both ends hashed, where a server takes part and can make the hash.
+        let remote = *from != Place::Local || *to != Place::Local;
+        if opts.verify && remote && file.size >= engine::VERIFY_FROM {
+            let hash = |place: &Place, path: &str| match place {
+                Place::Local => engine::local_sha256(path),
+                Place::Server(h) if bulk::can(h) => engine::remote_sha256(h, path),
+                Place::Server(_) => None,
+            };
+            if let (Some(a), Some(b)) = (hash(from, &file.path), hash(to, &dest)) {
+                if a != b {
+                    return Err(format!(
+                        "{name}: the copy doesn't match the original (SHA-256 differs)"
+                    ));
+                }
+                summary.verified += 1;
+            }
+        }
         before += file.size;
         progress(before, &name);
     }
@@ -858,6 +1316,50 @@ mod tests {
 
     /// Against real servers, by hand: RDROP_TEST_HOST (and RDROP_TEST_HOST2 for a copy
     /// between servers) name hosts from ~/.ssh/config. Works in /tmp there and cleans up.
+    /// A sync's files go to the same paths, folders made on the way, and its deletions go.
+    #[test]
+    #[ignore]
+    fn a_sync_on_a_real_server() {
+        let Ok(host) = std::env::var("RDROP_TEST_HOST") else {
+            return;
+        };
+        let id = std::process::id();
+        let dir = format!("/tmp/rdrop-test-sync-{id}");
+        let local = std::env::temp_dir().join(format!("rdrop-sync-{id}"));
+        std::fs::create_dir_all(local.join("a").join("b")).unwrap();
+        std::fs::write(local.join("top.txt"), "top").unwrap();
+        std::fs::write(local.join("a").join("b").join("deep.txt"), "deep").unwrap();
+        let mut s = Session::connect(&host).unwrap();
+        s.mkdir(&dir).unwrap();
+        s.upload(&format!("{dir}/extra.txt"), &mut &b"x"[..], |_| true)
+            .unwrap();
+        let mut sessions = HashMap::new();
+        let mut summary = Summary::default();
+        sync(
+            &mut sessions,
+            &Options::default(),
+            &mut summary,
+            &Place::Local,
+            &local.display().to_string(),
+            &Place::Server(host.clone()),
+            &dir,
+            &["top.txt".into(), "a/b/deep.txt".into()],
+            &["extra.txt".into()],
+            &mut |_, _| true,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            s.stat(&format!("{dir}/a/b/deep.txt")).unwrap().size,
+            Some(4)
+        );
+        assert_eq!(s.stat(&format!("{dir}/top.txt")).unwrap().size, Some(3));
+        assert!(s.stat(&format!("{dir}/extra.txt")).is_err());
+        assert_eq!(summary.deleted, 1);
+        s.remove_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(local);
+    }
+
     #[test]
     #[ignore]
     fn on_real_servers() {

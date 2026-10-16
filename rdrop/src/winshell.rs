@@ -72,6 +72,14 @@ mod ffi {
         ) -> i32;
         pub fn SHFileOperationW(op: *mut FileOp) -> i32;
         pub fn DragQueryFileW(drop: isize, index: u32, file: *mut u16, len: u32) -> u32;
+        pub fn ShellExecuteW(
+            hwnd: isize,
+            op: *const u16,
+            file: *const u16,
+            params: *const u16,
+            dir: *const u16,
+            show: i32,
+        ) -> isize;
     }
 
     #[link(name = "ole32")]
@@ -500,4 +508,48 @@ mod tests {
         assert!(!file.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Starts a program as Explorer would, so one registered under App Paths is found by its
+/// name. Arguments with spaces are quoted.
+#[cfg(windows)]
+pub fn start(program: &str, args: &[String]) -> Result<(), String> {
+    let z = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let params = args
+        .iter()
+        .map(|a| {
+            if a.contains([' ', '\t']) {
+                format!("\"{a}\"")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (op, file, params) = (z("open"), z(program), z(&params));
+    // SW_SHOWNORMAL; anything above 32 is success.
+    let r = unsafe {
+        ffi::ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if r > 32 {
+        Ok(())
+    } else {
+        Err(format!("{program} isn't installed"))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn start(program: &str, args: &[String]) -> Result<(), String> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }

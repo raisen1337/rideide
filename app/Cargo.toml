@@ -1,6 +1,6 @@
 [package]
 name = "ride"
-version = "0.9.10"
+version = "0.9.11"
 edition.workspace = true
 license.workspace = true
 

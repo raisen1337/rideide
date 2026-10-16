@@ -14,6 +14,8 @@ fn main() {
         ("rterm.exe", "rterm"),
         ("rkit.exe", "rkit"),
         ("rdrop.exe", "rdrop"),
+        // rdrop's terminal side: installed as rdrop.com, so `rdrop cp …` waits and prints.
+        ("rdropc.exe", "rdrop"),
     ] {
         let app = root.join("target").join("release").join(exe);
         println!("cargo:rerun-if-changed={}", app.display());

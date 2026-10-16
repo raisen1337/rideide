@@ -162,6 +162,24 @@ impl App {
                     act(PaneAct::ToggleHidden);
                 }
                 ui.separator();
+                if ui
+                    .add_enabled(
+                        usable && several,
+                        egui::Button::new("Compare with the other pane"),
+                    )
+                    .clicked()
+                {
+                    act(PaneAct::Compare);
+                }
+                if pane.is_local()
+                    && ui
+                        .add_enabled(usable && several && !pane.path.is_empty(), egui::Button::new("Watch and upload changes"))
+                        .on_hover_text("What is saved in this folder goes up to the server folder in the other pane")
+                        .clicked()
+                {
+                    act(PaneAct::Watch);
+                }
+                ui.separator();
                 if ui.button("Split right").clicked() {
                     act(PaneAct::Split(true));
                 }
@@ -259,17 +277,129 @@ impl App {
             return;
         }
 
-        // Where it is: a path to type into.
-        let edit = ui.add(
-            TextEdit::singleline(&mut pane.path_edit)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace)
-                .hint_text("This PC"),
-        );
-        if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            act(PaneAct::Open(pane.path_edit.clone()));
-        }
+        // Where it is, a path to type into, and a box to search under it, as in Explorer.
+        let can_search = !(pane.is_local() && pane.path.is_empty());
+        ui.horizontal(|ui| {
+            let search_w = if can_search {
+                (ui.available_width() * 0.36).clamp(150.0, 260.0)
+            } else {
+                0.0
+            };
+            let edit = ui.add(
+                TextEdit::singleline(&mut pane.path_edit)
+                    .desired_width(ui.available_width() - search_w - 8.0)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("This PC"),
+            );
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                act(PaneAct::Open(pane.path_edit.clone()));
+            }
+            if can_search {
+                let hint = if pane.search_contents {
+                    "Search in files"
+                } else {
+                    "Search"
+                };
+                let field = TextEdit::singleline(&mut pane.search_edit)
+                    .desired_width(search_w - 34.0)
+                    .hint_text(format!("{}  {hint}", icons::SEARCH));
+                let resp = ui
+                    .add(field)
+                    .on_hover_text("Ctrl+F · Enter to search · Esc to go back to the folder");
+                if std::mem::take(&mut pane.focus_search) {
+                    resp.request_focus();
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    act(PaneAct::Search(
+                        pane.search_edit.clone(),
+                        pane.search_contents,
+                    ));
+                }
+                if (resp.has_focus() || resp.lost_focus())
+                    && ui.input(|i| i.key_pressed(Key::Escape))
+                {
+                    act(PaneAct::EndSearch);
+                }
+                let toggle = egui::Button::selectable(
+                    pane.search_contents,
+                    RichText::new("Aa").size(11.5).monospace(),
+                )
+                .min_size(vec2(26.0, 22.0));
+                if ui
+                    .add(toggle)
+                    .on_hover_text(if pane.search_contents {
+                        "Looking inside files: click to search names"
+                    } else {
+                        "Search names: click to look inside files"
+                    })
+                    .clicked()
+                {
+                    pane.search_contents = !pane.search_contents;
+                    if pane.search.is_some() && !pane.search_edit.trim().is_empty() {
+                        act(PaneAct::Search(
+                            pane.search_edit.clone(),
+                            pane.search_contents,
+                        ));
+                    }
+                }
+            }
+        });
         ui.add_space(4.0);
+        // While searching: what, where, how many, and the way back.
+        if let Some(s) = &pane.search {
+            let fill = theme::ACCENT().gamma_multiply(0.10);
+            Frame::NONE
+                .fill(fill)
+                .corner_radius(7)
+                .inner_margin(Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if s.running {
+                            ui.add(egui::Spinner::new().size(12.0));
+                        } else {
+                            ui.label(RichText::new(icons::SEARCH).color(theme::ACCENT()));
+                        }
+                        let what = if s.contents { "inside files" } else { "names" };
+                        let mut text = format!(
+                            "{} for \u{201c}{}\u{201d} in {what}",
+                            if s.found == 1 {
+                                "1 result".to_string()
+                            } else {
+                                format!("{} results", s.found)
+                            },
+                            s.query
+                        );
+                        if s.found >= search::LIMIT {
+                            text.push_str(&format!("  ·  stopped at {}", search::LIMIT));
+                        } else if let Some(took) = s.took {
+                            text.push_str(&format!("  ·  {:.1} s", took.as_secs_f32()));
+                        } else {
+                            text.push_str("  ·  searching…");
+                        }
+                        ui.add(
+                            egui::Label::new(RichText::new(text).size(12.0).color(theme::TEXT()))
+                                .truncate(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .small_button(icons::CLOSE.to_string())
+                                .on_hover_text("Back to the folder (Esc)")
+                                .clicked()
+                            {
+                                act(PaneAct::EndSearch);
+                            }
+                            if s.running && ui.small_button("Stop").clicked() {
+                                s.cancel();
+                            }
+                        });
+                    });
+                    if let Some(e) = &s.error {
+                        ui.label(RichText::new(e).size(12.0).color(BAD));
+                    }
+                });
+            ui.add_space(4.0);
+        }
         if let Some(e) = &pane.error {
             ui.label(RichText::new(e).size(12.5).color(BAD));
         }
@@ -383,6 +513,7 @@ impl App {
                 Menu::CopyPath => PaneAct::CopyPaths(names),
                 Menu::Reveal => PaneAct::Reveal(pane.child(&name)),
                 Menu::Properties => PaneAct::Properties(name),
+                Menu::Ride => PaneAct::Ride(name),
             });
         }
         if ev.empty_clicked {
@@ -441,6 +572,7 @@ enum Menu {
     CopyPath,
     Reveal,
     Properties,
+    Ride,
 }
 
 fn status_line(ui: &mut Ui, rect: Rect, text: &str) {
@@ -473,6 +605,12 @@ fn item_menu(ui: &mut Ui, index: usize, local: bool, dir: bool, menu: &mut Optio
     if !dir {
         item(ui, "Open with app", "", Menu::OpenWith);
     }
+    item(
+        ui,
+        if dir { "Open in ride" } else { "Edit in ride" },
+        "Ctrl+E",
+        Menu::Ride,
+    );
     ui.separator();
     item(ui, "Cut", "Ctrl+X", Menu::Cut);
     item(ui, "Copy", "Ctrl+C", Menu::Copy);

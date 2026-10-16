@@ -23,6 +23,8 @@ static RTERM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rterm.exe.gz"));
 static RKIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rkit.exe.gz"));
 /// rdrop, for files between this computer and servers.
 static RDROP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rdrop.exe.gz"));
+/// rdrop.com, which a terminal finds before rdrop.exe: it runs rdrop's commands and waits.
+static RDROP_COM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rdropc.exe.gz"));
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The icon as 128x128 RGBA pixels, for the window and the mark in the side rail.
 static ICON: &[u8] = include_bytes!("../../app/assets/icon-128.rgba");
@@ -233,6 +235,12 @@ fn install_rkit(dir: &Path, start_menu: bool) -> Result<(), String> {
 fn install_rdrop(dir: &Path, start_menu: bool, context_menu: bool) -> Result<(), String> {
     let exe = dir.join("rdrop.exe");
     swap_in(&exe, &unpack(RDROP)?)?;
+    swap_in(&dir.join("rdrop.com"), &unpack(RDROP_COM)?)?;
+    // On the user's PATH, so `rdrop` works in any terminal: installs with a Start menu
+    // entry only, not portable ones.
+    if start_menu || rdrop_link().exists() {
+        let _ = set_on_path(dir, true);
+    }
     if start_menu {
         let script = format!(
             "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath = {}; \
@@ -269,7 +277,26 @@ const RDROP_MENU_KEYS: [(&str, &str); 2] = [
     ),
 ];
 
+/// Adds the folder to the user's PATH, or takes it off. The value is read and written as it
+/// is stored, so `%VARIABLES%` in it stay as they are; terminals opened after see it.
+fn set_on_path(dir: &Path, on: bool) -> Result<(), String> {
+    let script = format!(
+        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
+         $p = [string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); $d = {}; \
+         $parts = @($p -split ';' | Where-Object {{ $_ -and $_.TrimEnd('\\') -ne $d.TrimEnd('\\') }}); \
+         if (${}) {{ $parts += $d }}; $new = $parts -join ';'; \
+         if ($new -ne $p) {{ $k.SetValue('Path', $new, 'ExpandString'); \
+         [Environment]::SetEnvironmentVariable('RKIT_SETUP_TOUCH', '1', 'User'); \
+         [Environment]::SetEnvironmentVariable('RKIT_SETUP_TOUCH', $null, 'User') }}",
+        ps(&dir.to_string_lossy()),
+        if on { "true" } else { "false" },
+    );
+    run_powershell(&script)
+}
+
 fn remove_rdrop(dir: &Path) {
+    let _ = set_on_path(dir, false);
+    let _ = std::fs::remove_file(dir.join("rdrop.com"));
     let _ = std::fs::remove_file(rdrop_link());
     let _ = quiet("reg").args(["delete", RDROP_APP_PATH, "/f"]).status();
     for (key, _) in RDROP_MENU_KEYS {
