@@ -440,6 +440,24 @@ pub fn clipboard_stamp() -> u32 {
     0
 }
 
+/// Whether all these keys (virtual-key codes) are held down right now.
+pub fn keys_down(keys: &[i32]) -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetAsyncKeyState(key: i32) -> i16;
+        }
+        // SAFETY: plain queries with no pointers involved.
+        keys.iter().all(|k| unsafe { GetAsyncKeyState(*k) } < 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = keys;
+        false
+    }
+}
+
 /// Whether a file or folder here is hidden, as Explorer hides it.
 pub fn is_hidden(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]

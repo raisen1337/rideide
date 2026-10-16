@@ -150,6 +150,9 @@ passwords are encrypted by Windows for your account.
 - Drag rows from one pane onto another to copy them, or files from Explorer onto a pane. Server
   to server goes straight across, without a stop on this computer's disk. Folders copy with all
   they hold, and files keep their modification times.
+- Folders go as one compressed stream through ssh, packed and unpacked by tar on the server:
+  400 small files go up in under a second, where file by file over SFTP (as other clients
+  do it) takes about a minute. Servers without a shell or tar get the folder over SFTP.
 - Transfers run in the background, three at a time, while you keep browsing; the bar at the
   bottom shows how far they are and opens the full list.
 - It works like Explorer: Ctrl+C, Ctrl+X and Ctrl+V (with Explorer's own clipboard), Delete to

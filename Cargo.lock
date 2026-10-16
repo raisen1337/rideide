@@ -4090,15 +4090,17 @@ dependencies = [
 
 [[package]]
 name = "rdrop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
+ "flate2",
  "image",
  "raw-window-handle",
  "resvg",
  "rodio",
  "serde",
  "serde_json",
+ "tar",
  "winresource",
 ]
 
@@ -4295,7 +4297,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "flate2",
  "ignore",
@@ -4308,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "postcard",
  "serde",
@@ -4345,7 +4347,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "eframe",
  "flate2",

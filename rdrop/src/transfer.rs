@@ -2,6 +2,7 @@
 //! computer or a server, server to server included. A few run at once, each on sessions of
 //! its own, so browsing and starting more goes on while they run.
 
+use crate::bulk;
 use crate::sftp::{self, Session};
 use eframe::egui::Context;
 use std::collections::HashMap;
@@ -296,6 +297,32 @@ fn run(
     progress: Progress,
     total: &mut dyn FnMut(u64),
 ) -> Result<(), String> {
+    // A folder goes as one stream when the server has a shell with tar.
+    let is_dir = match from {
+        Place::Local => Path::new(from_path).is_dir(),
+        Place::Server(host) => session(sessions, host)?.stat(from_path)?.is_dir(),
+    };
+    if is_dir {
+        match (from, to) {
+            (Place::Local, Place::Server(host)) if bulk::can(host) => {
+                let (mut files, mut dirs) = (Vec::new(), Vec::new());
+                walk_local(Path::new(from_path), "", &mut files, &mut dirs)
+                    .map_err(|e| e.to_string())?;
+                total(files.iter().map(|f| f.size).sum());
+                return bulk::upload(Path::new(from_path), host, to_dir, progress);
+            }
+            (Place::Server(host), Place::Local) if bulk::can(host) => {
+                total(bulk::size(host, from_path));
+                return bulk::download(host, from_path, Path::new(to_dir), progress);
+            }
+            (Place::Server(a), Place::Server(b)) if bulk::can(a) && bulk::can(b) => {
+                let size = bulk::size(a, from_path);
+                total(size);
+                return bulk::between(a, from_path, b, to_dir, size, progress);
+            }
+            _ => {}
+        }
+    }
     // What there is to copy, and the folders to make for it.
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
     match from {
@@ -705,6 +732,127 @@ mod tests {
             "bb"
         );
         assert_eq!(seen, 5);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Many small files, as one stream and file by file, against a real server, by hand:
+    /// RDROP_TEST_HOST (and RDROP_TEST_HOST2) name hosts from ~/.ssh/config.
+    #[test]
+    #[ignore]
+    fn many_small_files_on_real_servers() {
+        let Ok(host) = std::env::var("RDROP_TEST_HOST") else {
+            return;
+        };
+        let other = std::env::var("RDROP_TEST_HOST2").unwrap_or(host.clone());
+        let base = std::env::temp_dir().join(format!("rdrop-many-{}", std::process::id()));
+        let src = base.join("modules");
+        for i in 0..400 {
+            let dir = src.join(format!("pkg{}", i % 40));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("file{i}.js")),
+                format!(
+                    "module.exports = {i};
+"
+                )
+                .repeat(20),
+            )
+            .unwrap();
+        }
+        let remote = format!("/tmp/rdrop-test-many-{}", std::process::id());
+        let server = Place::Server(host.clone());
+        let mut s = Session::connect(&host).unwrap();
+        s.mkdir(&remote).unwrap();
+        let mut sessions = HashMap::new();
+        let count = |s: &mut Session, dir: &str| {
+            let mut files = Vec::new();
+            let mut dirs = Vec::new();
+            walk_remote(s, dir, "", &mut files, &mut dirs).unwrap();
+            files.len()
+        };
+
+        // File by file over SFTP, then as one stream.
+        bulk::set_can(&host, false);
+        let started = Instant::now();
+        s.mkdir(&format!("{remote}/sftp")).unwrap();
+        run(
+            &mut sessions,
+            &Place::Local,
+            &src.display().to_string(),
+            &server,
+            &format!("{remote}/sftp"),
+            &mut |_, _| true,
+            &mut |_| {},
+        )
+        .unwrap();
+        let by_file = started.elapsed();
+        bulk::set_can(&host, true);
+        let started = Instant::now();
+        run(
+            &mut sessions,
+            &Place::Local,
+            &src.display().to_string(),
+            &server,
+            &format!("{remote}/tar"),
+            &mut |_, _| true,
+            &mut |_| {},
+        )
+        .unwrap();
+        let as_stream = started.elapsed();
+        eprintln!("400 small files up: file by file {by_file:?}, as one stream {as_stream:?}");
+        assert_eq!(count(&mut s, &format!("{remote}/tar/modules")), 400);
+        assert_eq!(count(&mut s, &format!("{remote}/sftp/modules")), 400);
+
+        // Down again, as one stream.
+        let back = base.join("back");
+        std::fs::create_dir_all(&back).unwrap();
+        let started = Instant::now();
+        run(
+            &mut sessions,
+            &server,
+            &format!("{remote}/tar/modules"),
+            &Place::Local,
+            &back.display().to_string(),
+            &mut |_, _| true,
+            &mut |_| {},
+        )
+        .unwrap();
+        eprintln!(
+            "400 small files down as one stream: {:?}",
+            started.elapsed()
+        );
+        let text =
+            std::fs::read_to_string(back.join("modules").join("pkg7").join("file7.js")).unwrap();
+        assert_eq!(
+            text,
+            "module.exports = 7;
+"
+            .repeat(20)
+        );
+
+        // Server to server.
+        bulk::set_can(&other, true);
+        let mut t = Session::connect(&other).unwrap();
+        let remote2 = format!("{remote}-to");
+        let started = Instant::now();
+        run(
+            &mut sessions,
+            &server,
+            &format!("{remote}/tar/modules"),
+            &Place::Server(other.clone()),
+            &remote2,
+            &mut |_, _| true,
+            &mut |_| {},
+        )
+        .unwrap();
+        eprintln!(
+            "400 small files server to server as one stream: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(count(&mut t, &format!("{remote2}/modules")), 400);
+
+        t.remove_all(&remote2).unwrap();
+        s.remove_all(&remote).unwrap();
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -3,6 +3,11 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.4.0
+
+- **Folders with many small files fly.** A folder now goes as one compressed stream through ssh, packed and unpacked by tar on the server, instead of file by file over SFTP: 400 small files went up in 0.7 seconds instead of 63, down in 1.6 and from one server to another in 1.7. Servers without a shell or tar still get the folder file by file.
+- Ctrl+C, Ctrl+X and Ctrl+V work, also with files copied in Explorer, and the other keys work after clicking a row; before, a click on a row took the keys away from the list.
+
 ## 0.3.0
 
 - **Works like Explorer.** Ctrl+C, Ctrl+X and Ctrl+V copy and move files, between panes, servers and Explorer itself: copy in Explorer, paste in rdrop, and the other way round. Delete sends files on this computer to the Recycle Bin; Shift+Delete, and anything on a server, asks first and deletes for good.

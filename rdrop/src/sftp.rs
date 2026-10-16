@@ -265,7 +265,7 @@ pub fn answer_askpass() -> bool {
 
 /// Starts `ssh` for the SFTP subsystem without a console window. Without a password it
 /// asks nothing (keys and the agent only); with one, ssh asks rdrop for it.
-fn ssh(key: &str) -> Command {
+fn ssh_base(key: &str) -> (Command, Target) {
     let target = target(key);
     let mut command = Command::new("ssh");
     command.args([
@@ -301,14 +301,45 @@ fn ssh(key: &str) -> Command {
             command.args(["-o", "BatchMode=yes"]);
         }
     }
-    command.arg("-s").args(&target.args).arg("sftp");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    (command, target)
+}
+
+/// `ssh` for the SFTP subsystem.
+fn ssh(key: &str) -> Command {
+    let (mut command, target) = ssh_base(key);
+    command.arg("-s").args(&target.args).arg("sftp");
     command
+}
+
+/// `ssh` running `script` in the server's shell, signed in as for SFTP.
+pub fn shell(key: &str, script: &str) -> Command {
+    let (mut command, target) = ssh_base(key);
+    command.args(&target.args).arg(script);
+    command
+}
+
+/// Runs a short script on the server and gives back what it printed, if it worked.
+pub fn run(key: &str, script: &str) -> Option<String> {
+    let out = shell(key, script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Text quoted for a POSIX shell.
+pub fn quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 impl Session {

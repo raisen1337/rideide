@@ -45,12 +45,22 @@ pub(super) struct Props {
 impl App {
     /// The keys, as Explorer has them, for the pane in focus.
     pub(super) fn keys(&mut self, ctx: &Context) {
+        // Ctrl+V as Windows sees it: egui only reports a paste when the clipboard holds
+        // text, and files copied in Explorer aren't text. The press is caught as it starts.
+        let paste_down = winshell::keys_down(&[0x11, 0x56]) && ctx.input(|i| i.focused);
+        let paste_pressed = paste_down && !std::mem::replace(&mut self.paste_down, paste_down);
+        if !paste_down {
+            self.paste_down = false;
+        }
+        // Keys go to the panes unless something else wants them: a dialog, the preview, a
+        // name being edited, or a text box being typed in. A picked row having the focus
+        // doesn't count.
         if self.dialog.is_some()
             || self.auth.is_some()
             || self.preview.is_some()
             || self.props.is_some()
             || self.renaming.is_some()
-            || ctx.memory(|m| m.focused().is_some())
+            || typing(ctx)
         {
             return;
         }
@@ -61,13 +71,20 @@ impl App {
         let pressed = |k: Key, m: Modifiers| ctx.input_mut(|i| i.consume_key(m, k));
         let ctrl = Modifiers::COMMAND;
         let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-        if pressed(Key::C, ctrl) && !names.is_empty() {
+        // egui turns Ctrl+C and Ctrl+X into events of their own.
+        let (copy, cut) = ctx.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, Event::Copy)),
+                i.events.iter().any(|e| matches!(e, Event::Cut)),
+            )
+        });
+        if copy && !names.is_empty() {
             self.set_clip(id, &names, false);
         }
-        if pressed(Key::X, ctrl) && !names.is_empty() {
+        if cut && !names.is_empty() {
             self.set_clip(id, &names, true);
         }
-        if pressed(Key::V, ctrl) {
+        if paste_pressed {
             self.paste(id);
         }
         if pressed(Key::F5, Modifiers::NONE) && !names.is_empty() {

@@ -1,6 +1,6 @@
 [package]
 name = "rdrop"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 
@@ -13,6 +13,9 @@ raw-window-handle = "0.6"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 resvg = { version = "0.48", default-features = false }
 rodio = "0.23.0"
+# Folders as one tar stream through ssh.
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
 
 [build-dependencies]
 winresource = "0.1"

@@ -481,7 +481,7 @@ pub fn show(ctx: &Context, p: &mut Preview) -> Act {
     if keys.0 || modal.should_close() {
         act = Act::Close;
     }
-    if act == Act::None && ctx.memory(|m| m.focused().is_none()) {
+    if act == Act::None && !crate::typing(ctx) {
         if keys.1 {
             act = Act::Next;
         }

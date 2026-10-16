@@ -28,6 +28,7 @@ mod theme;
 #[path = "../../rterm/src/window.rs"]
 mod window;
 
+mod bulk;
 mod explorer;
 mod pane;
 mod preview;
@@ -541,6 +542,8 @@ struct App {
     props: Option<explorer::Props>,
     /// What happened last, when it went well.
     note: String,
+    /// Ctrl+V is held, so one press pastes once.
+    paste_down: bool,
     drives: Vec<winshell::Drive>,
     drives_at: f64,
     known: Vec<KnownFolder>,
@@ -589,6 +592,7 @@ impl App {
             opened: Vec::new(),
             props: None,
             note: String::new(),
+            paste_down: false,
             drives: winshell::drives(),
             drives_at: 0.0,
             known: known_folders(),
@@ -2079,6 +2083,12 @@ impl App {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+/// Whether a text box has the keyboard (a row being picked doesn't count).
+fn typing(ctx: &Context) -> bool {
+    ctx.memory(|m| m.focused())
+        .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
 }
 
 /// A name a file or folder can have, here and on a server.
