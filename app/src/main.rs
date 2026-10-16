@@ -1615,7 +1615,8 @@ impl App {
         }
         let saved = Some((stored("host"), stored("root"))).filter(|(_, root)| !root.is_empty());
         let download_dir = Some(PathBuf::from(stored("download_dir"))).filter(|p| p.is_dir());
-        let theme_name = stored("theme");
+        // RIDE_THEME picks the theme from outside, for checking one.
+        let theme_name = std::env::var("RIDE_THEME").unwrap_or_else(|_| stored("theme"));
         let glass = stored("glass") == "true";
         let icon_set = stored("icon_set");
         let term_dock = stored("term_dock");
@@ -4975,6 +4976,7 @@ impl App {
                     }))
                     .show(ui, |ui| editor_action = tab_body(ui, tab, &root));
                 resize_edges(&ctx);
+                theme::square_corners(&ctx);
             });
             if save {
                 self.save_tab(index);
@@ -5023,6 +5025,7 @@ impl App {
                     )
                     .show(ui, |ui| self.chat_ui(ui, true));
                 resize_edges(&ctx);
+                theme::square_corners(&ctx);
                 if dock {
                     self.chat_detached = false;
                 }
@@ -5604,6 +5607,7 @@ impl eframe::App for App {
             // Whatever that frame meant to ask for is lost: the next one is drawn anyway.
             ui.ctx().request_repaint();
         }
+        theme::square_corners(ui.ctx());
     }
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // Fully clear under glass, so the backdrop shows through the see-through panes.

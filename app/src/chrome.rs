@@ -145,11 +145,38 @@ impl App {
                 );
                 let host = share::label(&self.host).unwrap_or_else(|| self.host.trim().to_string());
                 let folder = file_name(&self.root).to_string();
-                let text = pieces(&[
-                    (&format!("{}  ", icons::SEARCH), theme::COMMENT()),
-                    (&folder, theme::TEXT()),
-                    (&format!("  —  {host}"), theme::COMMENT()),
-                ]);
+                let text = if theme::tty() {
+                    // The terminal look: the folder as a shell prompt shows it.
+                    let (mut user, path) = prompt_path(&self.root);
+                    let local = host.contains(' ');
+                    if local && user.is_none() {
+                        user = std::env::var("USERNAME").ok().map(|u| u.to_lowercase());
+                    }
+                    let machine = if local {
+                        std::env::var("COMPUTERNAME")
+                            .map(|n| n.to_lowercase())
+                            .unwrap_or_else(|_| "localhost".into())
+                    } else {
+                        host.clone()
+                    };
+                    let who = match user {
+                        Some(user) => format!("{user}@{machine}"),
+                        None => machine,
+                    };
+                    pieces(&[
+                        (&who, theme::ACCENT()),
+                        (":", theme::TEXT()),
+                        (&path, theme::FUNC()),
+                        ("$ ", theme::TEXT()),
+                        ("\u{2588}", theme::ACCENT().gamma_multiply(0.7)),
+                    ])
+                } else {
+                    pieces(&[
+                        (&format!("{}  ", icons::SEARCH), theme::COMMENT()),
+                        (&folder, theme::TEXT()),
+                        (&format!("  —  {host}"), theme::COMMENT()),
+                    ])
+                };
                 let galley = egui::WidgetText::from(text).into_galley(
                     ui,
                     Some(TextWrapMode::Truncate),
@@ -612,4 +639,40 @@ pub(super) fn field(
 /// A dialog's explanation: the text, in the body's colour, wrapped.
 pub(super) fn note(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT())).wrap());
+}
+
+/// A folder as a shell prompt shows it: the user it belongs to, when the path says, and
+/// the path with that user's home written `~`.
+fn prompt_path(root: &str) -> (Option<String>, String) {
+    let root = root.replace('\\', "/");
+    let home = |user: &str, rest: &str| (Some(user.to_string()), format!("~{rest}"));
+    if root == "/root" || root.starts_with("/root/") {
+        return home("root", &root[5..]);
+    }
+    for base in ["/home/", "/Users/"] {
+        if let Some(at) = root.find(base).filter(|&at| at <= 2) {
+            let after = &root[at + base.len()..];
+            let (user, rest) = after.split_at(after.find('/').unwrap_or(after.len()));
+            if !user.is_empty() {
+                return home(user, rest);
+            }
+        }
+    }
+    (None, root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prompt_path;
+
+    #[test]
+    fn a_folder_reads_as_a_shell_prompt() {
+        let some = |user: &str, path: &str| (Some(user.to_string()), path.to_string());
+        assert_eq!(prompt_path("/root"), some("root", "~"));
+        assert_eq!(prompt_path("/root/shop"), some("root", "~/shop"));
+        assert_eq!(prompt_path("/home/ana/www/site"), some("ana", "~/www/site"));
+        assert_eq!(prompt_path("C:\\Users\\ana\\ride"), some("ana", "~/ride"));
+        assert_eq!(prompt_path("/var/www"), (None, "/var/www".to_string()));
+        assert_eq!(prompt_path("/rootfs/x"), (None, "/rootfs/x".to_string()));
+    }
 }

@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.18
+
+- **A new theme, Terminal**, for a Linux console feel across the whole window, not only its colours: one monospaced font for everything, square corners, hard shadows under menus and dialogs, the greens, cyans and blues of a shell prompt, and the title bar showing the open folder as a prompt (`root@vespucci:~/shop$`). Pick it under Themes.
+- A few labels showed garbled characters instead of "…", "·", "→" and "—" ("Import a theme file…", "Go to line…", "Press the keys…"); they read properly again.
+
 ## 0.9.17
 
 - **Opening an image no longer freezes ride.** The picture is decoded in the background while its tab shows a spinner; before, a large photo or screenshot held the whole window for a moment.

@@ -45,6 +45,9 @@ pub struct Palette {
     pub term_fg: Color32,
     /// The 16 ANSI colours: normal, then bright.
     pub ansi: [Color32; 16],
+    /// The whole interface looks like a terminal: one monospaced font everywhere, square
+    /// corners, hard shadows, and a shell prompt in the title bar.
+    pub tty: bool,
 }
 
 const fn rgb(hex: u32) -> Color32 {
@@ -115,6 +118,7 @@ pub const GRAPHITE: Palette = Palette {
     constant: rgb(0xd0a4a4),
     term_fg: rgb(0xd6d6d6),
     ansi: DARK_ANSI,
+    tty: false,
 };
 
 /// Graphite with a cool, blue-grey cast.
@@ -170,6 +174,54 @@ pub const DAY: Palette = Palette {
     constant: rgb(0xa8432d),
     term_fg: rgb(0x1f1f1f),
     ansi: LIGHT_ANSI,
+    tty: false,
+};
+
+/// A Linux console: near-black with a green cast, the xterm 256-colour greens, cyans and
+/// blues a shell prompt is drawn in, and the terminal look for the whole interface.
+pub const TERMINAL: Palette = Palette {
+    dark: true,
+    window_bg: rgb(0x090b09),
+    editor_bg: rgb(0x0c0f0c),
+    panel_bg: rgb(0x090b09),
+    line: rgb(0x1e281e),
+    current_line: rgb(0x121812),
+    selection: rgb(0x1f3d26),
+    cursor: rgb(0x5fd75f),
+    line_number: rgb(0x3d553d),
+    accent: rgb(0x5fd75f),
+    text: rgb(0xc5d1c2),
+    keyword: rgb(0x87d75f),
+    type_: rgb(0x5fd7d7),
+    func: rgb(0x87afff),
+    string: rgb(0xd7d787),
+    number: rgb(0xd787d7),
+    comment: rgb(0x5c745c),
+    punct: rgb(0x97a597),
+    variable: rgb(0xc5d1c2),
+    param: rgb(0xd7af87),
+    property: rgb(0x87d7af),
+    constant: rgb(0xffaf5f),
+    term_fg: rgb(0xc5d1c2),
+    ansi: [
+        rgb(0x1c201c),
+        rgb(0xd75f5f),
+        rgb(0x5fd75f),
+        rgb(0xd7d75f),
+        rgb(0x5f87d7),
+        rgb(0xaf5fd7),
+        rgb(0x5fafaf),
+        rgb(0xc5d1c2),
+        rgb(0x4e5a4e),
+        rgb(0xff7b7b),
+        rgb(0x87ff87),
+        rgb(0xffff87),
+        rgb(0x87afff),
+        rgb(0xd787ff),
+        rgb(0x87d7d7),
+        rgb(0xffffff),
+    ],
+    tty: true,
 };
 
 thread_local! {
@@ -263,6 +315,10 @@ pub fn TERM_FG() -> Color32 {
 }
 pub fn ANSI() -> [Color32; 16] {
     current().ansi
+}
+/// The terminal look is on (see `Palette::tty`).
+pub fn tty() -> bool {
+    current().tty
 }
 /// Secondary interface text: the text colour, stepped back toward the background.
 /// Unlike a syntax colour, it stays neutral whatever the theme does with its tokens.
@@ -457,7 +513,62 @@ pub fn install_fonts_with(
             .families
             .insert(FontFamily::Name(name.as_str().into()), list);
     }
-    ctx.set_fonts(fonts);
+    FONTS.with(|f| *f.borrow_mut() = Some(fonts.clone()));
+    FONTS_TTY.with(|f| f.set(Some(tty())));
+    ctx.set_fonts(tty_fonts(fonts));
+}
+
+thread_local! {
+    /// The fonts last installed, and whether they were given out with the terminal look.
+    static FONTS: std::cell::RefCell<Option<egui::FontDefinitions>> =
+        const { std::cell::RefCell::new(None) };
+    static FONTS_TTY: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// With the terminal look, interface text is drawn in the code font too.
+fn tty_fonts(mut fonts: egui::FontDefinitions) -> egui::FontDefinitions {
+    if tty() {
+        if let Some(mono) = fonts.families.get(&FontFamily::Monospace).cloned() {
+            fonts.families.insert(FontFamily::Proportional, mono);
+        }
+    }
+    fonts
+}
+
+/// Installs the fonts again when the terminal look has been switched on or off.
+fn sync_fonts(ctx: &Context) {
+    let tty = tty();
+    if FONTS_TTY.with(|f| f.replace(Some(tty))) == Some(tty) {
+        return;
+    }
+    if let Some(fonts) = FONTS.with(|f| f.borrow().clone()) {
+        ctx.set_fonts(tty_fonts(fonts));
+    }
+}
+
+/// With the terminal look, takes the rounding off every rectangle painted this frame,
+/// including the ones drawn with a radius of their own.
+pub fn square_corners(ctx: &Context) {
+    if !tty() {
+        return;
+    }
+    fn square(shape: &mut egui::Shape) {
+        match shape {
+            egui::Shape::Rect(rect) => rect.corner_radius = CornerRadius::ZERO,
+            egui::Shape::Vec(shapes) => shapes.iter_mut().for_each(square),
+            _ => {}
+        }
+    }
+    let layers: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().collect());
+    ctx.graphics_mut(|graphics| {
+        for layer in layers.into_iter().chain([egui::LayerId::background()]) {
+            if let Some(list) = graphics.get_mut(layer) {
+                for i in 0..list.next_idx().0 {
+                    list.mutate_shape(egui::layers::ShapeIdx(i), |s| square(&mut s.shape));
+                }
+            }
+        }
+    });
 }
 
 /// A file mapped into memory for as long as the program runs: its pages are read from the
@@ -545,6 +656,7 @@ fn map_file(path: &std::path::Path) -> Option<&'static [u8]> {
 /// Styles egui from the current palette.
 pub fn apply(ctx: &Context) {
     let p = current();
+    sync_fonts(ctx);
     ctx.set_theme(if p.dark {
         egui::Theme::Dark
     } else {
@@ -619,6 +731,38 @@ pub fn apply(ctx: &Context) {
             widget.bg_stroke = Stroke::NONE;
             widget.fg_stroke = Stroke::new(1.0, p.text);
             widget.expansion = 0.0;
+        }
+
+        if p.tty {
+            // One monospaced font, a little smaller, since its letters are wider.
+            style.text_styles = [
+                (TextStyle::Heading, FontId::monospace(16.0)),
+                (TextStyle::Body, FontId::monospace(13.0)),
+                (TextStyle::Button, FontId::monospace(13.0)),
+                (TextStyle::Small, FontId::monospace(11.5)),
+                (TextStyle::Monospace, FontId::monospace(13.0)),
+            ]
+            .into();
+            // Boxes as a text interface draws them: edges in the prompt's green, and hard
+            // shadows like a dialog in a console.
+            let edge = mix(p.panel_bg, p.accent, 0.45);
+            v.window_stroke = Stroke::new(1.0, edge);
+            v.window_fill = p.panel_bg;
+            let hard = |offset: i8| egui::epaint::Shadow {
+                offset: [offset, offset],
+                blur: 0,
+                spread: 0,
+                color: Color32::from_black_alpha(200),
+            };
+            v.popup_shadow = hard(4);
+            v.window_shadow = hard(6);
+            v.selection.bg_fill = mix(p.panel_bg, p.accent, 0.22);
+            v.selection.stroke = Stroke::new(1.0, p.accent);
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.line);
+            v.widgets.hovered.bg_stroke = Stroke::new(1.0, edge);
+            v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
+            v.widgets.open.bg_stroke = Stroke::new(1.0, edge);
+            v.text_cursor.stroke = Stroke::new(2.0, p.cursor);
         }
     });
 }
@@ -878,6 +1022,7 @@ pub fn from_vscode(theme: &Value) -> Palette {
         constant,
         term_fg: first(&["terminal.foreground"]).unwrap_or(text),
         ansi,
+        tty: false,
     };
     legible(palette)
 }
@@ -1066,7 +1211,7 @@ mod tests {
 
     #[test]
     fn every_built_in_palette_passes_its_own_legibility_check() {
-        for palette in [GRAPHITE, SLATE, DAY] {
+        for palette in [GRAPHITE, SLATE, DAY, TERMINAL] {
             let checked = legible(palette);
             assert_eq!(checked.panel_bg, palette.panel_bg);
             assert_eq!(checked.text, palette.text);

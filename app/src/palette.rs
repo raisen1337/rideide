@@ -150,7 +150,7 @@ impl App {
     /// Every command that makes sense right now.
     fn commands(&self) -> Vec<Entry> {
         let mut list: Vec<Entry> = Vec::new();
-        // `keys` names the command's shortcut, as Settings â†’ Keyboard shortcuts has it.
+        // `keys` names the command's shortcut, as Settings → Keyboard shortcuts has it.
         let mut add = |icon: char, label: &str, keys: &str, command: Command| {
             let icon_color = if label.starts_with("Claude") {
                 theme::CLAUDE()
@@ -367,7 +367,7 @@ impl App {
         if self.docked_active().is_some() {
             add(
                 icons::CHEVRON_RIGHT,
-                "Go to lineâ€¦",
+                "Go to line…",
                 "palette.line",
                 Command::AskLine,
             );

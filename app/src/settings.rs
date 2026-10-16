@@ -933,7 +933,7 @@ impl App {
                     };
                     if !clashes.is_empty() {
                         if !note.is_empty() {
-                            note.push_str(" Â· ");
+                            note.push_str(" · ");
                         }
                         note.push_str(&format!("same keys as {}", clashes.join(", ")));
                     }
@@ -957,7 +957,7 @@ impl App {
                     }
                     let waiting = recording.as_deref() == Some(command.id);
                     let text = if waiting {
-                        "Press the keysâ€¦".to_string()
+                        "Press the keys…".to_string()
                     } else if shown.is_empty() {
                         "Not set".to_string()
                     } else {

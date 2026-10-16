@@ -3,10 +3,11 @@
 
 use super::*;
 
-const BUILT_IN: [(&str, theme::Palette); 3] = [
+const BUILT_IN: [(&str, theme::Palette); 4] = [
     ("Graphite", theme::GRAPHITE),
     ("Slate", theme::SLATE),
     ("Day", theme::DAY),
+    ("Terminal", theme::TERMINAL),
 ];
 
 const QUERY_URL: &str = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery";
@@ -587,9 +588,9 @@ impl App {
                 self.themes
                     .packs
                     .insert(id.to_string(), PackState::Loading(rx));
-                return "Loading previewâ€¦".into();
+                return "Loading preview…".into();
             }
-            Some(PackState::Loading(_)) => return "Loading previewâ€¦".into(),
+            Some(PackState::Loading(_)) => return "Loading preview…".into(),
             Some(PackState::Failed) => return "No preview".into(),
             Some(PackState::Ready(pack)) => {
                 if icons {
@@ -802,7 +803,7 @@ impl App {
                 ui.separator();
                 ui.add_space(4.0);
                 if ui
-                    .button(format!("{}  Import a theme fileâ€¦", icons::ADD))
+                    .button(format!("{}  Import a theme file…", icons::ADD))
                     .clicked()
                 {
                     self.import_theme_file(&ctx);
@@ -1179,7 +1180,7 @@ mod tests {
         assert!(total > 0 && !extensions.is_empty());
         let first = &extensions[0];
         println!(
-            "{} by {} â€” {} installs, icon: {:?}",
+            "{} by {} — {} installs, icon: {:?}",
             first.name, first.publisher, first.installs, first.icon_url
         );
         assert!(marketplace_id(&first.id).is_some());
