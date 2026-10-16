@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.12
+
+- **Claude's small jobs use about 40 times fewer tokens.** Commit messages, inline edits, AI search and the catch-up used to start Claude Code with everything it has: its full instructions, every tool, your MCP servers and skills, about 29,000 tokens before the job itself. They now get a short instruction and only the tools they need (none, or reading and searching for AI search): under 1,000 tokens. A host with an older Claude Code gets the job the old way.
+- **The chat shows how big the conversation is** beside its title: what each message sends again. Click it to compact the conversation into a summary (as `/compact` does), which makes every later message much smaller; it turns amber from 80k tokens. When Claude Code compacts on its own, the chat says so, with the sizes before and after.
+
 ## 0.9.11
 
 - `--open=FILE` beside `--host=NAME` opens that file on the server straight away: what rdrop's "Edit in ride" uses, so a file on a server is edited in ride and saved there directly.

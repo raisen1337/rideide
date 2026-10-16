@@ -264,6 +264,9 @@ pub enum Action {
     Wake,
     /// The history was opened: list the conversations Claude Code had in a terminal.
     LoadHistory,
+    /// Shrink the conversation to a summary (Claude Code's `/compact`), so every later
+    /// message sends far less.
+    Compact,
 }
 
 pub struct Chat {
@@ -293,6 +296,9 @@ pub struct Chat {
     pub pinned: bool,
     /// Name shown in the header.
     pub title: String,
+    /// How many tokens the conversation takes now, as the last answer reported them: what
+    /// every next message sends again.
+    context_tokens: u64,
     /// One of the agents in the Agents view, rather than the side chat.
     pub team_member: bool,
     /// Tools it may use without asking (Claude Code's `--allowedTools`), such as an MCP
@@ -457,6 +463,7 @@ impl Default for Chat {
             partial: Vec::new(),
             stderr: String::new(),
             busy: false,
+            context_tokens: 0,
             mode: Mode::Ask,
             model_choice: "",
             effort: "",
@@ -783,6 +790,23 @@ impl Chat {
         let msg = json!({
             "type": "user",
             "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+        });
+        format!("{msg}\n").into_bytes()
+    }
+
+    /// Asks Claude Code to replace the conversation with a summary of it. Nothing to send
+    /// while Claude is busy.
+    pub fn compact(&mut self) -> Vec<u8> {
+        if self.busy {
+            return Vec::new();
+        }
+        self.busy = true;
+        self.expect_checkpoint = false;
+        self.items
+            .push(Item::Note("Compacting the conversation…".into()));
+        let msg = json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{ "type": "text", "text": "/compact" }] },
         });
         format!("{msg}\n").into_bytes()
     }
@@ -1631,6 +1655,28 @@ impl Chat {
                 if let Some(model) = v["model"].as_str() {
                     self.model = model.to_string();
                 }
+                // Compacted, by the button or by Claude Code itself when the conversation
+                // got near its limit.
+                if v["subtype"] == "compact_boundary" {
+                    let meta = &v["compact_metadata"];
+                    let before = meta["pre_tokens"].as_u64().unwrap_or(0);
+                    let after = meta["post_tokens"].as_u64().unwrap_or(0);
+                    self.context_tokens = after;
+                    if matches!(self.items.last(), Some(Item::Note(n)) if n.starts_with("Compacting"))
+                    {
+                        self.items.pop();
+                    }
+                    let how = if meta["trigger"] == "auto" {
+                        "Compacted on its own"
+                    } else {
+                        "Compacted"
+                    };
+                    self.items.push(Item::Note(format!(
+                        "{how}: the conversation went from {} to {} tokens; Claude keeps a summary of what came before.",
+                        thousands(before),
+                        thousands(after)
+                    )));
+                }
             }
             "stream_event" => {
                 let event = &v["event"];
@@ -1648,6 +1694,18 @@ impl Chat {
                 }
             }
             "assistant" => {
+                let usage = &v["message"]["usage"];
+                let size = [
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                ]
+                .iter()
+                .filter_map(|k| usage[*k].as_u64())
+                .sum::<u64>();
+                if size > 0 {
+                    self.context_tokens = size;
+                }
                 for block in v["message"]["content"].as_array().into_iter().flatten() {
                     match block["type"].as_str().unwrap_or("") {
                         "text" if !self.got_delta => {
@@ -1842,6 +1900,24 @@ impl Chat {
                 }
                 if icon_button(ui, icons::ADD, "New chat") {
                     action = Some(Action::NewChat);
+                }
+                // How big the conversation is, and the way to make it small again.
+                if self.context_tokens > 0 {
+                    let big = self.context_tokens >= 80_000;
+                    let color = if big { egui::Color32::from_rgb(0xe5, 0xc0, 0x7b) } else { theme::COMMENT() };
+                    let label = RichText::new(format!("{}k", (self.context_tokens + 500) / 1000))
+                        .small()
+                        .color(color);
+                    let tip = format!(
+                        "The conversation is {} tokens: every message sends it again (mostly from cache). \
+                         Click to compact it into a summary, or start a new chat for something unrelated.",
+                        thousands(self.context_tokens)
+                    );
+                    let can = !self.busy && self.session.is_some();
+                    let button = egui::Button::new(label).frame(big).small();
+                    if ui.add_enabled(can, button).on_hover_text(tip).clicked() {
+                        action = Some(Action::Compact);
+                    }
                 }
                 if !self.team_member && icon_button(ui, icons::HISTORY, "Earlier chats") {
                     self.show_history = true;
@@ -2819,6 +2895,31 @@ mod tests {
     }
 
     #[test]
+    fn the_conversation_size_follows_answers_and_compaction() {
+        let mut chat = Chat::default();
+        chat.begin_turn("hi", None);
+        chat.on_stdout(br#"{"type":"assistant","session_id":"s1","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":16538,"cache_creation_input_tokens":11044},"content":[{"type":"text","text":"Hi"}]}}
+{"type":"result","result":"Hi"}
+"#);
+        assert_eq!(chat.context_tokens, 27_584);
+        assert!(!chat.compact().is_empty());
+        assert!(chat.compact().is_empty(), "not twice while busy");
+        chat.on_stdout(br#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":27589,"post_tokens":1832}}
+{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation"}}
+{"type":"result","result":""}
+"#);
+        assert_eq!(chat.context_tokens, 1832);
+        assert!(!chat.busy);
+        assert!(!chat
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::User(t) if t.contains("continued"))));
+        assert!(
+            matches!(chat.items.last(), Some(Item::Note(n)) if n.contains("27,589") && n.contains("1,832"))
+        );
+    }
+
+    #[test]
     fn base64_matches_the_standard() {
         assert_eq!(
             base64_decode(&base64(b"hello world!?")).unwrap(),
@@ -2933,4 +3034,17 @@ fn agent_card(ui: &mut Ui, kind: &str, task: &str, steps: usize, running: bool) 
     }
     card.on_hover_text("Open this agent's conversation")
         .clicked()
+}
+
+/// 27589 as "27,589".
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

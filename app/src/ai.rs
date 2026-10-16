@@ -64,6 +64,29 @@ pub(super) struct Job {
     err: String,
     /// A Claude run ends at its `result` event; a shell command when it exits.
     claude: bool,
+    /// A lean Claude run's prompt and model, to run again the full way when the host's
+    /// Claude Code is too old for the lean options.
+    retry: Option<(String, String)>,
+}
+
+/// The few tools a background run needs: none, except for AI search, which reads.
+fn job_tools(kind: &JobKind) -> &'static str {
+    match kind {
+        JobKind::AiSearch => "Read,Grep,Glob",
+        _ => "",
+    }
+}
+
+/// Options that keep a background run small: only the tools it needs, no MCP servers or
+/// skills, a short system prompt in place of Claude Code's own (which with all its tools is
+/// about 29,000 tokens; this is under 1,000), and no session saved for it.
+fn lean_options(kind: &JobKind) -> String {
+    format!(
+        " --tools={} --strict-mcp-config --disable-slash-commands --no-session-persistence \
+         --system-prompt 'You work inside a code editor, for its user. Do exactly what the \
+         message asks, and reply in the form it asks for.'",
+        job_tools(kind)
+    )
 }
 
 /// A replacement Claude proposed for part of a file, waiting to be accepted or rejected.
@@ -162,6 +185,10 @@ impl App {
     // ---- background runs ----
 
     fn start_claude_job(&mut self, kind: JobKind, prompt: String, model: &str) {
+        self.start_claude_job_with(kind, prompt, model, true);
+    }
+
+    fn start_claude_job_with(&mut self, kind: JobKind, prompt: String, model: &str, lean: bool) {
         // A catch-up is shown while it is written, so it asks for the text as it comes.
         let partial = if matches!(kind, JobKind::CatchUp) {
             " --include-partial-messages"
@@ -177,10 +204,16 @@ impl App {
         } else {
             chat::FIND_CLAUDE
         };
+        let lean_flags = if lean {
+            lean_options(&kind)
+        } else {
+            String::new()
+        };
         let command = format!(
             "{find}exec claude -p --input-format stream-json --output-format stream-json --verbose \
-             --permission-mode default --model {model}{partial}"
+             --permission-mode default --model {model}{partial}{lean_flags}"
         );
+        let retry = lean.then(|| (prompt.clone(), model.to_string()));
         let proc = self.request(Request::ProcOpen {
             command,
             cwd: self.root.clone(),
@@ -195,6 +228,7 @@ impl App {
             out: Vec::new(),
             err: String::new(),
             claude: true,
+            retry,
         });
     }
 
@@ -215,6 +249,7 @@ impl App {
             out: Vec::new(),
             err: String::new(),
             claude: false,
+            retry: None,
         });
         Some(proc)
     }
@@ -288,6 +323,15 @@ impl App {
             let job = self.ai.jobs.remove(index);
             if job.claude {
                 self.request(Request::ProcClose { proc: job.proc });
+            }
+            // An older Claude Code on the host doesn't know the lean options: the same run
+            // again, the full way.
+            if let (Err(e), Some((prompt, model))) = (&outcome, &job.retry) {
+                if e.contains("unknown option") || e.contains("error: option") {
+                    let (prompt, model) = (prompt.clone(), model.clone());
+                    self.start_claude_job_with(job.kind, prompt, &model, false);
+                    return true;
+                }
             }
             self.finish_job(job.kind, outcome);
         }

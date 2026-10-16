@@ -2887,6 +2887,13 @@ impl App {
             chat::Action::Stop | chat::Action::Switched => self.chat_stop(),
             chat::Action::FindFiles(query) => self.find_files(query, None),
             chat::Action::Wake => self.chat_wake(),
+            chat::Action::Compact => {
+                self.chat_wake();
+                let data = self.chat.compact();
+                if let (Some(proc), false) = (self.chat.proc, data.is_empty()) {
+                    self.request(Request::ProcInput { proc, data });
+                }
+            }
             chat::Action::LoadHistory => {
                 if self.online() {
                     let cwd = self.root.clone();
@@ -3374,6 +3381,21 @@ impl App {
                         &mut agent.chat,
                         &mut agent.started_with,
                     );
+                }
+            }
+            Some(chat::Action::Compact) => {
+                if self.online() {
+                    let agent = &mut self.agents[index];
+                    ensure_proc(
+                        &mut self.link,
+                        &self.root,
+                        &mut agent.chat,
+                        &mut agent.started_with,
+                    );
+                    let data = agent.chat.compact();
+                    if let (Some(proc), false) = (agent.chat.proc, data.is_empty()) {
+                        self.request(Request::ProcInput { proc, data });
+                    }
                 }
             }
             Some(chat::Action::Detach(_) | chat::Action::Switched | chat::Action::LoadHistory)
