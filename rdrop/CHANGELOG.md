@@ -3,6 +3,11 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.5.2
+
+- **Dragging files in from Explorer or the desktop** lights up the pane under the mouse and says where they will go ("Copy 3 items into prod · …/var/www"), and they go into that pane. Before, with several panes, nothing showed while dragging, and the files could go into the pane last clicked instead.
+- When both folders being compared have the same name, the sync buttons say which server they update.
+
 ## 0.5.1
 
 - Chinese, Japanese and Korean file names show instead of empty boxes.

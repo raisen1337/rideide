@@ -2373,6 +2373,23 @@ impl App {
     }
 }
 
+/// Where the mouse is over the window while files are dragged in from outside: Windows'
+/// own cursor, as the window gets no mouse events during such a drag; else egui's.
+fn drag_point(ctx: &Context) -> Option<egui::Pos2> {
+    let from_os = winshell::cursor().and_then(|(x, y)| {
+        let (inner, ppp) = ctx.input(|i| {
+            (
+                i.viewport().inner_rect,
+                i.viewport().native_pixels_per_point,
+            )
+        });
+        let inner = inner?;
+        let ppp = ppp.unwrap_or(1.0);
+        Some(egui::pos2(x / ppp - inner.min.x, y / ppp - inner.min.y))
+    });
+    from_os.or_else(|| ctx.input(|i| i.pointer.hover_pos()))
+}
+
 /// Whether a text box has the keyboard (a row being picked doesn't count).
 fn typing(ctx: &Context) -> bool {
     ctx.memory(|m| m.focused())
@@ -2435,7 +2452,7 @@ impl eframe::App for App {
                 .collect()
         });
         if !dropped.is_empty() {
-            let at = ctx.input(|i| i.pointer.hover_pos());
+            let at = drag_point(&ctx);
             let target = at
                 .and_then(|p| {
                     self.rects
@@ -2446,19 +2463,58 @@ impl eframe::App for App {
                 .unwrap_or(self.focus);
             self.upload_paths(dropped, target);
         }
-        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-            if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
-                if let Some((_, r)) = self.rects.iter().find(|(_, r)| r.contains(p)) {
-                    ctx.layer_painter(egui::LayerId::new(
+        // Files from Explorer being dragged over: the pane under them lights up and says
+        // where they will go. The window hears nothing of the mouse meanwhile, so it is
+        // followed from Windows' own cursor, and the frame keeps being redrawn.
+        let hovering = ctx.input(|i| i.raw.hovered_files.len());
+        if hovering > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            if let Some(p) = drag_point(&ctx) {
+                if let Some((id, r)) = self.rects.iter().find(|(_, r)| r.contains(p)).copied() {
+                    let painter = ctx.layer_painter(egui::LayerId::new(
                         egui::Order::Foreground,
                         egui::Id::new("files"),
-                    ))
-                    .rect_stroke(
-                        r.shrink(2.0),
-                        10,
-                        (2.0, theme::ACCENT()),
-                        egui::StrokeKind::Inside,
+                    ));
+                    let (text, ok) = match self.pane(id) {
+                        Some(pane)
+                            if pane.ready() && !(pane.is_local() && pane.path.is_empty()) =>
+                        {
+                            let place = pane.place.as_ref().map_or("", |p| p.label());
+                            let what = if hovering == 1 {
+                                "1 item".to_string()
+                            } else {
+                                format!("{hovering} items")
+                            };
+                            // The last two folders of the path are enough to know where.
+                            let parts: Vec<&str> = pane
+                                .path
+                                .split(['/', '\\'])
+                                .filter(|p| !p.is_empty())
+                                .collect();
+                            let short = match parts.len() {
+                                0 => pane.path.clone(),
+                                1 | 2 => parts.join("/"),
+                                n => format!("…/{}/{}", parts[n - 2], parts[n - 1]),
+                            };
+                            (format!("Copy {what} into {place}  ·  {short}"), true)
+                        }
+                        _ => (
+                            "Open a folder in this pane to drop files into it".to_string(),
+                            false,
+                        ),
+                    };
+                    let color = if ok { theme::ACCENT() } else { BAD };
+                    painter.rect_filled(r.shrink(2.0), 10, color.gamma_multiply(0.08));
+                    painter.rect_stroke(r.shrink(2.0), 10, (2.0, color), egui::StrokeKind::Inside);
+                    let font = egui::FontId::proportional(14.0);
+                    let galley = painter.layout_no_wrap(text, font, theme::STRONG());
+                    let pill = Rect::from_center_size(
+                        r.center_bottom() - vec2(0.0, 48.0),
+                        galley.size() + vec2(28.0, 16.0),
                     );
+                    painter.rect_filled(pill, 18, theme::PANEL_BG());
+                    painter.rect_stroke(pill, 18, (1.0, color), egui::StrokeKind::Inside);
+                    painter.galley(pill.min + vec2(14.0, 8.0), galley, theme::STRONG());
                 }
             }
         }

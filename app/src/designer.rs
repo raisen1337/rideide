@@ -877,13 +877,16 @@ impl App {
         if self.embed_off {
             return;
         }
-        if self
-            .held
-            .as_ref()
-            .is_some_and(|h| !crate::embed::alive(h, parent))
-        {
-            self.held = None;
-            self.embed_place = None;
+        if let Some(held) = self.held {
+            if !crate::embed::exists(&held) {
+                // Tribib closed: it is looked for again.
+                self.held = None;
+                self.embed_place = None;
+            } else if !crate::embed::alive(&held, parent) {
+                // Still there, but out of ride's window: taken straight back.
+                crate::embed::readopt(&held, parent);
+                self.embed_place = None;
+            }
         }
         if self.held.is_some() {
             return;
@@ -917,13 +920,17 @@ impl App {
     }
 
     /// Hides Tribib when the Designer isn't shown; ride's other views are under it.
-    pub(super) fn designer_away(&mut self) {
+    /// True when it was just hidden: ride draws again at once, or the place Tribib had
+    /// stayed white until something else made it.
+    pub(super) fn designer_away(&mut self) -> bool {
         if let Some(held) = &self.held {
             if self.embed_place.is_some_and(|p| p.4) || self.embed_place.is_none() {
                 crate::embed::place(held, 0, 0, 1, 1, false);
                 self.embed_place = Some((0, 0, 1, 1, false));
+                return true;
             }
         }
+        false
     }
 
     /// As ride closes: a Tribib ride started closes with it, unseen; one that was open

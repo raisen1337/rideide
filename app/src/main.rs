@@ -3365,6 +3365,20 @@ impl App {
         }
         let index = self.active_agent.min(self.agents.len() - 1);
         self.active_agent = index;
+        // RIDE_DRAFT_LINES=N writes N lines into the agent's message box, once, to look at
+        // a long message without typing it.
+        static DRAFTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(n) = std::env::var("RIDE_DRAFT_LINES")
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            if !DRAFTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let text: Vec<String> = (1..=n)
+                    .map(|i| format!("line {i} of a very long message pasted into the box"))
+                    .collect();
+                self.agents[index].chat.add_to_input(&text.join("\n"));
+            }
+        }
         if self.team_header(ui) {
             self.team_view(ui);
             return;
@@ -5423,8 +5437,10 @@ impl App {
         if self.tribib_started > self.now - 30.0 && self.held.is_none() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if self.view != View::Designer || !online {
-            self.designer_away();
+        if (self.view != View::Designer || !online) && self.designer_away() {
+            // Twice: once for the frame that shows the place, once after the window is gone.
+            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
         }
         if self.view == View::Designer {
             if online {

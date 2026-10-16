@@ -2318,14 +2318,24 @@ impl Chat {
                             self.images.remove(n);
                         }
                     }
-                    ui.add(
-                        TextEdit::multiline(&mut self.input)
-                            .id(id)
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("Ask Claude…  (@ to mention a file)")
-                            .frame(Frame::NONE),
-                    );
+                    // A long message scrolls inside the box, so the buttons below it stay
+                    // in sight however much is pasted.
+                    let screen = ui.ctx().content_rect().height();
+                    let max_h = (screen * 0.4).clamp(140.0, 340.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(id.with("scroll"))
+                        .max_height(max_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.add(
+                                TextEdit::multiline(&mut self.input)
+                                    .id(id)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("Ask Claude…  (@ to mention a file)")
+                                    .frame(Frame::NONE),
+                            );
+                        });
                     if let Some(path) = open_file {
                         let name = path.rsplit('/').next().unwrap_or(path);
                         let chip = egui::Button::selectable(

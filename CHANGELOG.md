@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.15
+
+- **A long message no longer pushes the send button away.** In Agents and in the chat, the message box grows to about a third of the window and then scrolls inside, so the mode, model and send controls stay in sight however much is pasted.
+- **Tribib stays in the Designer.** When Tribib takes its window out of ride on its own, ride takes it straight back instead of leaving it floating, without a frame, over everything; a window left that way by an earlier ride gets its frame back. Leaving the Designer no longer leaves a white patch where Tribib was.
+
 ## 0.9.14
 
 - **Closing tabs as in VS Code.** Right-click a tab for Close, Close others, Close to the right, Close saved and Close all, for the tabs of that part of the editor. Files with unsaved changes ask first, one at a time; Cancel keeps the rest open.

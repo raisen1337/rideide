@@ -207,8 +207,14 @@ mod imp {
             }
             let mut rect = Rect::default();
             GetWindowRect(window, &mut rect);
-            let style = GetWindowLongPtrW(window, GWL_STYLE);
+            let mut style = GetWindowLongPtrW(window, GWL_STYLE);
             let exstyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+            // A window left as a child without a parent (by an earlier ride that didn't get
+            // to give it back) goes back as a normal window, with its frame.
+            if style & WS_CHILD != 0 {
+                const WS_OVERLAPPEDWINDOW: isize = 0x00CF_0000;
+                style = (style & !WS_CHILD) | WS_OVERLAPPEDWINDOW;
+            }
             let held = Held {
                 window,
                 style,
@@ -266,9 +272,25 @@ mod imp {
         // SAFETY: the calls keep no pointers; the region is handed over to the system.
         unsafe {
             if !show {
+                // Hidden, and nothing of it could show even if the app showed itself again
+                // (an app may, on its own events): no area to draw in, at one pixel's size.
+                // Hiding alone left a white patch where it had been.
+                const SWP_HIDEWINDOW: u32 = 0x0080;
+                SetWindowRgn(held.window, CreateRectRgn(0, 0, 0, 0), 0);
+                SetWindowPos(
+                    held.window,
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+                );
                 ShowWindow(held.window, SW_HIDE);
                 return;
             }
+            // Its whole area again, before it is sized (a hidden one had none).
+            SetWindowRgn(held.window, 0, 0);
             let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
             SetWindowPos(held.window, 0, x, y, w.max(1), h.max(1), flags);
             let edge = insets(held.window);
@@ -293,6 +315,41 @@ mod imp {
     pub fn alive(held: &Held, parent: isize) -> bool {
         // SAFETY: plain queries on handles.
         unsafe { IsWindow(held.window) != 0 && GetParent(held.window) == parent }
+    }
+
+    /// Whether the held window still exists at all.
+    pub fn exists(held: &Held) -> bool {
+        // SAFETY: a plain query on a handle.
+        unsafe { IsWindow(held.window) != 0 }
+    }
+
+    /// Takes back a held window that got out of ride's (the app re-made or re-parented it
+    /// itself): a child again, without its frame, hidden until it is placed. Without this it
+    /// floated frameless over everything until closed.
+    pub fn readopt(held: &Held, parent: isize) {
+        let frame =
+            WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        // SAFETY: the calls keep no pointers; a window gone meanwhile makes them do nothing.
+        unsafe {
+            if IsWindow(held.window) == 0 || IsWindow(parent) == 0 {
+                return;
+            }
+            ShowWindow(held.window, SW_HIDE);
+            let style = GetWindowLongPtrW(held.window, GWL_STYLE);
+            SetWindowLongPtrW(held.window, GWL_STYLE, (style & !frame) | WS_CHILD);
+            let ex = GetWindowLongPtrW(held.window, GWL_EXSTYLE);
+            SetWindowLongPtrW(held.window, GWL_EXSTYLE, ex & !WS_EX_APPWINDOW);
+            SetParent(held.window, parent);
+            SetWindowPos(
+                held.window,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOZORDER | SWP_FRAMECHANGED | 0x0001 | 0x0002,
+            );
+        }
     }
 
     /// Gives the window back as it was: its own window again, where it was, with its frame.
@@ -362,6 +419,10 @@ mod imp {
         None
     }
     pub fn place(_held: &Held, _x: i32, _y: i32, _w: i32, _h: i32, _show: bool) {}
+    pub fn exists(_held: &Held) -> bool {
+        false
+    }
+    pub fn readopt(_held: &Held, _parent: isize) {}
     pub fn alive(_held: &Held, _parent: isize) -> bool {
         false
     }

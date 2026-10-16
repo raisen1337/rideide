@@ -266,6 +266,24 @@ impl Side {
     }
 }
 
+/// What the two sides are called in the dialog: their folders' names, or, when those are
+/// the same (a folder and its copy on another server), the places they are on.
+fn names(left: &Side, right: &Side) -> (String, String) {
+    let (l, r) = (left.short(), right.short());
+    if l != r {
+        return (l, r);
+    }
+    let (pl, pr) = (
+        left.place.label().to_string(),
+        right.place.label().to_string(),
+    );
+    if pl != pr {
+        (pl, pr)
+    } else {
+        ("the left".into(), "the right".into())
+    }
+}
+
 type Listed = Result<(Vec<Row>, usize), String>;
 
 pub(super) struct Compare {
@@ -402,7 +420,7 @@ impl App {
             format!("Sync {copies} file{}", if copies == 1 { "" } else { "s" })
         };
         let subtitle = "File by file, by size and time; nothing changes until you sync".to_string();
-        let (left_name, right_name) = (c.left.short(), c.right.short());
+        let (left_name, right_name) = names(&c.left, &c.right);
         let now = self.now;
         let answer = ui::Dialog {
             id: "compare",
@@ -575,7 +593,7 @@ impl App {
                     }
                 }
                 let [to_right, to_left, del_right, del_left] = lists;
-                let (l, r) = (c.left.short(), c.right.short());
+                let (l, r) = names(&c.left, &c.right);
                 if !to_right.is_empty() || !del_right.is_empty() {
                     self.queue.add_sync(
                         c.left.place.clone(),

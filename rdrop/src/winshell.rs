@@ -553,3 +553,26 @@ pub fn start(program: &str, args: &[String]) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+
+/// Where the mouse is on the screen, in pixels. While files are dragged in from Explorer,
+/// Windows tells the window nothing about the mouse, so this is how rdrop knows which pane
+/// they are over.
+#[cfg(windows)]
+pub fn cursor() -> Option<(f32, f32)> {
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetCursorPos(p: *mut Point) -> i32;
+    }
+    let mut p = Point { x: 0, y: 0 };
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x as f32, p.y as f32))
+}
+
+#[cfg(not(windows))]
+pub fn cursor() -> Option<(f32, f32)> {
+    None
+}
