@@ -152,8 +152,13 @@ passwords are encrypted by Windows for your account.
   they hold, and files keep their modification times.
 - Transfers run in the background, three at a time, while you keep browsing; the bar at the
   bottom shows how far they are and opens the full list.
-- F5 copies to the pane you used before, F2 renames, F7 makes a folder, Del deletes, Backspace
-  goes up, Alt+Left goes back, Tab moves to the next pane, and typing narrows the list.
+- It works like Explorer: Ctrl+C, Ctrl+X and Ctrl+V (with Explorer's own clipboard), Delete to
+  the Recycle Bin and Shift+Delete for good, F2 or a slow click to rename in place, This PC with
+  the drives, large icons with thumbnails, and the arrow keys and typing to move through a list.
+- Double-click a file to see it: pictures, sound with a player, code in colour, logs that follow
+  what is written to them, and the bytes of anything else. Files on a server open in their app
+  and go back up when saved.
+- Permissions on servers, shown and changed from Properties; hidden files with Ctrl+H.
 
 ## rterm
 

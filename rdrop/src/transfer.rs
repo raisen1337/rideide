@@ -56,6 +56,8 @@ pub struct Job {
     pub started: Option<Instant>,
     pub finished: Option<Instant>,
     pub stop: Arc<AtomicBool>,
+    /// A move (cut and paste): the original goes once the copy is done.
+    pub moving: bool,
 }
 
 impl Job {
@@ -103,7 +105,23 @@ impl Queue {
     }
 
     /// Queues copying `from_path` (on `from`) into the folder `to_dir` (on `to`).
-    pub fn add(&mut self, from: Place, from_path: String, to: Place, to_dir: String) {
+    pub fn add(&mut self, from: Place, from_path: String, to: Place, to_dir: String) -> u64 {
+        self.push(from, from_path, to, to_dir, false)
+    }
+
+    /// Queues moving `from_path` into `to_dir`: copied, then removed where it was.
+    pub fn add_move(&mut self, from: Place, from_path: String, to: Place, to_dir: String) -> u64 {
+        self.push(from, from_path, to, to_dir, true)
+    }
+
+    fn push(
+        &mut self,
+        from: Place,
+        from_path: String,
+        to: Place,
+        to_dir: String,
+        moving: bool,
+    ) -> u64 {
         self.next += 1;
         let name = from_path
             .trim_end_matches(['/', '\\'])
@@ -125,8 +143,10 @@ impl Queue {
             started: None,
             finished: None,
             stop: Arc::new(AtomicBool::new(false)),
+            moving,
         });
         let _ = self.tx.send(self.next);
+        self.next
     }
 
     pub fn clear_finished(&self) {
@@ -168,13 +188,14 @@ fn worker(
                     job.to.clone(),
                     job.to_dir.clone(),
                     job.stop.clone(),
+                    job.moving,
                 ));
             } else if job.state == State::Waiting {
                 job.state = State::Stopped;
             }
         });
         repaint.request_repaint();
-        let Some((from, from_path, to, to_dir, stop)) = info else {
+        let Some((from, from_path, to, to_dir, stop, moving)) = info else {
             continue;
         };
         let mut progress = |done: u64, current: &str| {
@@ -188,7 +209,7 @@ fn worker(
             !stop.load(Ordering::Relaxed)
         };
         let mut total = |t: u64| update(&mut |job| job.total = t);
-        let result = run(
+        let mut result = run(
             &mut sessions,
             &from,
             &from_path,
@@ -197,6 +218,31 @@ fn worker(
             &mut progress,
             &mut total,
         );
+        // A move removes the original only once the copy is whole.
+        if moving && result.is_ok() {
+            result = match &from {
+                Place::Local => {
+                    let p = Path::new(&from_path);
+                    if p.is_dir() {
+                        std::fs::remove_dir_all(p)
+                    } else {
+                        std::fs::remove_file(p)
+                    }
+                    .map_err(|e| format!("Copied, but the original couldn't be removed: {e}"))
+                }
+                Place::Server(host) => session(&mut sessions, host)
+                    .and_then(|s| s.remove_all(&from_path))
+                    .map_err(|e| format!("Copied, but the original couldn't be removed: {e}")),
+            };
+            let folder = match &from {
+                Place::Local => Path::new(&from_path)
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                Place::Server(_) => sftp::parent(&from_path),
+            };
+            let _ = changed.send((from.clone(), folder));
+        }
         if let Err(e) = &result {
             // A session that broke is dropped, so the next job opens a fresh one.
             if e.contains("connection was lost") || e.contains("ssh") {
@@ -586,6 +632,47 @@ mod tests {
     }
 
     #[test]
+    fn a_move_copies_then_removes_the_original() {
+        let base = std::env::temp_dir().join(format!("rdrop-move-{}", std::process::id()));
+        let (src, dest) = (base.join("from"), base.join("to"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(src.join("note.txt"), "moved").unwrap();
+        let mut queue = Queue::new(&Context::default());
+        let id = queue.add_move(
+            Place::Local,
+            src.join("note.txt").display().to_string(),
+            Place::Local,
+            dest.display().to_string(),
+        );
+        let started = Instant::now();
+        loop {
+            let state = queue
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|j| j.id == id)
+                .map(|j| j.state.clone());
+            if state == Some(State::Done) {
+                break;
+            }
+            assert!(
+                started.elapsed().as_secs() < 10,
+                "the move didn't finish: {:?}",
+                state.map(|s| matches!(s, State::Failed(_)))
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dest.join("note.txt")).unwrap(),
+            "moved"
+        );
+        assert!(!src.join("note.txt").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn local_folders_copy_with_their_insides() {
         let base = std::env::temp_dir().join(format!("rdrop-test-{}", std::process::id()));
         let src = base.join("src").join("box");
@@ -647,6 +734,25 @@ mod tests {
         s.download(&format!("{dir}/sub/big.bin"), &mut back, |_| true)
             .unwrap();
         assert!(back == data, "the download differs from the upload");
+        // Parts of a file, as previews and a log's live view read them.
+        let part = s
+            .read_at(&format!("{dir}/sub/big.bin"), 100_000, 50_000)
+            .unwrap();
+        assert!(part[..] == data[100_000..150_000], "a part differs");
+        let tail = s
+            .read_at(&format!("{dir}/sub/big.bin"), data.len() as u64 - 777, 4096)
+            .unwrap();
+        assert!(tail[..] == data[data.len() - 777..], "the end differs");
+        // Permissions.
+        s.chmod(&format!("{dir}/small.txt"), 0o640).unwrap();
+        assert_eq!(
+            s.stat(&format!("{dir}/small.txt"))
+                .unwrap()
+                .permissions
+                .unwrap()
+                & 0o777,
+            0o640
+        );
         s.rename(&format!("{dir}/small.txt"), &format!("{dir}/renamed.txt"))
             .unwrap();
         assert_eq!(s.stat(&format!("{dir}/renamed.txt")).unwrap().size, Some(5));

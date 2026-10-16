@@ -88,7 +88,11 @@ pub fn whats_new<'a>(release: &'a Release, installed: Option<&str>) -> Vec<&'a E
 }
 
 /// Downloads `release` and puts it at `target`, reporting progress from 0 to 1.
-pub fn install(release: &Release, target: &Path, progress: impl Fn(f32)) -> Result<(), String> {
+pub fn install(
+    release: &Release,
+    target: &Path,
+    mut progress: impl FnMut(f32),
+) -> Result<(), String> {
     if release.size > MAX_PROGRAM {
         return Err("The download is far bigger than expected".into());
     }
@@ -204,5 +208,26 @@ mod tests {
         assert_eq!(notes(Some("0.3.0")), ["five", "four"]);
         assert_eq!(notes(Some("0.5.0")), ["five"]);
         assert_eq!(notes(None), ["five", "four", "three"]);
+    }
+
+    /// Against the published release, by hand: cargo test -p rkit -- --ignored
+    #[test]
+    #[ignore]
+    fn an_app_updates_from_the_release() {
+        let manifest = fetch_manifest().unwrap();
+        let release = &manifest.apps["rdrop"];
+        let dir = std::env::temp_dir().join(format!("rkit-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("rdrop.exe");
+        // An older copy in the way, as on a computer that is behind.
+        std::fs::write(&target, b"old").unwrap();
+        let mut seen = 0.0f32;
+        install(release, &target, |p| seen = p).unwrap();
+        assert_eq!(seen, 1.0);
+        assert_eq!(
+            installed_version(&target).as_deref(),
+            Some(release.version.as_str())
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

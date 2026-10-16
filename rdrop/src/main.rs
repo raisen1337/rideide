@@ -7,6 +7,9 @@
 // The look is ride's; the window parts, shell profiles (for the SSH hosts) and the split
 // layout are rterm's, shared as files.
 #[allow(dead_code)]
+#[path = "../../app/src/highlight.rs"]
+mod highlight;
+#[allow(dead_code)]
 #[path = "../../app/src/icons.rs"]
 mod icons;
 #[allow(dead_code)]
@@ -25,16 +28,22 @@ mod theme;
 #[path = "../../rterm/src/window.rs"]
 mod window;
 
+mod explorer;
+mod pane;
+mod preview;
 mod remote;
 mod sftp;
 mod sites;
 mod transfer;
+mod ui;
+mod winshell;
 
 use eframe::egui::{
     self, pos2, vec2, Align, Align2, Color32, Context, CornerRadius, Event, FontId, Frame, Key,
     Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
-    ViewportBuilder,
+    Vec2, ViewportBuilder,
 };
+use pane::{KnownFolder, Thumbs, View};
 use remote::{Answer, Ask, Remote};
 use sites::Site;
 use std::collections::{HashMap, HashSet};
@@ -102,6 +111,12 @@ struct Item {
     size: u64,
     /// Seconds since 1970.
     mtime: Option<u64>,
+    /// Hidden as Explorer hides it, or a dot file on a server.
+    hidden: bool,
+    /// Its permissions, on a server.
+    perms: Option<u32>,
+    /// A symbolic link.
+    link: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -124,8 +139,11 @@ struct Pane {
     sort: (Col, bool),
     loading: bool,
     error: Option<String>,
-    /// Text typed to narrow the list.
-    filter: String,
+    /// What was typed to jump to a name, and when.
+    jump: (String, f64),
+    /// A row to bring into view.
+    scroll_to: Option<String>,
+    view: View,
     conn: Option<Remote>,
     connected: bool,
     /// Folders to go back to.
@@ -145,7 +163,9 @@ impl Pane {
             sort: (Col::Name, true),
             loading: false,
             error: None,
-            filter: String::new(),
+            jump: (String::new(), 0.0),
+            scroll_to: None,
+            view: View::Details,
             conn: None,
             connected: false,
             back: Vec::new(),
@@ -182,7 +202,7 @@ impl Pane {
 
     fn set_items(&mut self, path: String, items: Vec<Item>) {
         if path != self.path {
-            self.filter.clear();
+            self.jump.0.clear();
             self.selected.clear();
             self.anchor = None;
         }
@@ -196,11 +216,10 @@ impl Pane {
         self.error = None;
     }
 
-    fn visible(&self) -> Vec<Item> {
-        let f = self.filter.to_lowercase();
+    fn visible(&self, hidden: bool) -> Vec<Item> {
         self.items
             .iter()
-            .filter(|i| f.is_empty() || i.name.to_lowercase().contains(&f))
+            .filter(|i| hidden || !i.hidden)
             .cloned()
             .collect()
     }
@@ -243,25 +262,21 @@ impl Pane {
 }
 
 fn list_local(path: &str) -> Result<Vec<Item>, String> {
+    // "This PC", with the drives, is drawn on its own.
     if path.is_empty() {
-        // The drives, for going up from the top of one.
-        return Ok(('A'..='Z')
-            .map(|d| format!("{d}:\\"))
-            .filter(|d| Path::new(d).exists())
-            .map(|d| Item {
-                name: d,
-                is_dir: true,
-                size: 0,
-                mtime: None,
-            })
-            .collect());
+        return Ok(Vec::new());
     }
     let mut items = Vec::new();
     for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let link = entry.file_type().is_ok_and(|t| t.is_symlink());
         items.push(Item {
-            name: entry.file_name().to_string_lossy().into_owned(),
+            hidden: winshell::is_hidden(&meta) || name.starts_with('.'),
+            perms: None,
+            link,
+            name,
             is_dir: meta.is_dir(),
             size: if meta.is_dir() { 0 } else { meta.len() },
             mtime: meta
@@ -285,6 +300,9 @@ fn from_remote(entries: Vec<sftp::Entry>) -> Vec<Item> {
                 e.attrs.size.unwrap_or(0)
             },
             mtime: e.attrs.mtime.map(u64::from),
+            hidden: e.name.starts_with('.'),
+            perms: e.attrs.permissions,
+            link: e.link,
             name: e.name,
         })
         .collect()
@@ -369,14 +387,22 @@ struct SavedPane {
     /// "" for this computer, a host, or nothing picked yet.
     place: Option<String>,
     path: String,
+    view: View,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(default)]
 struct Settings {
     panes: Vec<SavedPane>,
+    /// Hidden items and dot files are shown.
+    #[serde(default = "yes")]
+    show_hidden: bool,
     /// The last folder on each server, by host.
     remote: HashMap<String, String>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -394,6 +420,24 @@ fn load_settings() -> Settings {
         .unwrap_or_default()
 }
 
+fn known_folders() -> Vec<KnownFolder> {
+    winshell::known_folders()
+        .into_iter()
+        .map(|k| KnownFolder {
+            icon: match k.name {
+                "Desktop" => ui::DESKTOP,
+                "Downloads" => icons::ARROW_DOWN,
+                "Documents" => ui::BOOK,
+                "Pictures" => icons::IMAGE,
+                "Music" => icons::MUSIC,
+                _ => ui::FOLDER,
+            },
+            name: k.name.to_string(),
+            path: k.path.display().to_string(),
+        })
+        .collect()
+}
+
 fn home() -> String {
     std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into())
 }
@@ -402,7 +446,6 @@ fn home() -> String {
 
 enum Dialog {
     NewFolder(u64, String),
-    Rename(u64, String, String),
     Delete(u64, Vec<String>),
 }
 
@@ -445,8 +488,20 @@ enum PaneAct {
     Split(bool),
     Close,
     NewFolder,
-    Rename(String),
+    Paste,
+    Refresh,
+    View(View),
+    ToggleHidden,
+    /// Enter or a double click on an item: a folder opens, a file shows.
+    Activate(String),
+    OpenWith(String),
+    /// Copy (false) or cut (true) to the clipboard.
+    Clip(Vec<String>, bool),
+    StartRename(String),
+    FinishRename(bool),
     Delete(Vec<String>),
+    DeleteForGood(Vec<String>),
+    Properties(String),
     CopyTo(Vec<String>),
     CopyPaths(Vec<String>),
     Reveal(String),
@@ -475,6 +530,23 @@ struct App {
     /// Passwords given this session, by connection, remembered or not.
     passwords: HashMap<String, String>,
     auth: Option<Auth>,
+    preview: Option<preview::Preview>,
+    clip: Option<explorer::Clip>,
+    renaming: Option<explorer::Renaming>,
+    /// A click on an item already picked, which edits its name if left alone a moment.
+    slow_click: Option<(u64, String, f64)>,
+    /// A folder just made, whose name is edited once it shows.
+    pending_rename: Option<(u64, String)>,
+    opened: Vec<explorer::Opened>,
+    props: Option<explorer::Props>,
+    /// What happened last, when it went well.
+    note: String,
+    drives: Vec<winshell::Drive>,
+    drives_at: f64,
+    known: Vec<KnownFolder>,
+    thumbs: Thumbs,
+    now: f64,
+    ctx: Context,
     offset: i64,
     adopted: bool,
     next_id: u64,
@@ -509,6 +581,20 @@ impl App {
             sites: sites::load(),
             passwords: HashMap::new(),
             auth: None,
+            preview: None,
+            clip: None,
+            renaming: None,
+            slow_click: None,
+            pending_rename: None,
+            opened: Vec::new(),
+            props: None,
+            note: String::new(),
+            drives: winshell::drives(),
+            drives_at: 0.0,
+            known: known_folders(),
+            thumbs: Thumbs::default(),
+            now: 0.0,
+            ctx: ctx.clone(),
             status: String::new(),
             settings,
             offset: local_offset(),
@@ -531,10 +617,12 @@ impl App {
                 SavedPane {
                     place: Some(String::new()),
                     path: folder.unwrap_or_else(home),
+                    view: View::Details,
                 },
                 SavedPane {
                     place: host,
                     path: String::new(),
+                    view: View::Details,
                 },
             ];
         }
@@ -547,11 +635,71 @@ impl App {
                     Place::Server(p.clone())
                 }
             });
-            ids.push(app.add_pane(ctx, place, s.path.clone()));
+            let id = app.add_pane(ctx, place, s.path.clone());
+            if let Some(p) = app.pane_mut(id) {
+                p.view = s.view;
+            }
+            ids.push(id);
         }
         app.layout = row(&ids);
         app.focus = ids.first().copied().unwrap_or(0);
         app.previous = app.panes.get(1).map_or(app.focus, |p| p.id);
+        // RDROP_PREVIEW=FILE shows that file of the first pane's folder at the start.
+        if let Ok(name) = std::env::var("RDROP_PREVIEW") {
+            let first = app.focus;
+            if let Some(item) = app
+                .pane(first)
+                .and_then(|p| p.items.iter().find(|i| i.name == name).cloned())
+            {
+                app.open_preview(first, &item);
+            }
+        }
+        // RDROP_DIALOG opens a dialog at the start, to look at it without clicking.
+        let focus = app.focus;
+        match std::env::var("RDROP_DIALOG").as_deref() {
+            Ok("site") => {
+                app.auth = Some(Auth::Site {
+                    old: None,
+                    site: Site {
+                        name: "Production".into(),
+                        host: "example.com".into(),
+                        port: 22,
+                        user: "deploy".into(),
+                        remember: true,
+                        ..Site::default()
+                    },
+                    port: "22".into(),
+                    password: "secret".into(),
+                    focus: false,
+                })
+            }
+            Ok("password") => {
+                app.auth = Some(Auth::Password {
+                    pane: focus,
+                    key: "site:Production".into(),
+                    label: "deploy@example.com".into(),
+                    password: String::new(),
+                    remember: false,
+                    wrong: false,
+                    focus: true,
+                })
+            }
+            Ok("delete") => {
+                app.dialog = Some(Dialog::Delete(
+                    focus,
+                    vec![
+                        "node_modules".into(),
+                        "build.log".into(),
+                        "README.md".into(),
+                    ],
+                ))
+            }
+            Ok("folder") => {
+                app.dialog = Some(Dialog::NewFolder(focus, String::new()));
+                app.focus_dialog = true;
+            }
+            _ => {}
+        }
         app
     }
 
@@ -708,6 +856,7 @@ impl App {
         }
         let mut lists = Vec::new();
         let mut refused = Vec::new();
+        let mut reads = Vec::new();
         for pane in &mut self.panes {
             let Some(conn) = &pane.conn else { continue };
             let mut lost = None;
@@ -740,6 +889,9 @@ impl App {
                         pane.path_edit = pane.path.clone();
                         self.status = e;
                     }
+                    Answer::Read { path, data, size } => {
+                        reads.push((pane.id, path, data, size));
+                    }
                     Answer::Lost(e) => lost = Some(e),
                 }
             }
@@ -757,6 +909,16 @@ impl App {
         }
         for (id, path) in lists {
             self.open(id, path);
+        }
+        for (id, path, data, size) in reads {
+            let ctx = self.ctx.clone();
+            if let Some(p) = self
+                .preview
+                .as_mut()
+                .filter(|p| p.pane == id && p.path == path)
+            {
+                p.set_data(&ctx, data, size);
+            }
         }
         // A server that wouldn't take the keys asks for a password, here.
         for (pane, key) in refused {
@@ -844,7 +1006,7 @@ impl App {
         }
     }
 
-    fn delete(&mut self, id: u64, names: Vec<String>) {
+    fn delete(&mut self, id: u64, names: Vec<String>, _confirmed: bool) {
         let Some(pane) = self.pane(id) else { return };
         if pane.is_local() {
             let paths: Vec<String> = names.iter().map(|n| pane.child(n)).collect();
@@ -862,68 +1024,6 @@ impl App {
             self.refresh(id);
         } else if let Some(conn) = &pane.conn {
             conn.ask(Ask::Delete(names.iter().map(|n| pane.child(n)).collect()));
-        }
-    }
-
-    fn keys(&mut self, ctx: &Context) {
-        if self.dialog.is_some() || self.auth.is_some() || ctx.memory(|m| m.focused().is_some()) {
-            return;
-        }
-        let id = self.focus;
-        let Some(pane) = self.pane(id) else { return };
-        let names = pane.selected_names();
-        let up = pane.up();
-        let pressed = |k: Key, m: Modifiers| ctx.input_mut(|i| i.consume_key(m, k));
-        if pressed(Key::F5, Modifiers::NONE) && !names.is_empty() {
-            if let Some(to) = self.other_pane(id) {
-                self.copy(id, &names, to, None);
-            }
-        }
-        if pressed(Key::F7, Modifiers::NONE) {
-            self.dialog = Some(Dialog::NewFolder(id, String::new()));
-            self.focus_dialog = true;
-        }
-        if pressed(Key::F2, Modifiers::NONE) {
-            if let Some(name) = names.first() {
-                self.dialog = Some(Dialog::Rename(id, name.clone(), name.clone()));
-                self.focus_dialog = true;
-            }
-        }
-        if pressed(Key::Delete, Modifiers::NONE) && !names.is_empty() {
-            self.dialog = Some(Dialog::Delete(id, names.clone()));
-        }
-        if pressed(Key::Backspace, Modifiers::NONE) || pressed(Key::ArrowUp, Modifiers::ALT) {
-            if let Some(up) = up {
-                self.go(id, up);
-            }
-        }
-        if pressed(Key::ArrowLeft, Modifiers::ALT) {
-            if let Some(back) = self.pane_mut(id).and_then(|p| p.back.pop()) {
-                self.open(id, back);
-            }
-        }
-        if pressed(Key::Tab, Modifiers::NONE) {
-            let ids = self.layout.panes();
-            if let Some(at) = ids.iter().position(|p| *p == id) {
-                self.set_focus(ids[(at + 1) % ids.len()]);
-            }
-        }
-        if pressed(Key::A, Modifiers::COMMAND) {
-            if let Some(p) = self.pane_mut(id) {
-                p.selected = p.items.iter().map(|i| i.name.clone()).collect();
-            }
-        }
-        if pressed(Key::R, Modifiers::COMMAND) {
-            self.refresh(id);
-        }
-        if pressed(Key::Enter, Modifiers::NONE) {
-            if let [name] = names.as_slice() {
-                let pane = self.pane(id).unwrap();
-                if pane.items.iter().any(|i| &i.name == name && i.is_dir) {
-                    let path = pane.child(name);
-                    self.go(id, path);
-                }
-            }
         }
     }
 
@@ -1014,25 +1114,100 @@ impl App {
         resp
     }
 
+    /// A folder here, in the list on the left: opens in the pane in focus.
+    fn local_row(&mut self, ui: &mut Ui, icon: char, name: &str, path: &str) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+        let here = self
+            .pane(self.focus)
+            .is_some_and(|p| p.is_local() && Path::new(&p.path) == Path::new(path));
+        let fill = if here {
+            theme::tint(14)
+        } else if resp.hovered() {
+            theme::tint(9)
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(rect, 7.0, fill);
+        ui.painter().text(
+            rect.left_center() + vec2(10.0, 0.0),
+            Align2::LEFT_CENTER,
+            icon,
+            FontId::proportional(13.0),
+            theme::ACCENT(),
+        );
+        ui.painter().with_clip_rect(rect).text(
+            rect.left_center() + vec2(32.0, 0.0),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(13.0),
+            theme::TEXT(),
+        );
+        if resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            let focus = self.focus;
+            let ctx = self.ctx.clone();
+            if self.pane(focus).is_some_and(|p| p.is_local()) {
+                self.go(focus, path.to_string());
+            } else {
+                self.set_place(&ctx, focus, Place::Local, Some(path.to_string()));
+            }
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         Panel::left("places")
-            .exact_size(214.0)
+            .exact_size(220.0)
             .resizable(false)
-            .frame(Frame::NONE.fill(theme::WINDOW_BG()).inner_margin(Margin { left: 12, right: 10, top: 6, bottom: 10 }))
+            .frame(Frame::NONE.fill(theme::WINDOW_BG()).inner_margin(Margin {
+                left: 12,
+                right: 10,
+                top: 6,
+                bottom: 10,
+            }))
             .show_separator_line(false)
             .show(ui, |ui| {
-                ui.label(RichText::new("PLACES").size(11.5).strong().color(theme::COMMENT()));
+                ui.label(
+                    RichText::new("PLACES")
+                        .size(11.5)
+                        .strong()
+                        .color(theme::COMMENT()),
+                );
                 ui.add_space(4.0);
-                self.place_row(ui, &ctx, Place::Local);
+                self.local_row(ui, ui::DESKTOP, "This PC", "");
+                for k in self.known.clone() {
+                    self.local_row(ui, k.icon, &k.name, &k.path);
+                }
+                for d in self
+                    .drives
+                    .iter()
+                    .map(|d| (pane::drive_icon(d), d.title(), d.root.clone()))
+                    .collect::<Vec<_>>()
+                {
+                    self.local_row(ui, d.0, &d.1, &d.2);
+                }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("SITES").size(11.5).strong().color(theme::COMMENT()));
+                    ui.label(
+                        RichText::new("SITES")
+                            .size(11.5)
+                            .strong()
+                            .color(theme::COMMENT()),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("+ New").on_hover_text("Save a connection: host, user, password").clicked() {
+                        if ui
+                            .small_button("+ New")
+                            .on_hover_text("Save a connection: host, user, password")
+                            .clicked()
+                        {
                             self.auth = Some(Auth::Site {
                                 old: None,
-                                site: Site { port: 22, ..Site::default() },
+                                site: Site {
+                                    port: 22,
+                                    ..Site::default()
+                                },
                                 port: "22".into(),
                                 password: String::new(),
                                 focus: true,
@@ -1042,7 +1217,11 @@ impl App {
                 });
                 ui.add_space(2.0);
                 if self.sites.is_empty() {
-                    ui.label(RichText::new("Servers you save, with their user and password.").size(12.0).color(theme::COMMENT()));
+                    ui.label(
+                        RichText::new("Servers you save, with their user and password.")
+                            .size(12.0)
+                            .color(theme::COMMENT()),
+                    );
                 }
                 for site in self.sites.clone() {
                     let resp = self.place_row(ui, &ctx, Place::Server(site.key()));
@@ -1072,28 +1251,37 @@ impl App {
                     });
                 }
                 ui.add_space(10.0);
-                ui.label(RichText::new("SSH CONFIG").size(11.5).strong().color(theme::COMMENT()));
+                ui.label(
+                    RichText::new("SSH CONFIG")
+                        .size(11.5)
+                        .strong()
+                        .color(theme::COMMENT()),
+                );
                 ui.add_space(4.0);
                 if self.hosts.is_empty() {
-                    let text = if self.hosts_rx.is_some() { "Reading ~/.ssh/config…" } else { "No hosts in ~/.ssh/config" };
+                    let text = if self.hosts_rx.is_some() {
+                        "Reading ~/.ssh/config…"
+                    } else {
+                        "No hosts in ~/.ssh/config"
+                    };
                     ui.label(RichText::new(text).size(12.0).color(theme::COMMENT()));
                 }
                 for host in self.hosts.clone() {
                     self.place_row(ui, &ctx, Place::Server(host));
                 }
                 ui.add_space(10.0);
-                let edit = ui.add(TextEdit::singleline(&mut self.host_input).hint_text("Other: user@host").desired_width(f32::INFINITY));
-                if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.host_input.trim().is_empty() {
+                let edit = ui.add(
+                    TextEdit::singleline(&mut self.host_input)
+                        .hint_text("Other: user@host")
+                        .desired_width(f32::INFINITY),
+                );
+                if edit.lost_focus()
+                    && ui.input(|i| i.key_pressed(Key::Enter))
+                    && !self.host_input.trim().is_empty()
+                {
                     let host = self.host_input.trim().to_string();
                     self.set_place(&ctx, self.focus, Place::Server(host), None);
                 }
-                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    ui.label(
-                        RichText::new("Drag rows onto another pane to copy · F5 copies to the pane used before · F2 rename · F7 new folder · Del delete · Tab next pane · Backspace up")
-                            .size(11.0)
-                            .color(theme::COMMENT()),
-                    );
-                });
             });
     }
 
@@ -1130,7 +1318,12 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if self.status.is_empty() {
-                        ui.label(RichText::new("Ready").size(12.0).color(theme::COMMENT()));
+                        let text = if self.note.is_empty() {
+                            "Ready"
+                        } else {
+                            self.note.as_str()
+                        };
+                        ui.label(RichText::new(text).size(12.0).color(theme::COMMENT()));
                     } else {
                         ui.label(RichText::new(&self.status).size(12.0).color(BAD));
                         if ui.small_button(icons::CLOSE.to_string()).clicked() {
@@ -1330,15 +1523,33 @@ impl App {
                 self.set_focus(new);
             }
             PaneAct::Close => self.close_pane(id),
-            PaneAct::NewFolder => {
-                self.dialog = Some(Dialog::NewFolder(id, String::new()));
-                self.focus_dialog = true;
+            PaneAct::NewFolder => self.new_folder(id),
+            PaneAct::Paste => self.paste(id),
+            PaneAct::Refresh => self.refresh(id),
+            PaneAct::View(view) => {
+                if let Some(p) = self.pane_mut(id) {
+                    p.view = view;
+                }
             }
-            PaneAct::Rename(name) => {
-                self.dialog = Some(Dialog::Rename(id, name.clone(), name));
-                self.focus_dialog = true;
+            PaneAct::ToggleHidden => self.settings.show_hidden = !self.settings.show_hidden,
+            PaneAct::Activate(name) => {
+                // In This PC, a drive or folder's path is its name.
+                let local_root = self
+                    .pane(id)
+                    .is_some_and(|p| p.is_local() && p.path.is_empty());
+                if local_root {
+                    self.go(id, name);
+                } else {
+                    self.open_item(id, &name);
+                }
             }
-            PaneAct::Delete(names) => self.dialog = Some(Dialog::Delete(id, names)),
+            PaneAct::OpenWith(name) => self.open_with_app(id, &name),
+            PaneAct::Clip(names, cut) => self.set_clip(id, &names, cut),
+            PaneAct::StartRename(name) => self.start_rename(id, &name),
+            PaneAct::FinishRename(keep) => self.finish_rename(keep),
+            PaneAct::Delete(names) => self.delete_soft(id, names),
+            PaneAct::DeleteForGood(names) => self.dialog = Some(Dialog::Delete(id, names)),
+            PaneAct::Properties(name) => self.open_props(id, &name),
             PaneAct::CopyTo(names) => {
                 if let Some(to) = self.other_pane(id) {
                     self.copy(id, &names, to, None);
@@ -1496,593 +1707,92 @@ impl App {
         }
     }
 
-    fn pane_ui(&mut self, ui: &mut Ui, id: u64, rect: Rect, acts: &mut Vec<(u64, PaneAct)>) {
-        let focused = self.focus == id;
-        let several = self.panes.len() > 1;
-        let hosts: Vec<String> = self
-            .sites
-            .iter()
-            .map(Site::key)
-            .chain(self.hosts.iter().cloned())
-            .collect();
-        let offset = self.offset;
-        let dragging_rows = matches!(self.drag, Some(Drag::Rows { .. }));
-        if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
-            self.set_focus(id);
-        }
-        let Some(pane) = self.pane_mut(id) else {
-            return;
-        };
-        let border = if focused {
-            theme::ACCENT().gamma_multiply(0.6)
-        } else {
-            theme::LINE()
-        };
-        ui.painter().rect(
-            rect,
-            10,
-            theme::PANEL_BG(),
-            Stroke::new(1.0, border),
-            egui::StrokeKind::Inside,
-        );
-        let mut act = |a: PaneAct| acts.push((id, a));
-
-        // The header: what this pane shows, a handle to move it by, and what it can do.
-        let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
-        let handle = ui.interact(header, ui.id().with("handle"), Sense::click_and_drag());
-        if handle.drag_started() {
-            act(PaneAct::StartPane);
-        }
-        if handle.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        let mut head = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(header.shrink2(vec2(10.0, 4.0)))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        let (icon, title) = match &pane.place {
-            Some(Place::Local) => (icons::FOLDER_ROOT, "This computer".to_string()),
-            Some(place @ Place::Server(_)) => (icons::REMOTE, place.label().to_string()),
-            None => (icons::ADD, "Pick a place".to_string()),
-        };
-        let dot = match &pane.place {
-            Some(Place::Server(_)) if pane.connected => GOOD,
-            Some(Place::Server(_)) => theme::COMMENT(),
-            _ => theme::COMMENT(),
-        };
-        head.label(RichText::new(icon).color(dot));
-        // Picking where the pane looks.
-        let title: String = if title.chars().count() > 22 {
-            title.chars().take(20).chain(['…']).collect()
-        } else {
-            title
-        };
-        head.menu_button(
-            RichText::new(format!("{title}  {}", icons::CHEVRON_DOWN))
-                .size(13.0)
-                .strong(),
-            |ui| {
-                if ui
-                    .button(format!("{}  This computer", icons::FOLDER_ROOT))
-                    .clicked()
-                {
-                    act(PaneAct::Pick(Place::Local));
-                }
-                ui.separator();
-                for host in &hosts {
-                    if ui
-                        .button(format!(
-                            "{}  {}",
-                            icons::REMOTE,
-                            host.strip_prefix("site:").unwrap_or(host)
-                        ))
-                        .clicked()
-                    {
-                        act(PaneAct::Pick(Place::Server(host.clone())));
-                    }
-                }
-            },
-        );
-        head.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if several
-                && ui
-                    .small_button(icons::CLOSE.to_string())
-                    .on_hover_text("Close this pane")
-                    .clicked()
-            {
-                act(PaneAct::Close);
-            }
-            let usable = pane.ready();
-            // A narrow pane keeps its tools in a menu, so its name stays readable.
-            if rect.width() < 480.0 {
-                ui.menu_button("⋯", |ui| {
-                    ui.add_enabled_ui(usable, |ui| {
-                        let back = egui::Button::new("Back").shortcut_text("Alt+Left");
-                        if ui.add_enabled(!pane.back.is_empty(), back).clicked() {
-                            act(PaneAct::Back);
-                        }
-                        if ui
-                            .add(egui::Button::new("Up").shortcut_text("Backspace"))
-                            .clicked()
-                        {
-                            if let Some(up) = pane.up() {
-                                act(PaneAct::Open(up));
-                            }
-                        }
-                        if ui
-                            .add(egui::Button::new("Refresh").shortcut_text("Ctrl+R"))
-                            .clicked()
-                        {
-                            act(PaneAct::Open(pane.path.clone()));
-                        }
-                        if ui
-                            .add(egui::Button::new("New folder…").shortcut_text("F7"))
-                            .clicked()
-                        {
-                            act(PaneAct::NewFolder);
-                        }
-                    });
-                    ui.separator();
-                    if ui.button("Split right").clicked() {
-                        act(PaneAct::Split(true));
-                    }
-                    if ui.button("Split down").clicked() {
-                        act(PaneAct::Split(false));
-                    }
-                });
-                return;
-            }
-            if ui.small_button("⬓").on_hover_text("Split down").clicked() {
-                act(PaneAct::Split(false));
-            }
-            if ui.small_button("◫").on_hover_text("Split right").clicked() {
-                act(PaneAct::Split(true));
-            }
-            ui.add_space(6.0);
-            ui.add_enabled_ui(usable, |ui| {
-                if ui
-                    .small_button("+ Folder")
-                    .on_hover_text("New folder (F7)")
-                    .clicked()
-                {
-                    act(PaneAct::NewFolder);
-                }
-                if ui
-                    .small_button("⟳")
-                    .on_hover_text("Refresh (Ctrl+R)")
-                    .clicked()
-                {
-                    act(PaneAct::Open(pane.path.clone()));
-                }
-                if ui
-                    .small_button("↑")
-                    .on_hover_text("Up (Backspace)")
-                    .clicked()
-                {
-                    if let Some(up) = pane.up() {
-                        act(PaneAct::Open(up));
-                    }
-                }
-                if ui
-                    .add_enabled(!pane.back.is_empty(), egui::Button::new("←").small())
-                    .on_hover_text("Back (Alt+Left)")
-                    .clicked()
-                {
-                    act(PaneAct::Back);
-                }
-            });
-        });
-
-        let body = Rect::from_min_max(rect.min + vec2(8.0, HEADER_H), rect.max - vec2(8.0, 8.0));
-        let mut ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(body)
-                .layout(Layout::top_down(Align::Min)),
-        );
-        let ui = &mut ui;
-
-        if !pane.ready() {
-            ui.add_space(30.0);
-            ui.vertical_centered(|ui| {
-                match &pane.place {
-                    Some(Place::Server(host)) => {
-                        if let Some(e) = &pane.error {
-                            ui.label(RichText::new(e).size(12.5).color(BAD));
-                            ui.add_space(8.0);
-                            if ui.button("Try again").clicked() {
-                                act(PaneAct::Pick(Place::Server(host.clone())));
-                            }
-                        } else {
-                            ui.spinner();
-                            ui.label(RichText::new(format!("Connecting to {host}…")).size(13.0).color(theme::COMMENT()));
-                        }
-                    }
-                    _ => {
-                        ui.label(RichText::new("Open a server here: pick one above, click one on the left, or drag one onto this pane.").size(13.0).color(theme::COMMENT()));
-                        ui.add_space(10.0);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button(format!("{}  This computer", icons::FOLDER_ROOT)).clicked() {
-                                act(PaneAct::Pick(Place::Local));
-                            }
-                            for host in hosts.iter().take(8) {
-                                if ui.button(format!("{}  {}", icons::REMOTE, host.strip_prefix("site:").unwrap_or(host))).clicked() {
-                                    act(PaneAct::Pick(Place::Server(host.clone())));
-                                }
-                            }
-                        });
-                    }
-                }
-            });
-            return;
-        }
-
-        // Where it is: a path to type into.
-        let edit = ui.add(
-            TextEdit::singleline(&mut pane.path_edit)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace),
-        );
-        if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            act(PaneAct::Open(pane.path_edit.clone()));
-        }
-        ui.add_space(4.0);
-
-        // Column headings, which sort.
-        // Size and time make way for the name in a narrow pane.
-        let full = ui.available_width();
-        let size_w = if full > 330.0 { 84.0 } else { 0.0 };
-        let time_w = if full > 480.0 { 140.0 } else { 0.0 };
-        let widths = [full - size_w - time_w, size_w, time_w];
-        let mut resort = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for (i, (col, title)) in [
-                (Col::Name, "Name"),
-                (Col::Size, "Size"),
-                (Col::Modified, "Modified"),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if widths[i] <= 0.0 {
-                    continue;
-                }
-                let (r, resp) = ui.allocate_exact_size(vec2(widths[i], 20.0), Sense::click());
-                let arrow = if pane.sort.0 == col {
-                    if pane.sort.1 {
-                        " ▲"
-                    } else {
-                        " ▼"
-                    }
-                } else {
-                    ""
-                };
-                let (align, at) = if i == 0 {
-                    (Align2::LEFT_CENTER, r.left_center() + vec2(28.0, 0.0))
-                } else {
-                    (Align2::RIGHT_CENTER, r.right_center() - vec2(10.0, 0.0))
-                };
-                ui.painter().text(
-                    at,
-                    align,
-                    format!("{title}{arrow}"),
-                    FontId::proportional(11.5),
-                    theme::COMMENT(),
-                );
-                if resp.clicked() {
-                    resort = Some(col);
-                }
-            }
-        });
-        if let Some(col) = resort {
-            pane.sort = (
-                col,
-                if pane.sort.0 == col {
-                    !pane.sort.1
-                } else {
-                    true
-                },
-            );
-            pane.sort_items();
-        }
-        ui.painter()
-            .hline(body.x_range(), ui.cursor().top(), (1.0, theme::LINE()));
-        if let Some(e) = &pane.error {
-            ui.label(RichText::new(e).size(12.5).color(BAD));
-        }
-        if pane.loading && pane.items.is_empty() {
-            ui.add_space(16.0);
-            ui.vertical_centered(|ui| ui.spinner());
-        }
-
-        let items = pane.visible();
-        let mut clicked: Option<(usize, Modifiers)> = None;
-        let mut opened: Option<usize> = None;
-        let mut drag_from: Option<usize> = None;
-        let mut menu: Option<(usize, u8)> = None;
-        let mut empty_menu = false;
-        let list = ScrollArea::vertical()
-            .id_salt("rows")
-            .auto_shrink(false)
-            .show_rows(ui, ROW_H, items.len(), |ui, range| {
-                for index in range {
-                    let item = &items[index];
-                    let selected = pane.selected.contains(&item.name);
-                    let (r, resp) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), ROW_H),
-                        Sense::click_and_drag(),
-                    );
-                    let fill = if selected {
-                        if focused {
-                            theme::ACCENT().gamma_multiply(0.22)
-                        } else {
-                            theme::tint(14)
-                        }
-                    } else if resp.hovered() && !dragging_rows {
-                        theme::tint(7)
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    ui.painter().rect_filled(r, 6.0, fill);
-                    let (glyph, color) = icons::for_entry(&item.name, item.is_dir, false);
-                    let painter = ui.painter_at(r);
-                    painter.text(
-                        r.left_center() + vec2(8.0, 0.0),
-                        Align2::LEFT_CENTER,
-                        glyph,
-                        FontId::proportional(14.0),
-                        color,
-                    );
-                    let name_clip =
-                        Rect::from_min_max(r.min, pos2(r.left() + widths[0] - 6.0, r.max.y))
-                            .intersect(ui.clip_rect());
-                    ui.painter().with_clip_rect(name_clip).text(
-                        r.left_center() + vec2(28.0, 0.0),
-                        Align2::LEFT_CENTER,
-                        &item.name,
-                        FontId::proportional(13.0),
-                        theme::TEXT(),
-                    );
-                    if !item.is_dir && widths[1] > 0.0 {
-                        painter.text(
-                            pos2(r.left() + widths[0] + widths[1] - 10.0, r.center().y),
-                            Align2::RIGHT_CENTER,
-                            size_text(item.size),
-                            FontId::proportional(12.0),
-                            theme::MUTED(),
-                        );
-                    }
-                    if widths[2] > 0.0 {
-                        painter.text(
-                            pos2(r.right() - 10.0, r.center().y),
-                            Align2::RIGHT_CENTER,
-                            time_text(item.mtime, offset),
-                            FontId::proportional(12.0),
-                            theme::MUTED(),
-                        );
-                    }
-                    if resp.clicked() {
-                        clicked = Some((index, ui.input(|i| i.modifiers)));
-                    }
-                    if resp.double_clicked() {
-                        opened = Some(index);
-                    }
-                    if resp.drag_started() {
-                        drag_from = Some(index);
-                    }
-                    resp.context_menu(|ui| {
-                        if ui
-                            .add(egui::Button::new("Copy to the other pane").shortcut_text("F5"))
-                            .clicked()
-                        {
-                            menu = Some((index, 0));
-                        }
-                        ui.separator();
-                        if ui
-                            .add(egui::Button::new("Rename…").shortcut_text("F2"))
-                            .clicked()
-                        {
-                            menu = Some((index, 1));
-                        }
-                        if ui
-                            .add(egui::Button::new("Delete…").shortcut_text("Del"))
-                            .clicked()
-                        {
-                            menu = Some((index, 2));
-                        }
-                        if ui.button("Copy path").clicked() {
-                            menu = Some((index, 3));
-                        }
-                        if pane.place == Some(Place::Local)
-                            && ui.button("Show in Explorer").clicked()
-                        {
-                            menu = Some((index, 4));
-                        }
-                    });
-                }
-            });
-        // A right click on the empty part of the list.
-        let rest = Rect::from_min_max(
-            pos2(
-                body.left(),
-                list.content_size.y.min(list.inner_rect.height()) + list.inner_rect.top(),
-            ),
-            list.inner_rect.max,
-        );
-        if rest.height() > 4.0 {
-            let resp = ui.interact(rest, ui.id().with("rest"), Sense::click());
-            if resp.clicked() {
-                pane.selected.clear();
-            }
-            resp.context_menu(|ui| {
-                if ui.button("New folder…").clicked() {
-                    empty_menu = true;
-                }
-            });
-        }
-        if empty_menu {
-            act(PaneAct::NewFolder);
-        }
-
-        // Selecting, as in Explorer: a click picks one, Ctrl adds, Shift takes a range.
-        if let Some((index, mods)) = clicked {
-            let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
-            if mods.shift {
-                let from = pane
-                    .anchor
-                    .unwrap_or(index)
-                    .min(names.len().saturating_sub(1));
-                let (a, b) = (from.min(index), from.max(index));
-                pane.selected = names[a..=b].iter().cloned().collect();
-            } else if mods.command {
-                if !pane.selected.remove(&names[index]) {
-                    pane.selected.insert(names[index].clone());
-                }
-                pane.anchor = Some(index);
-            } else {
-                pane.selected = [names[index].clone()].into();
-                pane.anchor = Some(index);
-            }
-        }
-        if let Some(index) = opened {
-            let item = &items[index];
-            let path = pane.child(&item.name);
-            if item.is_dir {
-                act(PaneAct::Open(path));
-            } else if pane.place == Some(Place::Local) {
-                let _ = std::process::Command::new("explorer").arg(path).spawn();
-            } else {
-                act(PaneAct::CopyTo(vec![item.name.clone()]));
-            }
-        }
-        if let Some(index) = drag_from.filter(|_| self_drag_free(dragging_rows)) {
-            let name = items[index].name.clone();
-            if !pane.selected.contains(&name) {
-                pane.selected = [name].into();
-            }
-            act(PaneAct::StartRows(pane.selected_names()));
-        }
-        if let Some((index, what)) = menu {
-            let name = items[index].name.clone();
-            if !pane.selected.contains(&name) {
-                pane.selected = [name.clone()].into();
-            }
-            let names = pane.selected_names();
-            act(match what {
-                0 => PaneAct::CopyTo(names),
-                1 => PaneAct::Rename(name),
-                2 => PaneAct::Delete(names),
-                3 => PaneAct::CopyPaths(names),
-                _ => PaneAct::Reveal(pane.child(&name)),
-            });
-        }
-
-        // Typing narrows the list to names with what was typed; Esc clears it.
-        if focused && ui.memory(|m| m.focused().is_none()) {
-            let typed: String = ui.input(|i| {
-                i.events
-                    .iter()
-                    .filter_map(|e| match e {
-                        Event::Text(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            });
-            pane.filter.push_str(&typed);
-            if ui.input(|i| i.key_pressed(Key::Escape)) {
-                pane.filter.clear();
-                pane.selected.clear();
-            }
-        }
-        if !pane.filter.is_empty() {
-            let at = rect.right_bottom() - vec2(14.0, 14.0);
-            let galley = ui.painter().layout_no_wrap(
-                format!("{}  {}", icons::SEARCH, pane.filter),
-                FontId::proportional(12.5),
-                theme::TEXT(),
-            );
-            let r = Rect::from_min_size(
-                at - galley.size() - vec2(16.0, 8.0),
-                galley.size() + vec2(16.0, 8.0),
-            );
-            ui.painter().rect_filled(r, 8.0, theme::tint(24));
-            ui.painter()
-                .galley(r.min + vec2(8.0, 4.0), galley, theme::TEXT());
-        }
-    }
-
     fn dialogs(&mut self, ctx: &Context) {
+        let delete_here = match &self.dialog {
+            Some(Dialog::Delete(id, _)) => self.pane(*id).is_some_and(|p| p.is_local()),
+            _ => false,
+        };
         let Some(dialog) = &mut self.dialog else {
             return;
         };
-        let mut close = false;
-        let mut confirm = false;
-        let title = match dialog {
-            Dialog::NewFolder(..) => "New folder".to_string(),
-            Dialog::Rename(..) => "Rename".to_string(),
-            Dialog::Delete(_, names) => match names.as_slice() {
-                [one] => format!("Delete {one}?"),
-                many => format!("Delete {} items?", many.len()),
-            },
-        };
         let focus = std::mem::take(&mut self.focus_dialog);
-        let place = |id: u64| {
-            self.panes
+        let place_of = |panes: &[Pane], id: u64| {
+            panes
                 .iter()
                 .find(|p| p.id == id)
                 .and_then(|p| p.place.as_ref())
-                .map_or("", Place::label)
-                .to_string()
+                .map_or(String::new(), |p| p.label().to_string())
         };
-        let delete_from = match dialog {
-            Dialog::Delete(id, _) => place(*id),
-            _ => String::new(),
+        let answer = match dialog {
+            Dialog::NewFolder(id, name) => {
+                let place = place_of(&self.panes, *id);
+                let can = valid_name(name);
+                ui::Dialog {
+                    id: "new-folder",
+                    icon: icons::NEW_FOLDER,
+                    title: "New folder",
+                    subtitle: &format!("In {place}"),
+                    confirm: "Create",
+                    other: None,
+                    tone: ui::Tone::Normal,
+                    can,
+                    width: 420.0,
+                }
+                .show(ctx, |ui| {
+                    let edit = ui::field(ui, "folder", "Name", name, "New folder", focus);
+                    edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                })
+            }
+            Dialog::Delete(id, names) => {
+                let place = place_of(&self.panes, *id);
+                let title = match names.as_slice() {
+                    [one] => format!("Delete {one}?"),
+                    many => format!("Delete {} items?", many.len()),
+                };
+                let subtitle = if delete_here {
+                    format!("From {place}, for good, not to the Recycle Bin.")
+                } else {
+                    format!("From {place}, for good: there is no Recycle Bin on a server.")
+                };
+                ui::Dialog {
+                    id: "delete",
+                    icon: icons::TRASH,
+                    title: &title,
+                    subtitle: &subtitle,
+                    confirm: "Delete",
+                    other: None,
+                    tone: ui::Tone::Danger,
+                    can: true,
+                    width: 440.0,
+                }
+                .show(ctx, |ui| {
+                    ui::callout(ui, ui::RED, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for name in names.iter().take(8) {
+                            ui.label(RichText::new(name).size(12.5).color(theme::TEXT()));
+                        }
+                        if names.len() > 8 {
+                            ui.label(
+                                RichText::new(format!("and {} more", names.len() - 8))
+                                    .size(12.0)
+                                    .color(theme::COMMENT()),
+                            );
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Folders go with everything in them.")
+                            .size(12.0)
+                            .color(theme::COMMENT()),
+                    );
+                    ui.input(|i| i.key_pressed(Key::Enter))
+                })
+            }
         };
-        egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.label(RichText::new(&title).size(16.0).strong());
-            ui.add_space(8.0);
-            match dialog {
-                Dialog::NewFolder(_, name) | Dialog::Rename(_, _, name) => {
-                    let edit = ui.add(TextEdit::singleline(name).desired_width(f32::INFINITY));
-                    if focus {
-                        edit.request_focus();
-                    }
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        confirm = true;
-                    }
-                }
-                Dialog::Delete(_, names) => {
-                    let shown: Vec<&str> = names.iter().take(8).map(String::as_str).collect();
-                    ui.label(RichText::new(shown.join("\n")).size(12.5).color(theme::COMMENT()));
-                    if names.len() > 8 {
-                        ui.label(RichText::new(format!("and {} more", names.len() - 8)).size(12.5).color(theme::COMMENT()));
-                    }
-                    ui.label(RichText::new(format!("They're removed from {delete_from}, folders with all they hold. This can't be undone.")).size(12.5));
-                    if ui.input(|i| i.key_pressed(Key::Enter)) {
-                        confirm = true;
-                    }
-                }
-            }
-            ui.add_space(12.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if matches!(dialog, Dialog::Delete(..)) { "Delete" } else { "OK" };
-                if ui.button(label).clicked() {
-                    confirm = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
-            if ui.input(|i| i.key_pressed(Key::Escape)) {
-                close = true;
-            }
-        });
-        if confirm {
-            match self.dialog.take() {
-                Some(Dialog::NewFolder(id, name)) if !name.trim().is_empty() => {
+        match answer {
+            ui::Answer::Waiting => {}
+            ui::Answer::Cancel => self.dialog = None,
+            ui::Answer::Confirm | ui::Answer::Other => match self.dialog.take() {
+                Some(Dialog::NewFolder(id, name)) => {
                     let Some(pane) = self.pane(id) else { return };
                     let path = pane.child(name.trim());
                     if pane.is_local() {
@@ -2094,135 +1804,194 @@ impl App {
                         c.ask(Ask::Mkdir(path));
                     }
                 }
-                Some(Dialog::Rename(id, old, new)) if !new.trim().is_empty() && new != old => {
-                    let Some(pane) = self.pane(id) else { return };
-                    let (from, to) = (pane.child(&old), pane.child(new.trim()));
-                    if pane.is_local() {
-                        if let Err(e) = std::fs::rename(&from, &to) {
-                            self.status = e.to_string();
-                        }
-                        self.refresh(id);
-                    } else if let Some(c) = &pane.conn {
-                        c.ask(Ask::Rename(from, to));
-                    }
-                }
-                Some(Dialog::Delete(id, names)) => self.delete(id, names),
-                _ => {}
+                Some(Dialog::Delete(id, names)) => self.delete(id, names, true),
+                None => {}
+            },
+        }
+    }
+
+    /// Renames an item of a pane, here or on its server.
+    fn rename(&mut self, id: u64, old: &str, new: &str) {
+        if new.is_empty() || new == old {
+            return;
+        }
+        let Some(pane) = self.pane(id) else { return };
+        let (from, to) = (pane.child(old), pane.child(new));
+        if pane.is_local() {
+            if let Err(e) = std::fs::rename(&from, &to) {
+                self.status = e.to_string();
             }
-        } else if close {
-            self.dialog = None;
+            self.refresh(id);
+        } else if let Some(c) = &pane.conn {
+            c.ask(Ask::Rename(from, to));
         }
     }
 
     /// Saving a site, and the password questions.
     fn auth_dialog(&mut self, ctx: &Context) {
         let Some(auth) = &mut self.auth else { return };
-        let mut close = false;
-        let mut done = false;
-        let mut connect = false;
-        let title = match auth {
-            Auth::Site { old: None, .. } => "New site".to_string(),
-            Auth::Site { .. } => "Edit site".to_string(),
-            Auth::Password { label, .. } => format!("Password for {label}"),
-        };
-        let remembered = match auth {
+        let answer = match auth {
             Auth::Site {
-                old: Some(name), ..
-            } => sites::password(&format!("site:{name}")).is_some(),
-            _ => false,
-        };
-        egui::Modal::new(egui::Id::new("auth")).show(ctx, |ui| {
-            ui.set_width(400.0);
-            ui.label(RichText::new(&title).size(16.0).strong());
-            ui.add_space(10.0);
-            let enter = ui.input(|i| i.key_pressed(Key::Enter));
-            match auth {
-                Auth::Site { site, port, password, focus, .. } => {
-                    egui::Grid::new("site").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                        ui.label("Name");
-                        let name = ui.add(TextEdit::singleline(&mut site.name).hint_text("shop, production…").desired_width(260.0));
-                        if std::mem::take(focus) {
-                            name.request_focus();
-                        }
-                        ui.end_row();
-                        ui.label("Host");
-                        ui.add(TextEdit::singleline(&mut site.host).hint_text("example.com or 10.0.0.5").desired_width(260.0));
-                        ui.end_row();
-                        ui.label("Port");
-                        ui.add(TextEdit::singleline(port).desired_width(70.0));
-                        ui.end_row();
-                        ui.label("User");
-                        ui.add(TextEdit::singleline(&mut site.user).hint_text("root, deploy…").desired_width(260.0));
-                        ui.end_row();
-                        ui.label("Password");
-                        let hint = if remembered { "unchanged" } else { "empty: SSH keys" };
-                        ui.add(TextEdit::singleline(password).password(true).hint_text(hint).desired_width(260.0));
-                        ui.end_row();
-                        ui.label("");
-                        ui.checkbox(&mut site.remember, "Remember password");
-                        ui.end_row();
-                        ui.label("Start in");
-                        ui.add(TextEdit::singleline(&mut site.folder).hint_text("home folder").desired_width(260.0));
-                        ui.end_row();
-                    });
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Without a remembered password, rdrop asks for it when it connects. Remembered passwords are encrypted by Windows for your account.")
-                            .size(11.5)
-                            .color(theme::COMMENT()),
+                old,
+                site,
+                port,
+                password,
+                focus,
+            } => {
+                let focus = std::mem::take(focus);
+                let remembered = old
+                    .as_ref()
+                    .is_some_and(|name| sites::password(&format!("site:{name}")).is_some());
+                let taken = self
+                    .sites
+                    .iter()
+                    .any(|s| s.name == site.name.trim() && Some(&s.name) != old.as_ref());
+                let can = !site.name.trim().is_empty()
+                    && !site.host.trim().is_empty()
+                    && !taken
+                    && port.trim().parse::<u16>().is_ok();
+                let title = if old.is_some() {
+                    "Edit site"
+                } else {
+                    "New site"
+                };
+                ui::Dialog {
+                    id: "site",
+                    icon: icons::REMOTE,
+                    title,
+                    subtitle: "A server to connect to with one click, with its user and password.",
+                    confirm: "Save and connect",
+                    other: Some("Save"),
+                    tone: ui::Tone::Normal,
+                    can,
+                    width: 480.0,
+                }
+                .show(ctx, |ui| {
+                    let enter = std::cell::Cell::new(false);
+                    let pressed = |ui: &Ui, r: &egui::Response| {
+                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                    };
+                    let r = ui::field(
+                        ui,
+                        "site-name",
+                        "Name",
+                        &mut site.name,
+                        "Production, shop…",
+                        focus,
                     );
-                }
-                Auth::Password { password, remember, wrong, focus, .. } => {
-                    if *wrong {
-                        ui.label(RichText::new("That password didn't work. Try again.").size(12.5).color(BAD));
-                        ui.add_space(4.0);
+                    enter.set(enter.get() | pressed(ui, &r));
+                    if taken {
+                        ui.label(
+                            RichText::new("A site with that name is already saved.")
+                                .size(12.0)
+                                .color(ui::RED),
+                        );
+                    }
+                    ui::pair(
+                        ui,
+                        |ui| {
+                            let r = ui::field(
+                                ui,
+                                "site-host",
+                                "Host",
+                                &mut site.host,
+                                "example.com or 10.0.0.5",
+                                false,
+                            );
+                            enter.set(enter.get() | pressed(ui, &r));
+                        },
+                        |ui| {
+                            let r = ui::field(ui, "site-port", "Port", port, "22", false);
+                            enter.set(enter.get() | pressed(ui, &r));
+                        },
+                        86.0,
+                    );
+                    let r = ui::field(
+                        ui,
+                        "site-user",
+                        "User",
+                        &mut site.user,
+                        "root, deploy…",
+                        false,
+                    );
+                    enter.set(enter.get() | pressed(ui, &r));
+                    let hint = if remembered {
+                        "Remembered; type to change it"
                     } else {
-                        ui.label(RichText::new("The server didn't take your SSH keys; it wants a password.").size(12.5).color(theme::COMMENT()));
-                        ui.add_space(4.0);
-                    }
-                    let edit = ui.add(TextEdit::singleline(password).password(true).desired_width(f32::INFINITY));
-                    if std::mem::take(focus) {
-                        edit.request_focus();
-                    }
-                    if edit.lost_focus() && enter {
-                        done = true;
-                    }
-                    ui.checkbox(remember, "Remember password");
-                }
+                        "Empty: sign in with your SSH keys"
+                    };
+                    let r = ui::password(ui, "site-password", "Password", password, hint, false);
+                    enter.set(enter.get() | pressed(ui, &r));
+                    ui::switch(
+                        ui,
+                        &mut site.remember,
+                        "Remember password",
+                        "encrypted by Windows for your account",
+                    );
+                    let r = ui::field(
+                        ui,
+                        "site-folder",
+                        "Start in",
+                        &mut site.folder,
+                        "The home folder",
+                        false,
+                    );
+                    enter.set(enter.get() | pressed(ui, &r));
+                    enter.get()
+                })
             }
-            ui.add_space(12.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                match auth {
-                    Auth::Site { .. } => {
-                        if ui.button("Save and connect").clicked() {
-                            done = true;
-                            connect = true;
-                        }
-                        if ui.button("Save").clicked() {
-                            done = true;
-                        }
-                    }
-                    Auth::Password { .. } => {
-                        if ui.button("Connect").clicked() {
-                            done = true;
-                        }
-                    }
+            Auth::Password {
+                label,
+                password,
+                remember,
+                wrong,
+                focus,
+                ..
+            } => {
+                let focus = std::mem::take(focus);
+                let subtitle = if *wrong {
+                    "That password didn't work. Try again.".to_string()
+                } else {
+                    "The server didn't take your SSH keys; it wants a password.".to_string()
+                };
+                let title = format!("Sign in to {label}");
+                let can = !password.is_empty();
+                ui::Dialog {
+                    id: "password",
+                    icon: if *wrong { ui::WARNING } else { ui::LOCK },
+                    title: &title,
+                    subtitle: &subtitle,
+                    confirm: "Connect",
+                    other: None,
+                    tone: if *wrong {
+                        ui::Tone::Danger
+                    } else {
+                        ui::Tone::Normal
+                    },
+                    can,
+                    width: 440.0,
                 }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
-            if ui.input(|i| i.key_pressed(Key::Escape)) {
-                close = true;
+                .show(ctx, |ui| {
+                    let r = ui::password(ui, "password", "Password", password, "", focus);
+                    ui::switch(
+                        ui,
+                        remember,
+                        "Remember password",
+                        "encrypted by Windows for your account",
+                    );
+                    r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
+                })
             }
-        });
-        if close {
-            self.auth = None;
-            return;
-        }
-        if !done {
-            return;
-        }
+        };
+        let connect = match answer {
+            ui::Answer::Waiting => return,
+            ui::Answer::Cancel => {
+                self.auth = None;
+                return;
+            }
+            ui::Answer::Confirm => true,
+            ui::Answer::Other => false,
+        };
         match self.auth.take() {
             Some(Auth::Site {
                 old,
@@ -2234,25 +2003,6 @@ impl App {
                 site.name = site.name.trim().to_string();
                 site.host = site.host.trim().to_string();
                 site.port = port.trim().parse().unwrap_or(22);
-                let taken = self
-                    .sites
-                    .iter()
-                    .any(|s| s.name == site.name && Some(&s.name) != old.as_ref());
-                if site.name.is_empty() || site.host.is_empty() || taken {
-                    self.status = if taken {
-                        "A site with that name is already saved".into()
-                    } else {
-                        "A site needs a name and a host".into()
-                    };
-                    self.auth = Some(Auth::Site {
-                        old,
-                        site,
-                        port,
-                        password,
-                        focus: false,
-                    });
-                    return;
-                }
                 let key = site.key();
                 // A renamed site takes its password along.
                 if let Some(old_name) = &old {
@@ -2320,6 +2070,7 @@ impl App {
                     Place::Server(h) => h.clone(),
                 }),
                 path: p.path.clone(),
+                view: p.view,
             })
             .collect();
         if let (Some(path), Ok(json)) = (settings_path(), serde_json::to_vec_pretty(&self.settings))
@@ -2328,6 +2079,15 @@ impl App {
             let _ = std::fs::write(path, json);
         }
     }
+}
+
+/// A name a file or folder can have, here and on a server.
+fn valid_name(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
 }
 
 /// Panes side by side, each as wide as the others.
@@ -2344,11 +2104,6 @@ fn row(ids: &[u64]) -> split::Node {
     }
 }
 
-/// A new drag of rows starts only when none is under way.
-fn self_drag_free(dragging: bool) -> bool {
-    !dragging
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -2356,7 +2111,14 @@ impl eframe::App for App {
             os::adopt_window(frame);
             os::set_backdrop(frame, None, true);
         }
+        self.now = ctx.input(|i| i.time);
+        if self.now - self.drives_at > 5.0 {
+            self.drives = winshell::drives();
+            self.drives_at = self.now;
+        }
         self.poll();
+        self.pending_renames();
+        self.opened_tick();
         self.keys(&ctx);
         // Files dropped from Explorer go into the pane they land on.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -2416,6 +2178,8 @@ impl eframe::App for App {
             }))
             .show(ui, |ui| self.panes_ui(ui));
         self.jobs_popup(&ctx);
+        self.preview_tick(&ctx);
+        self.props_dialog(&ctx);
         self.dialogs(&ctx);
         self.auth_dialog(&ctx);
         if self.drag.is_none() {

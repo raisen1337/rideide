@@ -68,6 +68,7 @@ impl Attrs {
 pub struct Entry {
     pub name: String,
     pub attrs: Attrs,
+    pub link: bool,
 }
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -462,7 +463,8 @@ impl Session {
                 r.bytes()?;
                 let attrs = r.attrs()?;
                 if name != "." && name != ".." {
-                    entries.push(Entry { name, attrs });
+                    let link = attrs.is_link();
+                    entries.push(Entry { name, attrs, link });
                 }
             }
         }
@@ -564,6 +566,37 @@ impl Session {
         &mut self,
         path: &str,
         out: &mut (impl Write + ?Sized),
+        progress: impl FnMut(u64) -> bool,
+    ) -> Result<()> {
+        self.download_range(path, 0, u64::MAX, out, progress)
+    }
+
+    /// Reads at most `limit` bytes of a file from `start`: a preview's first part, or the
+    /// end of a log.
+    pub fn read_at(&mut self, path: &str, start: u64, limit: u64) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.download_range(path, start, limit, &mut out, |_| true)?;
+        Ok(out)
+    }
+
+    /// Sets a file's permissions, as `chmod` does.
+    pub fn chmod(&mut self, path: &str, mode: u32) -> Result<()> {
+        let id = self.id();
+        let mut p = Out::new(SETSTAT, id);
+        let attrs = Attrs {
+            permissions: Some(mode & 0o7777),
+            ..Attrs::default()
+        };
+        p.str(path).attrs(&attrs);
+        self.expect_ok(p.finish())
+    }
+
+    fn download_range(
+        &mut self,
+        path: &str,
+        start: u64,
+        limit: u64,
+        out: &mut (impl Write + ?Sized),
         mut progress: impl FnMut(u64) -> bool,
     ) -> Result<()> {
         let id = self.id();
@@ -572,11 +605,18 @@ impl Session {
         let handle = self.handle(p.finish())?;
         let result = (|| {
             let mut chunk = CHUNK as u64;
-            let mut next_offset = 0u64;
+            let mut next_offset = start;
+            let end = start.saturating_add(limit);
             let mut pending: std::collections::VecDeque<u64> = Default::default();
             let mut written = 0u64;
             loop {
-                while pending.len() < IN_FLIGHT {
+                if written >= limit {
+                    for _ in 0..pending.len() {
+                        self.receive()?;
+                    }
+                    return Ok(());
+                }
+                while pending.len() < IN_FLIGHT && next_offset < end {
                     let id = self.id();
                     let mut p = Out::new(READ, id);
                     p.bytes(&handle).u64(next_offset).u32(chunk as u32);
@@ -585,15 +625,18 @@ impl Session {
                     next_offset += chunk;
                 }
                 self.to.flush().map_err(|e| e.to_string())?;
-                let offset = pending.pop_front().unwrap_or(written);
+                let Some(offset) = pending.pop_front() else {
+                    return Ok(());
+                };
                 let (kind, body) = self.receive()?;
                 let body = body.get(4..).unwrap_or_default();
                 match kind {
                     DATA => {
                         let data = In(body).bytes()?;
-                        if offset != written {
+                        if offset != start + written {
                             return Err("The server answered out of order".into());
                         }
+                        let data = &data[..data.len().min((limit - written) as usize)];
                         out.write_all(data).map_err(|e| e.to_string())?;
                         written += data.len() as u64;
                         if !progress(written) {
@@ -608,7 +651,7 @@ impl Session {
                                 self.receive()?;
                             }
                             pending.clear();
-                            next_offset = written;
+                            next_offset = start + written;
                             if !data.is_empty() {
                                 chunk = data.len() as u64;
                             }

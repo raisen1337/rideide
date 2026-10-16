@@ -10,6 +10,13 @@ pub enum Ask {
     Mkdir(String),
     Rename(String, String),
     Delete(Vec<String>),
+    /// Up to `limit` bytes of a file, from its start, or from its end with `tail`.
+    Read {
+        path: String,
+        limit: u64,
+        tail: bool,
+    },
+    Chmod(String, u32),
 }
 
 pub enum Answer {
@@ -19,6 +26,12 @@ pub enum Answer {
     /// Something changed in this folder, which is worth listing again.
     Changed(String),
     Failed(String),
+    /// What `Ask::Read` read, with the file's whole size.
+    Read {
+        path: String,
+        data: Vec<u8>,
+        size: u64,
+    },
     /// The connection couldn't be made or was lost.
     Lost(String),
 }
@@ -56,6 +69,23 @@ impl Remote {
                     },
                     Ask::Rename(from, to) => match session.rename(&from, &to) {
                         Ok(()) => Answer::Changed(sftp::parent(&to)),
+                        Err(e) => Answer::Failed(e),
+                    },
+                    Ask::Read { path, limit, tail } => {
+                        let read = session.stat(&path).and_then(|attrs| {
+                            let size = attrs.size.unwrap_or(0);
+                            let start = if tail { size.saturating_sub(limit) } else { 0 };
+                            session
+                                .read_at(&path, start, limit)
+                                .map(|data| (data, size))
+                        });
+                        match read {
+                            Ok((data, size)) => Answer::Read { path, data, size },
+                            Err(e) => Answer::Failed(format!("{path}: {e}")),
+                        }
+                    }
+                    Ask::Chmod(path, mode) => match session.chmod(&path, mode) {
+                        Ok(()) => Answer::Changed(sftp::parent(&path)),
                         Err(e) => Answer::Failed(e),
                     },
                     Ask::Delete(paths) => {

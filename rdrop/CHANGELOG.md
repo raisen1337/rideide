@@ -3,6 +3,18 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.3.0
+
+- **Works like Explorer.** Ctrl+C, Ctrl+X and Ctrl+V copy and move files, between panes, servers and Explorer itself: copy in Explorer, paste in rdrop, and the other way round. Delete sends files on this computer to the Recycle Bin; Shift+Delete, and anything on a server, asks first and deletes for good.
+- **Rename in place** with F2, or by clicking a picked item and waiting a moment, as in Explorer. Ctrl+Shift+N makes a new folder ready to be named.
+- **This PC**, with the drives and how full they are, and your Desktop, Downloads, Documents and the rest, in the pane and in the list on the left.
+- **Previews.** Double-click or press Enter on a file to see it: pictures and drawings with zoom, sound with a player, code and text in colour with line numbers, logs that follow what is written to them (Live), and the bytes of anything else. The arrow keys go to the next file. Video, documents and archives open in their app.
+- **Open with app** for files on a server: rdrop fetches the file, opens it, and sends it back each time you save it.
+- **Large icons**, with pictures as thumbnails, beside the detailed list; each pane remembers its own.
+- **Permissions**: a column on servers, and Properties (Alt+Enter) to change them as with chmod. Hidden files and dot files show or hide with Ctrl+H, symbolic links are marked.
+- The arrow keys, Home, End and the page keys move through the list, with Shift to pick a range, and typing jumps to a name.
+- New-looking dialogs, with clear titles, fields and buttons.
+
 ## 0.2.0
 
 - **Sign in with a password.** When a server doesn't take your SSH keys, rdrop asks for the password, with a box to remember it. Remembered passwords are encrypted by Windows for your account.
