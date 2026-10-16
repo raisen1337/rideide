@@ -229,6 +229,8 @@ pub struct Settings {
     pub zoom: f32,
     pub code_size: f32,
     pub term_size: f32,
+    /// The font of the editor and the terminals, by name (see `fonts`).
+    pub code_font: String,
     /// Extra space between lines of code, in points.
     pub line_gap: f32,
     pub splash: bool,
@@ -311,6 +313,7 @@ impl Default for Settings {
             zoom: 1.0,
             code_size: 14.0,
             term_size: 14.0,
+            code_font: crate::fonts::DEFAULT.into(),
             line_gap: 4.0,
             splash: true,
             tab_width: 4,
@@ -1018,6 +1021,56 @@ impl App {
                         );
                     },
                 );
+                row(
+                    ui,
+                    "Code font",
+                    "The font of the editor and the terminals. The most used coding fonts come with ride.",
+                    |ui| {
+                        let current = s.code_font.clone();
+                        egui::ComboBox::from_id_salt("code_font")
+                            .width(220.0)
+                            .selected_text(
+                                RichText::new(&current)
+                                    .family(crate::fonts::family(&current)),
+                            )
+                            .height(420.0)
+                            .show_ui(ui, |ui| {
+                                for font in crate::fonts::FONTS
+                                    .iter()
+                                    .filter(|f| crate::fonts::available(f))
+                                {
+                                    let text = RichText::new(font.name)
+                                        .family(crate::fonts::family(font.name))
+                                        .size(15.0);
+                                    if ui
+                                        .selectable_label(current == font.name, text)
+                                        .clicked()
+                                        && current != font.name
+                                    {
+                                        s.code_font = font.name.to_string();
+                                        crate::fonts::apply(ui.ctx(), font.name);
+                                    }
+                                }
+                            });
+                    },
+                );
+                // How it looks, in the size the editor uses.
+                let sample = "fn main() -> Result<(), Box<dyn Error>> {\n    let items = vec![0x1F, 42, 0o17]; // => != === <= >= ->\n    println!(\"{items:?} {{}}\", \"ilI1|O0o\");\n}";
+                ui.add_space(4.0);
+                egui::Frame::NONE
+                    .fill(theme::tint(6))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new(sample)
+                                .family(egui::FontFamily::Monospace)
+                                .size(s.code_size)
+                                .color(theme::TEXT()),
+                        );
+                    });
+                ui.add_space(4.0);
                 row(ui, "Code font size", "Text size in the editor.", |ui| {
                     ui.add(egui::Slider::new(&mut s.code_size, 8.0..=32.0).step_by(0.5));
                 });

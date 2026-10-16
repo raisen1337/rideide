@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rkit you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rkit.
 
+## 0.2.1
+
+- Chinese, Japanese and Korean names show instead of empty boxes.
+
 ## 0.2.0
 
 - rdrop has a card of its own, and every server in the list opens in rdrop with one click.

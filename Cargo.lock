@@ -4100,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "rdrop"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "eframe",
  "flate2",
@@ -4279,7 +4279,7 @@ dependencies = [
 
 [[package]]
 name = "ride"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.15"
+version = "0.9.16"
 dependencies = [
  "flate2",
  "ignore",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.15"
+version = "0.9.16"
 dependencies = [
  "postcard",
  "serde",
@@ -4344,7 +4344,7 @@ dependencies = [
 
 [[package]]
 name = "rkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "raw-window-handle",
@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.15"
+version = "0.9.16"
 dependencies = [
  "eframe",
  "flate2",
@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "rterm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",

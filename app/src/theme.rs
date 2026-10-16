@@ -355,7 +355,27 @@ fn luminance(c: Color32) -> f32 {
     (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0
 }
 
+#[allow(dead_code)] // rterm, rdrop and rkit use it; ride picks its code font.
 pub fn install_fonts(ctx: &Context) {
+    install_fonts_with(ctx, None, None, Vec::new());
+}
+
+/// Whether the code font came with a bold face of its own (for fonts that aren't
+/// variable); the terminal draws bold text in the "code-bold" family then.
+static CODE_BOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn code_bold() -> bool {
+    CODE_BOLD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The fonts, with `code` (or Cascadia Mono) for code and terminals, its `bold` face if it
+/// has one, and `named` fonts in families of their own, for previews.
+pub fn install_fonts_with(
+    ctx: &Context,
+    code: Option<egui::FontData>,
+    bold: Option<egui::FontData>,
+    named: Vec<(String, egui::FontData)>,
+) {
     let mut fonts = egui::FontDefinitions::default();
     let dir = std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap_or("C:\\Windows".into()))
         .join("Fonts");
@@ -369,15 +389,30 @@ pub fn install_fonts(ctx: &Context) {
         ("ui", "segoeui.ttf", FontFamily::Proportional),
         ("code", "CascadiaMono.ttf", FontFamily::Monospace),
     ];
+    let mut code = code;
     for (name, file, family) in system {
         let list = fonts.families.entry(family).or_default();
         list.insert(0, "icons".into());
-        if let Ok(bytes) = std::fs::read(dir.join(file)) {
-            fonts
-                .font_data
-                .insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+        let data = match (name, code.take()) {
+            ("code", Some(data)) => Some(data),
+            _ => std::fs::read(dir.join(file))
+                .ok()
+                .map(egui::FontData::from_owned),
+        };
+        if let Some(data) = data {
+            fonts.font_data.insert(name.into(), Arc::new(data));
             list.insert(0, name.into());
         }
+    }
+    CODE_BOLD.store(bold.is_some(), std::sync::atomic::Ordering::Relaxed);
+    let mut extra: Vec<(String, egui::FontData)> = named;
+    if let Some(bold) = bold {
+        extra.push(("code-bold".into(), bold));
+    }
+    let mut extra_names = Vec::new();
+    for (name, data) in extra {
+        fonts.font_data.insert(name.clone(), Arc::new(data));
+        extra_names.push(name);
     }
     if let Ok(bytes) = std::fs::read(dir.join("seguisym.ttf")) {
         fonts.font_data.insert(
@@ -392,7 +427,119 @@ pub fn install_fonts(ctx: &Context) {
                 .push("symbols".into());
         }
     }
+    // Chinese, Japanese and Korean, last: large files, so they are mapped from the disk
+    // rather than read in, and cost memory only for the characters that show.
+    let cjk = [
+        ("cjk-sc", "msyh.ttc"),
+        ("cjk-jp", "YuGothM.ttc"),
+        ("cjk-kr", "malgun.ttf"),
+    ];
+    for (name, file) in cjk {
+        if let Some(bytes) = map_file(&dir.join(file)) {
+            fonts
+                .font_data
+                .insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(name.into());
+            }
+        }
+    }
+    // Each named font in a family of its own, falling back as code does.
+    let rest: Vec<String> = fonts
+        .families
+        .get(&FontFamily::Monospace)
+        .map(|l| l.iter().skip(1).cloned().collect())
+        .unwrap_or_default();
+    for name in extra_names {
+        let mut list = vec![name.clone()];
+        list.extend(rest.iter().cloned());
+        fonts
+            .families
+            .insert(FontFamily::Name(name.as_str().into()), list);
+    }
     ctx.set_fonts(fonts);
+}
+
+/// A file mapped into memory for as long as the program runs: its pages are read from the
+/// disk when touched and shared with other programs mapping it.
+#[cfg(windows)]
+fn map_file(path: &std::path::Path) -> Option<&'static [u8]> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *const std::ffi::c_void,
+            disposition: u32,
+            flags: u32,
+            template: isize,
+        ) -> isize;
+        fn GetFileSizeEx(file: isize, size: *mut i64) -> i32;
+        fn CreateFileMappingW(
+            file: isize,
+            security: *const std::ffi::c_void,
+            protect: u32,
+            high: u32,
+            low: u32,
+            name: *const u16,
+        ) -> isize;
+        fn MapViewOfFile(map: isize, access: u32, high: u32, low: u32, bytes: usize) -> *const u8;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const FILE_SHARE_READ: u32 = 1;
+    const OPEN_EXISTING: u32 = 3;
+    const PAGE_READONLY: u32 = 2;
+    const FILE_MAP_READ: u32 = 4;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        let file = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        );
+        if file == -1 {
+            return None;
+        }
+        let mut size = 0i64;
+        let ok = GetFileSizeEx(file, &mut size) != 0 && size > 0;
+        let map = if ok {
+            CreateFileMappingW(
+                file,
+                std::ptr::null(),
+                PAGE_READONLY,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        } else {
+            0
+        };
+        CloseHandle(file);
+        if map == 0 {
+            return None;
+        }
+        let view = MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0);
+        // The view keeps the mapping alive; the handle isn't needed any more.
+        CloseHandle(map);
+        if view.is_null() {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(view, size as usize))
+    }
+}
+
+#[cfg(not(windows))]
+fn map_file(path: &std::path::Path) -> Option<&'static [u8]> {
+    std::fs::read(path)
+        .ok()
+        .map(|b| &*Box::leak(b.into_boxed_slice()))
 }
 
 /// Styles egui from the current palette.

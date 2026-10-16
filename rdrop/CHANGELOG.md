@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.5.1
+
+- Chinese, Japanese and Korean file names show instead of empty boxes.
+
 ## 0.5.0
 
 - **Only what changed goes.** A file of 4 MB or more that is already at the other end is compared block by block, as rsync does, and only the blocks that differ cross the network: two changed megabytes of a 67 MB file are two megabytes sent.

@@ -3,6 +3,13 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.13
+
+- **Pick the font of the editor and the terminals** in Settings → Appearance → Code font, with a preview. The most used coding fonts come with ride: JetBrains Mono, Fira Code, Source Code Pro, IBM Plex Mono, Roboto Mono, Ubuntu Mono, Inconsolata, Geist Mono, Victor Mono and Space Mono, beside Cascadia Code, Cascadia Mono and Consolas from Windows.
+- **Terminals draw text as Windows Terminal does.** Real bold from the font, italics, every kind of underline (double, curly, dotted, dashed) in its own colour, and strikethrough. Box-drawing lines and blocks are drawn as shapes, so frames and rounded corners join up from cell to cell and row to row, and pictures made of blocks have no gaps. Wide and unusual symbols are fitted into their cells instead of spilling over, and Chinese, Japanese and Korean show instead of empty boxes.
+- **Claude Code and other tools look right**: programs on Windows check for Windows Terminal before they use colours and Unicode symbols, and now find it, so Claude Code shows its colours, ❯, ⏺ and frames instead of plain ASCII.
+- Links in the output (and web addresses) open with Ctrl+click; programs that use the mouse get clicks and drags (Shift still selects text); programs that ask learn when the terminal gains or loses the keyboard; and synchronized output can't freeze the screen.
+
 ## 0.9.12
 
 - **Claude's small jobs use about 40 times fewer tokens.** Commit messages, inline edits, AI search and the catch-up used to start Claude Code with everything it has: its full instructions, every tool, your MCP servers and skills, about 29,000 tokens before the job itself. They now get a short instruction and only the tools they need (none, or reading and searching for AI search): under 1,000 tokens. A host with an older Claude Code gets the job the old way.

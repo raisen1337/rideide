@@ -462,6 +462,11 @@ fn open_term(id: u64, cols: u16, rows: u16, cwd: &str, tx: &Out) -> Result<Term,
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // On Windows, programs look for Windows Terminal's WT_SESSION before they use colours,
+    // Unicode symbols and modern sequences; ride's terminal draws all of them.
+    if cfg!(windows) {
+        cmd.env("WT_SESSION", session_id());
+    }
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
@@ -570,4 +575,32 @@ fn open_proc(id: u64, command: &str, cwd: &str, tx: &Out) -> io::Result<Proc> {
         stdin: Some(stdin),
         child,
     })
+}
+
+/// A fresh id in the form Windows Terminal gives each of its sessions as WT_SESSION.
+/// Programs on Windows look for it to know they may use colours, Unicode symbols and
+/// modern escape sequences: Claude Code, for one, falls back to plain ASCII without it.
+pub fn session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut bytes = [0u8; 16];
+    for chunk in bytes.chunks_mut(8) {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        chunk.copy_from_slice(&h.finish().to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }

@@ -3,6 +3,13 @@
 rkit shows the entries newer than the rterm you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rterm.
 
+## 0.5.0
+
+- **rterm can be Windows' default terminal.** Turn on Settings → Default terminal for Windows and console programs started anywhere (cmd or PowerShell from the Start menu, scripts double-clicked in Explorer, tools that open a console) open as tabs in rterm, as they do in Windows Terminal; turn it off to give them back. This uses Windows Terminal's console host, so Windows Terminal needs to be installed (it is, on Windows 11).
+- **Terminals draw text as Windows Terminal does.** Real bold from the font, italics, every kind of underline (double, curly, dotted, dashed) in its own colour, and strikethrough. Box-drawing lines and blocks are drawn as shapes, so frames and rounded corners join up from cell to cell and row to row, and pictures made of blocks have no gaps. Wide and unusual symbols are fitted into their cells instead of spilling over, and Chinese, Japanese and Korean show instead of empty boxes.
+- **Claude Code and other tools look right**: programs on Windows check for Windows Terminal before they use colours and Unicode symbols, and now find it, so Claude Code shows its colours, ❯, ⏺ and frames instead of plain ASCII.
+- Links in the output (and web addresses) open with Ctrl+click; programs that use the mouse get clicks and drags (Shift still selects text); programs that ask learn when the terminal gains or loses the keyboard; and synchronized output can't freeze the screen.
+
 ## 0.4.0
 
 - rterm has its own version and changelog now, and updates on its own from rkit.

@@ -62,6 +62,10 @@ There is no API key to paste into ride.
 
 ## Editor
 
+- The font is yours to pick, for the editor and the terminals, in Settings → Appearance: the
+  most used coding fonts come with ride (JetBrains Mono, Fira Code, Source Code Pro, IBM Plex
+  Mono, Roboto Mono, Ubuntu Mono, Inconsolata, Geist Mono, Victor Mono, Space Mono), beside
+  Cascadia and Consolas.
 - Language servers, the same ones VS Code uses, running on the server next to the code:
   completion as you type, problems underlined as you go, hover, the arguments of the call
   you're typing, go to definition (F12 or Ctrl+click), find references (Shift+F12), rename
@@ -208,6 +212,12 @@ app, in the Start menu as rterm and in Explorer's right-click menu as "Open in r
   their paths.
 - `rterm [-d FOLDER] [-p PROFILE] [COMMAND ARGS…]` starts in a folder, with a profile, or
   running a command.
+- It can be Windows' default terminal (Settings → Default terminal for Windows): console
+  programs started anywhere open as tabs in rterm, as they do in Windows Terminal.
+- Text is drawn as Windows Terminal draws it: real bold, italics, every kind of underline,
+  frames and blocks that join from cell to cell, wide symbols fitted to their cells, and
+  Chinese, Japanese and Korean. Programs that look for Windows Terminal before using colours
+  and Unicode (Claude Code among them) find it. Links open with Ctrl+click.
 
 ## Building from source
 
@@ -245,3 +255,9 @@ ride, rterm, rdrop and rkit are free and open source, under either of
 - the [MIT license](LICENSE-MIT),
 
 at your option. Contributions are taken under the same terms.
+
+The fonts ride carries keep their own licences, beside them in `app/assets/fonts`: the SIL
+Open Font License for most of them and the Ubuntu Font Licence for Ubuntu Mono; the icons
+are from Nerd Fonts (`app/assets/NerdFonts-LICENSE`). When rterm is Windows' default
+terminal it keeps a copy of Windows Terminal's `OpenConsoleProxy.dll` (MIT), taken from the
+installed Windows Terminal.

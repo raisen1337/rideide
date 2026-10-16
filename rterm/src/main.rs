@@ -13,6 +13,7 @@ mod term;
 #[path = "../../app/src/theme.rs"]
 mod theme;
 
+mod handoff;
 mod os;
 mod profiles;
 mod pty;
@@ -40,6 +41,18 @@ fn main() -> eframe::Result {
         use std::io::Write;
         let _ = writeln!(std::io::stdout(), "{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    // `--default-terminal=on|off` makes rterm Windows' default terminal or gives it back,
+    // for the setup program and scripts.
+    if let Some(value) =
+        std::env::args().find_map(|a| a.strip_prefix("--default-terminal=").map(str::to_string))
+    {
+        let result = handoff::set_default(value == "on");
+        if let Err(e) = &result {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "{e}");
+        }
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let launch = Launch::from_args();
     // The same graphics setup as ride: a DirectComposition swapchain, which the glass
@@ -100,6 +113,8 @@ impl Launch {
         let (mut dir, mut profile, mut command) = (None, None, Vec::new());
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                // COM starting rterm to take a console handed over by Windows.
+                "-Embedding" | "/Embedding" => {}
                 "-d" | "--dir" | "--startingDirectory" => dir = args.next().map(clean_dir),
                 "-p" | "--profile" => profile = args.next(),
                 "--" => command.extend(args.by_ref()),
@@ -225,6 +240,10 @@ struct App {
     /// The backdrop last given to the window: its tint and whether it is dark.
     applied: Option<(Option<[u8; 4]>, bool)>,
     theme_shown: String,
+    /// Console programs Windows hands to rterm as the default terminal.
+    handoffs: Receiver<handoff::Handoff>,
+    /// Why rterm couldn't be made the default terminal, shown in Settings.
+    default_error: Option<String>,
 }
 
 fn palette(name: &str) -> theme::Palette {
@@ -266,7 +285,28 @@ impl App {
             adopted: false,
             applied: None,
             theme_shown: name,
+            handoffs: handoff::listen(ctx.clone()),
+            default_error: None,
         };
+        // As the default terminal, the registration follows rterm and Windows Terminal's
+        // proxy wherever updates move them.
+        std::thread::spawn(handoff::keep_registration);
+        // Started by Windows to show a console program: its tab is the first one.
+        if handoff::started_by_com() {
+            match app
+                .handoffs
+                .recv_timeout(std::time::Duration::from_secs(15))
+            {
+                Ok(h) => {
+                    let term = app.handed_term(ctx, h);
+                    let pane = app.new_pane(term);
+                    app.layout = split::Node::Pane(pane);
+                    app.focus = pane;
+                    return app;
+                }
+                Err(_) => std::process::exit(0),
+            }
+        }
         let first = if let Some((program, args)) = launch.command.split_first() {
             let mut profile = app.default_profile();
             profile.name = PathBuf::from(program)
@@ -337,6 +377,35 @@ impl App {
             pty,
             profile,
             ended,
+        }
+    }
+
+    /// A tab for a console program Windows handed over.
+    fn handed_term(&mut self, ctx: &Context, h: handoff::Handoff) -> Term {
+        let id = self.next();
+        let mut profile = self.default_profile();
+        let program = PathBuf::from(&h.program);
+        profile.name = program
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Console".into());
+        if !h.program.is_empty() {
+            profile.program = program;
+            profile.args.clear();
+            profile.env.clear();
+        }
+        let mut term = Terminal::new(id, 120, 30);
+        if !h.title.is_empty() {
+            term.title = h.title.clone();
+        }
+        let pty = Pty::from_handoff(h, ctx);
+        Term {
+            id,
+            term,
+            pty: Some(pty),
+            profile,
+            ended: false,
         }
     }
 
@@ -500,6 +569,22 @@ impl App {
 
     /// Feeds every terminal's output to it, shown or not, and notices programs ending.
     fn poll(&mut self, ctx: &Context) {
+        // Console programs started elsewhere, handed to rterm by Windows: a tab each, and
+        // the window comes forward.
+        while let Ok(h) = self.handoffs.try_recv() {
+            let term = self.handed_term(ctx, h);
+            let focus = self.focus;
+            if let Some(pane) = self.pane_mut(focus) {
+                pane.terms.push(term);
+                let last = pane.terms.len() - 1;
+                pane.select(last);
+            }
+            // RTERM_NO_FOCUS keeps a test window from taking the keyboard.
+            if std::env::var_os("RTERM_NO_FOCUS").is_none() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
         if let Some(more) = &self.more_profiles {
             if let Ok(found) = more.try_recv() {
                 self.profiles.extend(found);
@@ -865,6 +950,23 @@ impl App {
                 if ui.radio(current == key, label).clicked() {
                     settings::update(|s| s.theme = key.into());
                 }
+            }
+            ui.separator();
+            let mut default = handoff::is_default();
+            if ui
+                .checkbox(&mut default, "Default terminal for Windows")
+                .on_hover_text(
+                    "Console programs started anywhere (cmd, PowerShell, scripts from Explorer) open in rterm instead of a console window or Windows Terminal",
+                )
+                .changed()
+            {
+                self.default_error = handoff::set_default(default).err();
+            }
+            if let Some(error) = &self.default_error {
+                ui.add(
+                    egui::Label::new(RichText::new(error).small().color(theme::COMMENT()))
+                        .wrap(),
+                );
             }
             ui.separator();
             ui.label(

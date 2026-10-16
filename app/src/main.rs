@@ -13,6 +13,7 @@ mod editor;
 mod embed;
 mod envfile;
 mod extras;
+mod fonts;
 mod github;
 mod highlight;
 mod icons;
@@ -1593,7 +1594,7 @@ fn menu_item(ui: &mut Ui, icon: char, text: &str) -> bool {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         settings::load();
-        theme::install_fonts(&cc.egui_ctx);
+        fonts::apply(&cc.egui_ctx, &settings::with(|s| s.code_font.clone()));
         theme::apply(&cc.egui_ctx);
         let stored = |key: &str| {
             cc.storage

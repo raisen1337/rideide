@@ -322,6 +322,12 @@ fn remove_rkit(dir: &Path) {
 const RTERM_APP_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\rterm.exe";
 
 fn remove_rterm(dir: &Path) {
+    // Gives the default terminal back to Windows first, if rterm had it, so console
+    // programs don't look for an rterm that is gone.
+    let exe = dir.join("rterm.exe");
+    if exe.exists() {
+        let _ = Command::new(&exe).arg("--default-terminal=off").status();
+    }
     let _ = std::fs::remove_file(rterm_link());
     let _ = quiet("reg").args(["delete", RTERM_APP_PATH, "/f"]).status();
     for (key, _) in RTERM_MENU_KEYS {
