@@ -46,6 +46,15 @@ impl Pty {
         if cwd.is_dir() {
             cmd.cwd(cwd);
         }
+        // The user's own environment, fresh from Windows, as Windows Terminal gives each
+        // tab: not whatever started rterm, which may have been a tool with settings of its
+        // own (Claude Code's NO_COLOR turned the colours off in every tab).
+        if let Some(vars) = crate::userenv::fresh() {
+            cmd.env_clear();
+            for (name, value) in vars {
+                cmd.env(name, value);
+            }
+        }
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "rterm");
         // Programs treat a terminal with WT_SESSION as Windows Terminal: colours, Unicode

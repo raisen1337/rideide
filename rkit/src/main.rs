@@ -22,6 +22,9 @@ mod window;
 
 mod updates;
 
+#[path = "../../app/src/userenv.rs"]
+mod userenv;
+
 use eframe::egui::{
     self, vec2, Align, Color32, Context, CornerRadius, Frame, Layout, Margin, Panel, RichText,
     ScrollArea, Sense, Stroke, TextureHandle, Ui, ViewportBuilder, ViewportCommand,
@@ -163,12 +166,13 @@ fn launch(exe: &Path, args: &[String]) -> Result<(), String> {
             exe.file_name().unwrap_or_default().to_string_lossy()
         ));
     }
-    std::process::Command::new(exe)
-        .args(args)
-        .current_dir(home())
-        .spawn()
-        .map(drop)
-        .map_err(|e| e.to_string())
+    let mut command = std::process::Command::new(exe);
+    command.args(args).current_dir(home());
+    // The apps start with the user's own environment, not whatever started rkit.
+    if let Some(vars) = userenv::fresh() {
+        command.env_clear().envs(vars);
+    }
+    command.spawn().map(drop).map_err(|e| e.to_string())
 }
 
 impl App {

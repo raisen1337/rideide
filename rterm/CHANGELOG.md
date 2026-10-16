@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rterm you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rterm.
 
+## 0.5.1
+
+- **Shells start with your own environment**, fresh from Windows, as Windows Terminal starts them: not with whatever started rterm. When rterm was opened from another tool (a Claude Code session sets NO_COLOR, for one), every tab inherited its settings, and Claude Code in them showed no colours. New variables (a PATH change, say) also reach new tabs without restarting.
+
 ## 0.5.0
 
 - **rterm can be Windows' default terminal.** Turn on Settings → Default terminal for Windows and console programs started anywhere (cmd or PowerShell from the Start menu, scripts double-clicked in Explorer, tools that open a console) open as tabs in rterm, as they do in Windows Terminal; turn it off to give them back. This uses Windows Terminal's console host, so Windows Terminal needs to be installed (it is, on Windows 11).

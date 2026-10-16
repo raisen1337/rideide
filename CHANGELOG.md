@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.14
+
+- **Closing tabs as in VS Code.** Right-click a tab for Close, Close others, Close to the right, Close saved and Close all, for the tabs of that part of the editor. Files with unsaved changes ask first, one at a time; Cancel keeps the rest open.
+- **Shells start with your own environment**, fresh from Windows, as Windows Terminal starts them: not with whatever started ride. When ride was opened from another tool (a Claude Code session sets NO_COLOR, for one), every tab inherited its settings, and Claude Code in them showed no colours. New variables (a PATH change, say) also reach new tabs without restarting.
+
 ## 0.9.13
 
 - **Pick the font of the editor and the terminals** in Settings → Appearance → Code font, with a preview. The most used coding fonts come with ride: JetBrains Mono, Fira Code, Source Code Pro, IBM Plex Mono, Roboto Mono, Ubuntu Mono, Inconsolata, Geist Mono, Victor Mono and Space Mono, beside Cascadia Code, Cascadia Mono and Consolas from Windows.

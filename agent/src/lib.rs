@@ -9,6 +9,9 @@ pub mod collab;
 mod host;
 pub mod mcp;
 
+#[path = "../../app/src/userenv.rs"]
+mod userenv;
+
 use flate2::{write::GzEncoder, Compression};
 use ignore::{WalkBuilder, WalkState};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -459,6 +462,14 @@ fn open_term(id: u64, cols: u16, rows: u16, cwd: &str, tx: &Out) -> Result<Term,
     };
     if Path::new(cwd).is_dir() {
         cmd.cwd(cwd);
+    }
+    // On Windows, the user's environment fresh from Windows, as Windows Terminal gives each
+    // tab, rather than whatever started ride (which may have set NO_COLOR and the like).
+    if let Some(vars) = userenv::fresh() {
+        cmd.env_clear();
+        for (name, value) in vars {
+            cmd.env(name, value);
+        }
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");

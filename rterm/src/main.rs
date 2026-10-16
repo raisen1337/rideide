@@ -19,6 +19,8 @@ mod profiles;
 mod pty;
 mod settings;
 mod split;
+#[path = "../../app/src/userenv.rs"]
+mod userenv;
 mod window;
 
 use eframe::egui::{

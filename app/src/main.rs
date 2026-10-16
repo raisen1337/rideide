@@ -765,6 +765,8 @@ struct App {
     /// Where the last download went; the next save dialog starts there.
     download_dir: Option<PathBuf>,
     dialog: Option<Dialog>,
+    /// Tabs still to close after the one whose unsaved changes are being asked about.
+    close_queue: Vec<u64>,
     status: String,
     view: View,
     agents: Vec<Agent>,
@@ -1666,6 +1668,7 @@ impl App {
             downloads: Vec::new(),
             download_dir,
             dialog: None,
+            close_queue: Vec::new(),
             status: String::new(),
             view: View::Code,
             agents: Vec::new(),
@@ -2642,6 +2645,38 @@ impl App {
             },
             Pending::Save { path, revision },
         );
+    }
+
+    /// Closes several tabs: those without unsaved changes at once, the others after
+    /// asking about each in turn. Cancelling a question keeps the rest open.
+    fn close_tabs(&mut self, uids: Vec<u64>) {
+        for uid in uids {
+            let Some(index) = self.tabs.iter().position(|t| t.uid == uid) else {
+                continue;
+            };
+            if self.tabs[index].buf.is_dirty() {
+                self.close_queue.push(uid);
+            } else {
+                self.close_tab(index, true);
+            }
+        }
+        self.close_next();
+    }
+
+    /// Asks about the next tab waiting to close, if no question is open.
+    fn close_next(&mut self) {
+        if self.dialog.is_some() {
+            return;
+        }
+        while !self.close_queue.is_empty() {
+            let uid = self.close_queue.remove(0);
+            if let Some(index) = self.tabs.iter().position(|t| t.uid == uid) {
+                self.close_tab(index, false);
+                if self.dialog.is_some() {
+                    return;
+                }
+            }
+        }
     }
 
     fn close_tab(&mut self, index: usize, force: bool) {
@@ -4574,8 +4609,16 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut Ui, pane: u32) {
         let mut close = None;
+        let mut close_many: Option<Vec<u64>> = None;
         let shown = self.pane_tab(pane);
         let mut split = None;
+        // This pane's tabs, in order, and which have unsaved changes, for the close commands.
+        let pane_tabs: Vec<(u64, bool)> = self
+            .tabs
+            .iter()
+            .filter(|t| !t.detached && t.pane == pane)
+            .map(|t| (t.uid, t.buf.is_dirty()))
+            .collect();
         Frame::NONE
             .inner_margin(Margin {
                 left: 8,
@@ -4641,6 +4684,43 @@ impl App {
                                 detach = dragged_outside(ui.ctx());
                             }
                             resp.context_menu(|ui| {
+                                let at = pane_tabs.iter().position(|(u, _)| *u == uid).unwrap_or(0);
+                                let others: Vec<u64> = pane_tabs
+                                    .iter()
+                                    .filter(|(u, _)| *u != uid)
+                                    .map(|(u, _)| *u)
+                                    .collect();
+                                let right: Vec<u64> =
+                                    pane_tabs[at + 1..].iter().map(|(u, _)| *u).collect();
+                                let saved: Vec<u64> = pane_tabs
+                                    .iter()
+                                    .filter(|(_, dirty)| !dirty)
+                                    .map(|(u, _)| *u)
+                                    .collect();
+                                let all: Vec<u64> = pane_tabs.iter().map(|(u, _)| *u).collect();
+                                let item = |ui: &mut Ui, text: &str, keys: &str, enabled: bool| {
+                                    ui.add_enabled(
+                                        enabled,
+                                        egui::Button::new(text).shortcut_text(keys),
+                                    )
+                                    .clicked()
+                                };
+                                if item(ui, "Close", "Ctrl+W", true) {
+                                    close = Some(index);
+                                }
+                                if item(ui, "Close others", "", !others.is_empty()) {
+                                    close_many = Some(others);
+                                }
+                                if item(ui, "Close to the right", "", !right.is_empty()) {
+                                    close_many = Some(right);
+                                }
+                                if item(ui, "Close saved", "", !saved.is_empty()) {
+                                    close_many = Some(saved);
+                                }
+                                if item(ui, "Close all", "", true) {
+                                    close_many = Some(all);
+                                }
+                                ui.separator();
                                 if menu_item(ui, icons::COPY, "Copy path") {
                                     copy = Some((tab.path.clone(), false));
                                 }
@@ -4681,6 +4761,9 @@ impl App {
         }
         if let Some(index) = close {
             self.close_tab(index, false);
+        }
+        if let Some(uids) = close_many {
+            self.close_tabs(uids);
         }
     }
 
@@ -5042,7 +5125,10 @@ impl App {
             },
         );
         match answer {
-            Answer::Cancel => return,
+            Answer::Cancel => {
+                self.close_queue.clear();
+                return;
+            }
             Answer::Waiting => {
                 self.dialog = Some(dialog);
                 return;
@@ -5104,6 +5190,7 @@ impl App {
                 if index < self.tabs.len() {
                     self.close_tab(index, true);
                 }
+                self.close_next();
             }
             Dialog::ConfirmReplace { paths, .. } => self.replace_in(paths),
             Dialog::Text { text, .. } => ctx.copy_text(text),

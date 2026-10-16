@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rkit you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rkit.
 
+## 0.2.2
+
+- ride, rterm and rdrop start from rkit with your own environment, fresh from Windows, rather than whatever started rkit; opened from another tool, they used to inherit its settings (and Claude Code in their terminals showed no colours).
+
 ## 0.2.1
 
 - Chinese, Japanese and Korean names show instead of empty boxes.
