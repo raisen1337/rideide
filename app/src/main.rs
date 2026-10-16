@@ -846,6 +846,10 @@ struct App {
     upload: Option<extras::Upload>,
     /// A folder to list again a moment from now (app time, path).
     refresh_later: Option<(f64, String)>,
+    /// When the folders shown in the tree were last listed again on their own (app time).
+    tree_polled: f64,
+    /// A Refresh asked for by hand, still waiting for its listings.
+    tree_refreshing: bool,
     /// Tabs of the last session still to be reopened, and the host they belong to.
     restore: HashMap<String, extras::SavedTab>,
     restore_order: Vec<String>,
@@ -1731,6 +1735,8 @@ impl App {
             last_drop_targets: Vec::new(),
             upload: None,
             refresh_later: None,
+            tree_polled: 0.0,
+            tree_refreshing: false,
             restore: HashMap::new(),
             restore_order: Vec::new(),
             restore_active: None,
@@ -2119,6 +2125,7 @@ impl App {
     fn poll(&mut self, ctx: &Context) {
         self.poll_link(ctx);
         self.poll_uploads(ctx);
+        self.poll_tree(ctx);
         self.poll_sessions(ctx);
         self.share_tick(ctx);
         self.session_hooks(ctx);
@@ -2712,12 +2719,7 @@ impl App {
                 Pending::Reload { path },
             );
         }
-        let dirs: Vec<String> = std::iter::once(self.root.clone())
-            .chain(self.expanded.iter().cloned())
-            .collect();
-        for dir in dirs {
-            self.load_dir(&dir);
-        }
+        self.sync_tree();
         self.git_refresh();
     }
 
@@ -3906,8 +3908,18 @@ impl App {
                 )
                 .on_hover_text(&root);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icon_button(ui, icons::REFRESH, "Refresh") {
-                        action = Some(TreeAction::Refresh(root.clone()));
+                    let listing = self.tree_refreshing
+                        && self
+                            .pending
+                            .values()
+                            .any(|p| matches!(p, Pending::ListDir(_)));
+                    if listing {
+                        ui.add(egui::Spinner::new().size(14.0).color(theme::COMMENT()));
+                    } else {
+                        self.tree_refreshing = false;
+                        if icon_button(ui, icons::REFRESH, "Refresh") {
+                            action = Some(TreeAction::Refresh(root.clone()));
+                        }
                     }
                     if icon_button(ui, icons::NEW_FOLDER, "New folder") {
                         let prompt = PromptAction::NewDir(root.clone());
@@ -4107,7 +4119,10 @@ impl App {
                 self.dialog = Some(Dialog::ConfirmDelete { paths });
             }
             Some(TreeAction::Delete(paths)) => self.delete_paths(paths),
-            Some(TreeAction::Refresh(path)) => self.load_dir(&path),
+            Some(TreeAction::Refresh(path)) => {
+                self.reload_tree(&path);
+                self.tree_refreshing = true;
+            }
             Some(TreeAction::AddToChat(paths)) => {
                 for path in paths {
                     self.add_path_to_chat(&path);

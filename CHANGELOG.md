@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.16
+
+- **The file tree keeps up with the server on its own.** Files and folders made, renamed or deleted outside ride (in a terminal, by Claude, by a deploy) show up within a couple of seconds, and at once when you come back to ride.
+- **Refresh reads everything again**, the open folders inside too, not only the top one, and shows a spinner until the listings are in.
+
 ## 0.9.15
 
 - **A long message no longer pushes the send button away.** In Agents and in the chat, the message box grows to about a third of the window and then scrolls inside, so the mode, model and send controls stay in sight however much is pasted.

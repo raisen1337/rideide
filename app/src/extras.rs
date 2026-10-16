@@ -318,12 +318,54 @@ impl App {
 
     /// Reloads the folder listings that are open in the tree.
     pub(super) fn sync_tree(&mut self) {
-        let dirs: Vec<String> = std::iter::once(self.root.clone())
-            .chain(self.expanded.iter().cloned())
+        let root = self.root.clone();
+        self.reload_tree(&root);
+    }
+
+    /// Lists a folder again together with every open folder inside it. Listings kept for
+    /// closed folders inside it are dropped, so opening one later shows what is there now.
+    pub(super) fn reload_tree(&mut self, dir: &str) {
+        let inside = |path: &str| {
+            path == dir
+                || path
+                    .strip_prefix(dir)
+                    .is_some_and(|rest| rest.starts_with('/') || dir.ends_with('/'))
+        };
+        let expanded = &self.expanded;
+        self.tree
+            .retain(|path, _| !inside(path) || path == dir || expanded.contains(path));
+        let mut dirs: Vec<String> = std::iter::once(dir.to_string())
+            .chain(self.expanded.iter().filter(|p| inside(p)).cloned())
             .collect();
+        dirs.dedup();
         for dir in dirs {
-            self.load_dir(&dir);
+            // A listing already on its way answers this too.
+            let asked = self
+                .pending
+                .values()
+                .any(|p| matches!(p, Pending::ListDir(p) if *p == dir));
+            if !asked {
+                self.load_dir(&dir);
+            }
         }
+    }
+
+    /// Keeps the tree in step with the disk: the folders shown are listed again when ride
+    /// comes to the front, and every couple of seconds while it is there.
+    pub(super) fn poll_tree(&mut self, ctx: &Context) {
+        const EVERY: f64 = 2.0;
+        if !self.online() || self.background || self.root.is_empty() {
+            return;
+        }
+        let (now, focused) = ctx.input(|i| (i.time, i.focused));
+        if !focused {
+            return;
+        }
+        if !self.focused || now - self.tree_polled >= EVERY {
+            self.tree_polled = now;
+            self.sync_tree();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(EVERY));
     }
 
     // ---- session ----
