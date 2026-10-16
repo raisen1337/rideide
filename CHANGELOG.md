@@ -3,6 +3,11 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.17
+
+- **Opening an image no longer freezes ride.** The picture is decoded in the background while its tab shows a spinner; before, a large photo or screenshot held the whole window for a moment.
+- **Images are lighter to draw and sharper when scaled down.** ride keeps the picture at a few sizes and draws the one closest to its size on screen, instead of shrinking the full picture every frame.
+
 ## 0.9.16
 
 - **The file tree keeps up with the server on its own.** Files and folders made, renamed or deleted outside ride (in a terminal, by Claude, by a deploy) show up within a couple of seconds, and at once when you come back to ride.

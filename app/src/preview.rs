@@ -7,16 +7,25 @@ use eframe::egui::{
 };
 use rodio::Source;
 use std::io::Cursor;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Larger images are scaled down before upload; the GPU has a texture size limit.
 const MAX_TEXTURE: u32 = 4096;
+/// The smallest of the scaled-down copies.
+const MIN_LEVEL: u32 = 256;
 const HEX_BYTES: usize = 16 * 1024;
 
 pub enum Preview {
     Image {
-        texture: TextureHandle,
+        /// The picture at smaller and smaller sizes, largest first: each frame draws the
+        /// smallest one still as large as it is on screen, which is quick to draw and keeps
+        /// a scaled-down picture sharp. Empty while it is being decoded.
+        levels: Vec<TextureHandle>,
+        /// The decoding, done away from the window so a large picture doesn't freeze it.
+        decoding: Option<Receiver<Result<Decoded, String>>>,
+        error: Option<String>,
         /// The file's real dimensions, which may exceed the texture's.
         size: [u32; 2],
         /// Scale relative to the real size; `None` fits the image to the view.
@@ -33,6 +42,35 @@ pub enum Preview {
     Query(Box<crate::db::QueryTab>),
     /// A table of a database, to browse and edit.
     Table(Box<crate::table::TableView>),
+}
+
+pub struct Decoded {
+    size: [u32; 2],
+    levels: Vec<egui::ColorImage>,
+}
+
+fn decode(data: &[u8]) -> Result<Decoded, String> {
+    let image = image::load_from_memory(data).map_err(|e| format!("can't decode image: {e}"))?;
+    let size = [image.width(), image.height()];
+    let mut level = if size[0].max(size[1]) > MAX_TEXTURE {
+        image.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
+    } else {
+        image
+    };
+    let mut levels = Vec::new();
+    loop {
+        let rgba = level.to_rgba8();
+        levels.push(egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_raw(),
+        ));
+        if level.width().max(level.height()) <= MIN_LEVEL {
+            break;
+        }
+        let (w, h) = ((level.width() / 2).max(1), (level.height() / 2).max(1));
+        level = level.resize_exact(w, h, image::imageops::FilterType::Triangle);
+    }
+    Ok(Decoded { size, levels })
 }
 
 pub enum Loaded {
@@ -97,23 +135,17 @@ impl Audio {
 pub fn load(ctx: &Context, path: &str, data: Vec<u8>) -> Result<Loaded, String> {
     match extension(path).as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" => {
-            let image =
-                image::load_from_memory(&data).map_err(|e| format!("can't decode image: {e}"))?;
-            let size = [image.width(), image.height()];
-            let shown = if size[0].max(size[1]) > MAX_TEXTURE {
-                image.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
-            } else {
-                image
-            };
-            let rgba = shown.to_rgba8();
-            let pixels = egui::ColorImage::from_rgba_unmultiplied(
-                [rgba.width() as usize, rgba.height() as usize],
-                rgba.as_raw(),
-            );
-            let texture = ctx.load_texture(path, pixels, TextureOptions::LINEAR);
+            let (tx, rx) = mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(decode(&data));
+                ctx.request_repaint();
+            });
             return Ok(Loaded::Preview(Preview::Image {
-                texture,
-                size,
+                levels: Vec::new(),
+                decoding: Some(rx),
+                error: None,
+                size: [0, 0],
                 zoom: None,
             }));
         }
@@ -181,10 +213,52 @@ fn round_button(ui: &mut Ui, icon: char, hint: &str) -> bool {
 pub fn show(ui: &mut Ui, preview: &mut Preview, name: &str) {
     match preview {
         Preview::Image {
-            texture,
+            levels,
+            decoding,
+            error,
             size,
             zoom,
         } => {
+            if let Some(rx) = decoding {
+                match rx.try_recv() {
+                    Ok(Ok(decoded)) => {
+                        *size = decoded.size;
+                        *levels = decoded
+                            .levels
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, pixels)| {
+                                ui.ctx().load_texture(
+                                    format!("{name} {i}"),
+                                    pixels,
+                                    TextureOptions::LINEAR,
+                                )
+                            })
+                            .collect();
+                        *decoding = None;
+                    }
+                    Ok(Err(message)) => {
+                        *error = Some(message);
+                        *decoding = None;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        *error = Some("can't decode image".into());
+                        *decoding = None;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                }
+            }
+            if levels.is_empty() {
+                ui.centered_and_justified(|ui| match error {
+                    Some(message) => {
+                        ui.label(RichText::new(message.as_str()).color(theme::COMMENT()));
+                    }
+                    None => {
+                        ui.add(egui::Spinner::new().size(20.0).color(theme::COMMENT()));
+                    }
+                });
+                return;
+            }
             let real = vec2(size[0] as f32, size[1] as f32);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -231,6 +305,12 @@ pub fn show(ui: &mut Ui, preview: &mut Preview, name: &str) {
                 ui.add_space(pad.y);
                 ui.horizontal(|ui| {
                     ui.add_space(pad.x);
+                    let wanted = shown.x * ui.ctx().pixels_per_point();
+                    let texture = levels
+                        .iter()
+                        .rev()
+                        .find(|t| t.size()[0] as f32 >= wanted)
+                        .unwrap_or(&levels[0]);
                     let source = egui::load::SizedTexture::new(texture.id(), shown);
                     ui.add(egui::Image::new(source).fit_to_exact_size(shown));
                 });
