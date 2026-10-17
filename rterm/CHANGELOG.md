@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rterm you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rterm.
 
+## 0.5.2
+
+- **File paths open with Ctrl+click.** When a program prints a path to a file — like `C:\Users\you\pic.png` from Claude Code — it is now a link: hover to underline it, Ctrl+click to open it with whatever Windows uses for that kind of file (pictures in Photos, and so on). Before, only web addresses were clickable, and `file://` links wrongly opened in the browser. A trailing `:line:column` on a source path is ignored, so the file still opens.
+
 ## 0.5.1
 
 - **Shells start with your own environment**, fresh from Windows, as Windows Terminal starts them: not with whatever started rterm. When rterm was opened from another tool (a Claude Code session sets NO_COLOR, for one), every tab inherited its settings, and Claude Code in them showed no colours. New variables (a PATH change, say) also reach new tabs without restarting.

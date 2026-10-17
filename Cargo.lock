@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "ride-agent"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "flate2",
  "ignore",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "ride-proto"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "postcard",
  "serde",
@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "rkit-setup"
-version = "0.9.21"
+version = "0.9.22"
 dependencies = [
  "eframe",
  "flate2",
@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "rterm"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "alacritty_terminal",
  "arboard",

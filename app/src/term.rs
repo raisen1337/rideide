@@ -603,11 +603,82 @@ fn url_at(line: &[(usize, char)], col: usize) -> Option<String> {
     }
     let word: String = chars[start..end].iter().collect();
     let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    let found = ["https://", "http://", "file://"]
+    if let Some(found) = ["https://", "http://", "file://"]
         .iter()
         .filter_map(|scheme| word.find(scheme))
-        .min()?;
-    Some(word[found..].to_string()).filter(|u| u.len() > 8)
+        .min()
+    {
+        return Some(word[found..].to_string()).filter(|u| u.len() > 8);
+    }
+    // A bare absolute path printed by a program (e.g. `C:\Users\me\pic.png`); the caller
+    // only treats it as a link when it points at a file that exists.
+    is_win_abs(word).then(|| word.to_string())
+}
+
+/// Is `s` an absolute Windows path (`C:\…`, `C:/…`) or a UNC path (`\\server\…`)?
+fn is_win_abs(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || s.starts_with("\\\\")
+}
+
+/// Percent-decode `%XX` escapes in a `file://` URL's path.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 3 <= b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Drop a trailing `:line[:col]` that editors append to a file reference, keeping the
+/// drive-letter colon.
+fn strip_line_suffix(p: &str) -> String {
+    let mut s = p;
+    for _ in 0..2 {
+        match s.rfind(':') {
+            Some(i)
+                if i > 2 && !s[i + 1..].is_empty() && s[i + 1..].bytes().all(|c| c.is_ascii_digit()) =>
+            {
+                s = &s[..i]
+            }
+            _ => break,
+        }
+    }
+    s.to_string()
+}
+
+/// A local file target — a `file://` URL or a bare absolute path — as a filesystem path,
+/// or `None` for anything else (a web URL).
+fn local_path(target: &str) -> Option<String> {
+    let raw = if let Some(rest) = target.strip_prefix("file://") {
+        // file:///C:/x -> C:/x, but keep a UNC path's leading slashes
+        let rest = rest.strip_prefix('/').filter(|r| is_win_abs(r)).unwrap_or(rest);
+        percent_decode(rest)
+    } else if is_win_abs(target) {
+        target.to_string()
+    } else {
+        return None;
+    };
+    Some(strip_line_suffix(&raw))
+}
+
+/// Open a local file or folder with the OS default handler (images open in Photos, etc.).
+fn open_local(path: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
 impl Terminal {
@@ -1160,14 +1231,21 @@ impl Terminal {
         // web addresses written out in the text.
         let plain_url = hover_cell
             .filter(|_| hover_link.is_none())
-            .and_then(|h| url_at(&hover_line, h.column.0));
+            .and_then(|h| url_at(&hover_line, h.column.0))
+            // a bare path is a link only when it is a file that exists on disk
+            .filter(|u| {
+                !is_win_abs(u) || local_path(u).is_some_and(|p| std::path::Path::new(&p).exists())
+            });
         let target = hover_link.clone().or(plain_url);
         self.hover_link = hover_link;
         if let Some(url) = &target {
             if ctrl {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 if resp.clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    match local_path(url) {
+                        Some(path) => open_local(&path),
+                        None => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+                    }
                 }
             }
             if resp.hovered() {
@@ -1259,5 +1337,19 @@ mod tests {
             Some("https://example.com/a?b=1")
         );
         assert_eq!(url_at(&line, 1), None);
+    }
+
+    #[test]
+    fn local_paths_are_links_and_resolve() {
+        assert!(is_win_abs("C:\\Users\\me\\a.png"));
+        assert!(is_win_abs("C:/Users/me/a.png"));
+        assert!(is_win_abs("\\\\srv\\share\\a"));
+        assert!(!is_win_abs("hello"));
+        assert_eq!(local_path("C:/x/a.rs:12:3").as_deref(), Some("C:/x/a.rs"));
+        assert_eq!(
+            local_path("file:///C:/Users/me/a%20b.png").as_deref(),
+            Some("C:/Users/me/a b.png")
+        );
+        assert_eq!(local_path("https://x.com/a").as_deref(), None);
     }
 }
