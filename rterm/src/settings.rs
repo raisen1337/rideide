@@ -71,3 +71,34 @@ pub fn update(change: impl FnOnce(&mut Settings)) {
         }
     });
 }
+
+/// Where the window was and how big, kept apart from the settings in
+/// %APPDATA%\rterm\window.json: every rterm that closes writes it, and the settings
+/// another one changed meanwhile must not be written over with this one's.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Place {
+    /// The window's top-left corner, in points.
+    pub x: f32,
+    pub y: f32,
+    /// Its size when not maximized, in points.
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+}
+
+fn place_path() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(base).join("rterm").join("window.json"))
+}
+
+pub fn load_place() -> Option<Place> {
+    let bytes = std::fs::read(place_path()?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn save_place(place: &Place) {
+    if let (Some(path), Ok(json)) = (place_path(), serde_json::to_vec_pretty(place)) {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let _ = std::fs::write(path, json);
+    }
+}

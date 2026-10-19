@@ -3,6 +3,11 @@
 rkit shows the entries newer than the rterm you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rterm.
 
+## 0.5.3
+
+- **rterm opens at the size you left it**, or maximized if you left it maximized. The size it remembered shrank a little each time (more so when rterm was closed while minimized), until it opened at its smallest; it also forgot its normal size whenever it was closed maximized.
+- **A pale background left by Glass.** With Glass on, the window could keep a whitish background until it was resized; the blur is now given to the window again when the window opens and whenever it is restored, maximized or brought back from the taskbar.
+
 ## 0.5.2
 
 - **File paths open with Ctrl+click.** When a program prints a path to a file — like `C:\Users\you\pic.png` from Claude Code — it is now a link: hover to underline it, Ctrl+click to open it with whatever Windows uses for that kind of file (pictures in Photos, and so on). Before, only web addresses were clickable, and `file://` links wrongly opened in the browser. A trailing `:line:column` on a source path is ignored, so the file still opens.

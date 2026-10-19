@@ -869,6 +869,9 @@ struct App {
     /// remembered between runs.
     window: Option<([f32; 2], [f32; 2])>,
     maximized: bool,
+    /// Until when the window is left alone after the start screen: the sizes set then take
+    /// a few frames to arrive, and until they have the start screen's square is still showing.
+    window_settles: f64,
     /// How much larger the window comes out than the size asked for. The system frame is
     /// hidden but still counted when a size is set, so this much is taken off again.
     frame_extra: egui::Vec2,
@@ -1761,13 +1764,16 @@ impl App {
                     number("win_x"),
                     number("win_y"),
                 ) {
-                    (Some(w), Some(h), Some(x), Some(y)) if w >= 300.0 && h >= 200.0 => {
+                    // Anything smaller than the window can be made is the start screen's
+                    // square, which older versions remembered by mistake.
+                    (Some(w), Some(h), Some(x), Some(y)) if w >= 460.0 && h >= 320.0 => {
                         Some(([w, h], [x, y]))
                     }
                     _ => None,
                 }
             },
             maximized: stored("win_max") == "true",
+            window_settles: 0.0,
             frame_extra: egui::Vec2::ZERO,
             icon_sets: iconsets::IconSets::default(),
         };
@@ -1917,6 +1923,7 @@ impl App {
         if self.maximized && self.forced_size.is_none() {
             ctx.send_viewport_cmd(Cmd::Maximized(true));
         }
+        self.window_settles = ctx.input(|i| i.time) + 1.0;
         ctx.request_repaint();
     }
 
@@ -1934,10 +1941,24 @@ impl App {
         if minimized {
             return;
         }
+        let now = ctx.input(|i| i.time);
+        if now < self.window_settles {
+            // A maximize asked for along with the new size can be lost while the window
+            // is still being resized; it is asked for again before the window counts.
+            if self.maximized
+                && self.forced_size.is_none()
+                && !maximized
+                && self.window_settles - now < 0.5
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+            ctx.request_repaint();
+            return;
+        }
         self.maximized = maximized;
         // While maximized, the size to come back to is the one from before.
         if let (false, Some(inner), Some(outer)) = (maximized, inner, outer) {
-            if inner.width() >= 300.0 && inner.height() >= 200.0 {
+            if inner.width() >= 460.0 && inner.height() >= 320.0 {
                 self.window = Some(([inner.width(), inner.height()], [outer.min.x, outer.min.y]));
             }
         }

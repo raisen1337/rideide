@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.19
+
+- **ride opens at the size you left it**, or maximized if you left it maximized. It used to open at its smallest: the window was remembered at the start screen's small square, in the moment before it grew to its real size. If you were hit by this, ride opens at a normal size once, then keeps whatever you choose.
+
 ## 0.9.18
 
 - **A new theme, Terminal**, for a Linux console feel across the whole window, not only its colours: one monospaced font for everything, square corners, hard shadows under menus and dialogs, the greens, cyans and blues of a shell prompt, and the title bar showing the open folder as a prompt (`root@vespucci:~/shop$`). Pick it under Themes.

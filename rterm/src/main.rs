@@ -36,6 +36,15 @@ use term::Terminal;
 use window::{bar_button, resize_edges, title_drag, window_buttons};
 
 const TITLE_H: f32 = 38.0;
+/// The smallest the window can be made.
+const MIN_W: f32 = 360.0;
+const MIN_H: f32 = 200.0;
+const DEFAULT_SIZE: [f32; 2] = [960.0, 600.0];
+
+/// Where the window was last time, when that is a size it can have.
+fn saved_place() -> Option<settings::Place> {
+    settings::load_place().filter(|p| p.width >= MIN_W && p.height >= MIN_H)
+}
 
 fn main() -> eframe::Result {
     // `--version` answers rkit, which shows what is installed.
@@ -77,10 +86,20 @@ fn main() -> eframe::Result {
             ..Default::default()
         });
     }
+    // The window opens where it was last time (see `App::remember_window`), not where
+    // eframe would put it: eframe also remembers a minimized window's size, which is nothing.
+    let place = saved_place();
+    let mut viewport = ViewportBuilder::default()
+        .with_inner_size(place.map_or(DEFAULT_SIZE, |p| [p.width, p.height]))
+        .with_maximized(place.is_some_and(|p| p.maximized));
+    // A place off every screen (a monitor that is gone, say) is not restored.
+    if let Some(p) = place.filter(|p| p.x > -p.width + 100.0 && p.y > -40.0) {
+        viewport = viewport.with_position([p.x, p.y]);
+    }
     let options = eframe::NativeOptions {
-        viewport: ViewportBuilder::default()
-            .with_inner_size([960.0, 600.0])
-            .with_min_inner_size([360.0, 200.0])
+        persist_window: false,
+        viewport: viewport
+            .with_min_inner_size([MIN_W, MIN_H])
             .with_title("rterm")
             .with_icon(egui::IconData {
                 rgba: include_bytes!(concat!(env!("OUT_DIR"), "/icon-128.rgba")).to_vec(),
@@ -246,6 +265,15 @@ struct App {
     handoffs: Receiver<handoff::Handoff>,
     /// Why rterm couldn't be made the default terminal, shown in Settings.
     default_error: Option<String>,
+    /// The window's place and size when not maximized, and whether it is maximized, for
+    /// the next start; and what was last written of it.
+    place: Option<settings::Place>,
+    place_saved: Option<settings::Place>,
+    /// The size the window was opened at, until the hidden frame is taken off it: Windows
+    /// adds the frame to any size set, and the frame is then drawn over as window.
+    want_size: Option<egui::Vec2>,
+    /// Whether the window was maximized and whether minimized, last frame.
+    window_state: Option<(bool, bool)>,
 }
 
 fn palette(name: &str) -> theme::Palette {
@@ -289,6 +317,10 @@ impl App {
             theme_shown: name,
             handoffs: handoff::listen(ctx.clone()),
             default_error: None,
+            place: saved_place(),
+            place_saved: saved_place(),
+            want_size: Some(saved_place().map_or(DEFAULT_SIZE.into(), |p| vec2(p.width, p.height))),
+            window_state: None,
         };
         // As the default terminal, the registration follows rterm and Windows Terminal's
         // proxy wherever updates move them.
@@ -642,6 +674,65 @@ impl App {
         if !os::set_backdrop(frame, tint, dark) && glass {
             settings::update(|s| s.glass = false);
             theme::set_glass(None);
+        }
+    }
+
+    /// Keeps track of where the window is, for the next start, and puts the backdrop back
+    /// when the window changes state.
+    fn remember_window(&mut self, ctx: &Context) {
+        let (inner, outer, maximized, minimized) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect,
+                v.outer_rect,
+                v.maximized.unwrap_or(false),
+                v.minimized.unwrap_or(false),
+            )
+        });
+        // Coming back from minimized or maximized, the blur behind the window could stay
+        // pale until the window was resized; giving it again brings it back.
+        if self.window_state.is_some_and(|s| s != (maximized, minimized)) {
+            self.applied = None;
+            ctx.request_repaint();
+        }
+        self.window_state = Some((maximized, minimized));
+        // A minimized window has no size worth keeping.
+        let (Some(inner), Some(outer)) = (inner, outer) else {
+            return;
+        };
+        if minimized {
+            return;
+        }
+        // Once the hidden frame has been counted in (a few frames in, after `adopt_window`),
+        // the window is made the size it was asked to be. Resizing it also wakes the blur.
+        if let Some(want) = self.want_size {
+            if maximized || ctx.cumulative_pass_nr() < 3 {
+                ctx.request_repaint();
+            } else {
+                let over = inner.size() - want;
+                if over.max_elem() > 2.0 && over.max_elem() < 80.0 {
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                        want - over.max(egui::Vec2::ZERO),
+                    ));
+                }
+                self.want_size = None;
+                self.applied = None;
+                ctx.request_repaint();
+                return;
+            }
+        }
+        if maximized {
+            if let Some(place) = &mut self.place {
+                place.maximized = true;
+            }
+        } else if self.want_size.is_none() && inner.width() >= MIN_W && inner.height() >= MIN_H {
+            self.place = Some(settings::Place {
+                x: outer.min.x,
+                y: outer.min.y,
+                width: inner.width(),
+                height: inner.height(),
+                maximized: false,
+            });
         }
     }
 
@@ -1255,6 +1346,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.remember_window(&ctx);
         self.sync_look(&ctx, frame);
         self.poll(&ctx);
         if self.panes.is_empty() {
@@ -1279,6 +1371,15 @@ impl eframe::App for App {
             None => "rterm".into(),
         };
         ctx.send_viewport_cmd(ViewportCommand::Title(title));
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        if self.place != self.place_saved {
+            if let Some(place) = &self.place {
+                settings::save_place(place);
+            }
+            self.place_saved = self.place;
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
