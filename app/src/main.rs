@@ -144,6 +144,18 @@ enum TermAct {
     Color(Option<usize>),
 }
 
+/// What was done to the terminals' tabs this frame, in the panel's bar or a pane's own.
+#[derive(Default)]
+struct TermTabs {
+    select: Option<usize>,
+    close: Option<usize>,
+    act: Option<(usize, TermAct)>,
+    dragged: Option<u64>,
+    dropped: bool,
+    /// The pane whose own button for a new terminal was pressed.
+    new_in: Option<u32>,
+}
+
 /// The colours a terminal can be marked with, as theme terminal colours.
 const TERM_COLORS: [(usize, &str); 6] = [
     (1, "Red"),
@@ -4399,10 +4411,122 @@ impl App {
         }
     }
 
+    /// A terminal's tab, with its close button; what is done to it goes into `tabs`.
+    fn term_tab(&self, ui: &mut Ui, index: usize, selected: bool, tabs: &mut TermTabs) {
+        let term = &self.terms[index];
+        let title = term_title(term, index);
+        let color = term.color.map(|c| theme::ANSI()[c]);
+        let label = pieces(&[
+            (
+                &format!("{}  ", icons::TERMINAL),
+                color.unwrap_or(theme::COMMENT()),
+            ),
+            (&title, color.unwrap_or(theme::TEXT())),
+        ]);
+        let tab = egui::Button::selectable(selected, label).sense(Sense::click_and_drag());
+        let resp = ui.add(tab).on_hover_text(
+                    "Double-click to rename; right-click for more; drag onto a terminal to put them side by side",
+                );
+        if resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            tabs.dragged = Some(term.id);
+        }
+        if resp.drag_stopped() {
+            tabs.dropped = true;
+        }
+        if let Some(color) = color {
+            let r = resp.rect;
+            ui.painter().line_segment(
+                [
+                    r.left_bottom() + vec2(4.0, 0.0),
+                    r.right_bottom() - vec2(4.0, 0.0),
+                ],
+                (2.0, color),
+            );
+        }
+        if resp.clicked() {
+            tabs.select = Some(index);
+        }
+        if resp.double_clicked() {
+            tabs.act = Some((index, TermAct::Rename));
+        }
+        resp.context_menu(|ui| {
+            if menu_item(ui, icons::EDIT, "Rename…") {
+                tabs.act = Some((index, TermAct::Rename));
+            }
+            if term.name.is_some() && menu_item(ui, icons::REFRESH, "Name it by what runs in it") {
+                tabs.act = Some((index, TermAct::AutoName));
+            }
+            ui.menu_button(format!("{}   Colour", icons::PALETTE), |ui| {
+                for (choice, name) in TERM_COLORS {
+                    let text = pieces(&[
+                        (&format!("{}  ", icons::DOT), theme::ANSI()[choice]),
+                        (name, theme::TEXT()),
+                    ]);
+                    if ui
+                        .selectable_label(term.color == Some(choice), text)
+                        .clicked()
+                    {
+                        tabs.act = Some((index, TermAct::Color(Some(choice))));
+                    }
+                }
+                if ui.selectable_label(term.color.is_none(), "None").clicked() {
+                    tabs.act = Some((index, TermAct::Color(None)));
+                }
+            });
+            ui.separator();
+            if menu_item(ui, icons::CLOSE, "Close terminal") {
+                tabs.close = Some(index);
+            }
+            if tabs.act.is_some() || tabs.close.is_some() {
+                ui.close();
+            }
+        });
+        if icon_button(ui, icons::CLOSE, "Close terminal") {
+            tabs.close = Some(index);
+        }
+    }
+
+    /// Carries out what was done to the terminals' tabs.
+    fn apply_term_tabs(&mut self, tabs: TermTabs) {
+        if tabs.dragged.is_some() {
+            self.term_panes.drag = tabs.dragged;
+        }
+        if tabs.dropped {
+            self.term_panes.dropped = true;
+        }
+        if let Some(index) = tabs.select {
+            self.active_term = index;
+        }
+        match tabs.act {
+            Some((index, TermAct::Rename)) => {
+                let term = &self.terms[index];
+                self.dialog = Some(Dialog::Prompt {
+                    title: "Rename terminal".into(),
+                    value: term_title(term, index),
+                    action: PromptAction::RenameTerminal(term.id),
+                });
+            }
+            Some((index, TermAct::AutoName)) => self.terms[index].name = None,
+            Some((index, TermAct::Color(color))) => self.terms[index].color = color,
+            None => {}
+        }
+        if let Some(index) = tabs.close {
+            let id = self.terms.remove(index).id;
+            self.request(Request::TermClose { term: id });
+            self.active_term = self.active_term.min(self.terms.len().saturating_sub(1));
+        }
+        // A new terminal goes to the pane of the one at hand, so that is made this pane's.
+        if let Some(pane) = tabs.new_in {
+            if let Some(index) = self.terms.iter().position(|t| t.pane == pane) {
+                self.active_term = index;
+            }
+            self.new_term();
+        }
+    }
+
     fn term_panel(&mut self, ui: &mut Ui) {
-        let mut close = None;
-        let mut term_act = None;
-        let (mut dragged_term, mut dropped_term) = (None, false);
+        let mut tabs = TermTabs::default();
         if self.guest() {
             self.panel_tab = chrome::PanelTab::Problems;
         }
@@ -4418,18 +4542,14 @@ impl App {
                 // The bar is the handle for moving the panel. It is claimed before the tabs
                 // and buttons on it, so a click on those goes to them and not to the handle.
                 const BAR_H: f32 = 28.0;
-                let bar = egui::Rect::from_min_size(
-                    ui.max_rect().min,
-                    vec2(ui.available_width(), BAR_H),
-                );
+                let bar =
+                    egui::Rect::from_min_size(ui.max_rect().min, vec2(ui.available_width(), BAR_H));
                 let drag = ui.interact(bar, ui.id().with("terminal_drag"), Sense::drag());
                 // The row is cut at the panel's edge: tabs that don't fit mustn't widen the
                 // panel, and the terminals under it with it.
                 // The panel's own buttons keep a place at the right, whatever the tabs take.
-                let whole = egui::Rect::from_min_size(
-                    ui.cursor().min,
-                    vec2(ui.available_width(), BAR_H),
-                );
+                let whole =
+                    egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), BAR_H));
                 let (row, buttons) = whole.split_left_right_at_x(whole.right() - 64.0);
                 let mut row_ui = ui.new_child(
                     egui::UiBuilder::new()
@@ -4447,80 +4567,10 @@ impl App {
                 {
                     self.panel_tabs(ui);
                     ui.add_space(8.0);
-                    for (index, term) in self.terms.iter().enumerate().filter(|_| terminal) {
-                        let title = term_title(term, index);
-                        let color = term.color.map(|c| theme::ANSI()[c]);
-                        let label = pieces(&[
-                            (
-                                &format!("{}  ", icons::TERMINAL),
-                                color.unwrap_or(theme::COMMENT()),
-                            ),
-                            (&title, color.unwrap_or(theme::TEXT())),
-                        ]);
-                        let tab = egui::Button::selectable(index == self.active_term, label)
-                            .sense(Sense::click_and_drag());
-                        let resp = ui.add(tab).on_hover_text(
-                            "Double-click to rename; right-click for more; drag onto a terminal to put them side by side",
-                        );
-                        if resp.dragged() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                            dragged_term = Some(term.id);
-                        }
-                        if resp.drag_stopped() {
-                            dropped_term = true;
-                        }
-                        if let Some(color) = color {
-                            let r = resp.rect;
-                            ui.painter().line_segment(
-                                [
-                                    r.left_bottom() + vec2(4.0, 0.0),
-                                    r.right_bottom() - vec2(4.0, 0.0),
-                                ],
-                                (2.0, color),
-                            );
-                        }
-                        if resp.clicked() {
-                            self.active_term = index;
-                        }
-                        if resp.double_clicked() {
-                            term_act = Some((index, TermAct::Rename));
-                        }
-                        resp.context_menu(|ui| {
-                            if menu_item(ui, icons::EDIT, "Rename…") {
-                                term_act = Some((index, TermAct::Rename));
-                            }
-                            if term.name.is_some()
-                                && menu_item(ui, icons::REFRESH, "Name it by what runs in it")
-                            {
-                                term_act = Some((index, TermAct::AutoName));
-                            }
-                            ui.menu_button(format!("{}   Colour", icons::PALETTE), |ui| {
-                                for (choice, name) in TERM_COLORS {
-                                    let text = pieces(&[
-                                        (&format!("{}  ", icons::DOT), theme::ANSI()[choice]),
-                                        (name, theme::TEXT()),
-                                    ]);
-                                    if ui
-                                        .selectable_label(term.color == Some(choice), text)
-                                        .clicked()
-                                    {
-                                        term_act = Some((index, TermAct::Color(Some(choice))));
-                                    }
-                                }
-                                if ui.selectable_label(term.color.is_none(), "None").clicked() {
-                                    term_act = Some((index, TermAct::Color(None)));
-                                }
-                            });
-                            ui.separator();
-                            if menu_item(ui, icons::CLOSE, "Close terminal") {
-                                close = Some(index);
-                            }
-                            if term_act.is_some() || close.is_some() {
-                                ui.close();
-                            }
-                        });
-                        if icon_button(ui, icons::CLOSE, "Close terminal") {
-                            close = Some(index);
+                    // With the terminals split, each pane has its own tabs (see `term_grid`).
+                    if terminal && self.term_panes.count() <= 1 {
+                        for index in 0..self.terms.len() {
+                            self.term_tab(ui, index, index == self.active_term, &mut tabs);
                         }
                     }
                     if terminal && icon_button(ui, icons::ADD, "New terminal") {
@@ -4591,30 +4641,7 @@ impl App {
                     }
                 }
             });
-        if dragged_term.is_some() {
-            self.term_panes.drag = dragged_term;
-        }
-        if dropped_term {
-            self.term_panes.dropped = true;
-        }
-        match term_act {
-            Some((index, TermAct::Rename)) => {
-                let term = &self.terms[index];
-                self.dialog = Some(Dialog::Prompt {
-                    title: "Rename terminal".into(),
-                    value: term_title(term, index),
-                    action: PromptAction::RenameTerminal(term.id),
-                });
-            }
-            Some((index, TermAct::AutoName)) => self.terms[index].name = None,
-            Some((index, TermAct::Color(color))) => self.terms[index].color = color,
-            None => {}
-        }
-        if let Some(index) = close {
-            let id = self.terms.remove(index).id;
-            self.request(Request::TermClose { term: id });
-            self.active_term = self.active_term.min(self.terms.len().saturating_sub(1));
-        }
+        self.apply_term_tabs(tabs);
         if !terminal {
             self.term_focused = false;
             // Exactly the room the panel has: the panel takes the size of what is in it, so

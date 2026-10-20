@@ -3,6 +3,10 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.20
+
+- **Split terminals have their own tabs.** With the terminal panel split, each pane now shows the tabs of the terminals in it, right above it, with its own + for a new terminal there, instead of every terminal in one row in the panel's bar. With a single pane, the tabs stay in the bar as before.
+
 ## 0.9.19
 
 - **ride opens at the size you left it**, or maximized if you left it maximized. It used to open at its smallest: the window was remembered at the start screen's small square, in the moment before it grew to its real size. If you were hit by this, ride opens at a normal size once, then keeps whatever you choose.

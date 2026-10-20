@@ -648,7 +648,9 @@ fn strip_line_suffix(p: &str) -> String {
     for _ in 0..2 {
         match s.rfind(':') {
             Some(i)
-                if i > 2 && !s[i + 1..].is_empty() && s[i + 1..].bytes().all(|c| c.is_ascii_digit()) =>
+                if i > 2
+                    && !s[i + 1..].is_empty()
+                    && s[i + 1..].bytes().all(|c| c.is_ascii_digit()) =>
             {
                 s = &s[..i]
             }
@@ -663,7 +665,10 @@ fn strip_line_suffix(p: &str) -> String {
 fn local_path(target: &str) -> Option<String> {
     let raw = if let Some(rest) = target.strip_prefix("file://") {
         // file:///C:/x -> C:/x, but keep a UNC path's leading slashes
-        let rest = rest.strip_prefix('/').filter(|r| is_win_abs(r)).unwrap_or(rest);
+        let rest = rest
+            .strip_prefix('/')
+            .filter(|r| is_win_abs(r))
+            .unwrap_or(rest);
         percent_decode(rest)
     } else if is_win_abs(target) {
         target.to_string()

@@ -73,7 +73,7 @@ impl Panes {
         self.ids().next().unwrap_or(0)
     }
 
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.ids().count()
     }
 
@@ -140,6 +140,9 @@ impl Panes {
     }
 }
 
+/// The height of a terminal pane's own row of tabs, when the terminals are split.
+const TERM_STRIP_H: f32 = 26.0;
+
 /// The lines between columns can be dragged to resize them.
 fn drag_column_lines(panes: &mut Panes, ui: &mut Ui, area: Rect, salt: &str) {
     let total: f32 = panes.columns.iter().map(|c| c.weight).sum();
@@ -205,6 +208,7 @@ impl App {
         let several = rects.len() > 1;
         let mut focused = false;
         let mut outputs = Vec::new();
+        let mut tabs = TermTabs::default();
         for (pane, rect) in &rects {
             let shown = self.term_panes.shown.get(pane).copied();
             let here = |t: &Terminal| t.pane == *pane;
@@ -216,10 +220,35 @@ impl App {
             let Some(index) = index else {
                 continue;
             };
-            let inner = Rect::from_min_max(
-                rect.min + vec2(6.0, if several { 4.0 } else { 0.0 }),
-                rect.max - vec2(6.0, 6.0),
-            );
+            // Split, every pane has the tabs of its own terminals over it, instead of all
+            // of them in a row in the panel's bar.
+            if several {
+                let strip = Rect::from_min_size(
+                    rect.min + vec2(6.0, 4.0),
+                    vec2(rect.width() - 12.0, TERM_STRIP_H),
+                );
+                let mut strip_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("term_strip", *pane))
+                        .max_rect(strip)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                strip_ui.set_clip_rect(strip.intersect(ui.clip_rect()));
+                for i in 0..self.terms.len() {
+                    if self.terms[i].pane == *pane {
+                        self.term_tab(&mut strip_ui, i, i == index, &mut tabs);
+                    }
+                }
+                if icon_button(&mut strip_ui, icons::ADD, "New terminal in this pane") {
+                    tabs.new_in = Some(*pane);
+                }
+            }
+            let top = if several {
+                4.0 + TERM_STRIP_H + 2.0
+            } else {
+                0.0
+            };
+            let inner = Rect::from_min_max(rect.min + vec2(6.0, top), rect.max - vec2(6.0, 6.0));
             let term = &mut self.terms[index];
             let builder = egui::UiBuilder::new()
                 .id_salt(("term_pane", *pane))
@@ -308,6 +337,7 @@ impl App {
                 self.request(Request::TermInput { term, data: input });
             }
         }
+        self.apply_term_tabs(tabs);
     }
 
     /// The pane keyboard shortcuts act on, and where newly opened files go.
