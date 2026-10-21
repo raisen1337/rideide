@@ -595,6 +595,9 @@ struct App {
     paste_down: bool,
     drives: Vec<winshell::Drive>,
     drives_at: f64,
+    /// The drives being read again, away from the window's thread: a sleeping disk or a
+    /// network drive can take seconds to answer, and the window froze meanwhile.
+    drives_rx: Option<std::sync::mpsc::Receiver<Vec<winshell::Drive>>>,
     /// When the folders here were last checked for changes.
     dirs_at: f64,
     known: Vec<KnownFolder>,
@@ -660,6 +663,7 @@ impl App {
             paste_down: false,
             drives: winshell::drives(),
             drives_at: 0.0,
+            drives_rx: None,
             dirs_at: 0.0,
             known: known_folders(),
             thumbs: Thumbs::default(),
@@ -2427,8 +2431,18 @@ impl eframe::App for App {
             os::set_backdrop(frame, None, true);
         }
         self.now = ctx.input(|i| i.time);
-        if self.now - self.drives_at > 5.0 {
-            self.drives = winshell::drives();
+        if let Some(found) = self.drives_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.drives = found;
+            self.drives_rx = None;
+        }
+        if self.now - self.drives_at > 5.0 && self.drives_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let repaint = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(winshell::drives());
+                repaint.request_repaint();
+            });
+            self.drives_rx = Some(rx);
             self.drives_at = self.now;
         }
         self.poll();

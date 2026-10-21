@@ -3,6 +3,12 @@
 ride shows the entries newer than the version you had, once, the first time it starts after an
 update. Each `## <version>` heading starts an entry; write for the people using ride.
 
+## 0.9.21
+
+- **ride no longer slows down over time.** A long Claude conversation used to be drawn and read again in full on every frame, so the longer it got, the slower the whole window became, until everything moved in slow motion. Only the messages on screen are drawn now, however long the chat is.
+- **No more small freezes every few seconds** while chatting: the chat history is saved to disk in the background instead of holding up the window.
+- **Moving and resizing the window is smooth with Glass on.** The blur behind the window is now one Windows draws without lag; the acrylic one before made the window crawl when dragged or resized.
+
 ## 0.9.20
 
 - **Split terminals have their own tabs.** With the terminal panel split, each pane now shows the tabs of the terminals in it, right above it, with its own + for a new terminal there, instead of every terminal in one row in the panel's bar. With a single pane, the tabs stay in the bar as before.

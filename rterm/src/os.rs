@@ -154,6 +154,9 @@ mod imp {
     /// one is a pale, thin material that turns milky over anything bright, and goes flat
     /// whenever the window isn't the active one. This one keeps the theme's colour under
     /// the panes and stays blurred.
+    ///
+    /// It is the plain blur accent, not the acrylic one: with acrylic, Windows moved and
+    /// resized the window in slow motion, and the whole window lagged after a while.
     pub fn set_backdrop(
         window: &impl raw_window_handle::HasWindowHandle,
         tint: Option<[u8; 4]>,
@@ -165,7 +168,7 @@ mod imp {
         const BACKDROP_ACRYLIC: i32 = 3;
         const WCA_ACCENT_POLICY: u32 = 19;
         const ACCENT_DISABLED: i32 = 0;
-        const ACCENT_ACRYLIC: i32 = 4;
+        const ACCENT_BLUR: i32 = 3;
         // Tells the accent to use the tint given.
         const ACCENT_TINTED: i32 = 2;
         let Some(window) = hwnd(window) else {
@@ -178,7 +181,7 @@ mod imp {
         set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as i32);
         let mut accent = AccentPolicy {
             state: if tint.is_some() {
-                ACCENT_ACRYLIC
+                ACCENT_BLUR
             } else {
                 ACCENT_DISABLED
             },

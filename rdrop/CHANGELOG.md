@@ -3,6 +3,10 @@
 rkit shows the entries newer than the rdrop you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rdrop.
 
+## 0.5.3
+
+- **No more freezes every few seconds.** rdrop checked the drives on this computer every five seconds on the window itself, so a sleeping disk, a DVD drive or a network drive held up the whole window while it answered; that is done in the background now.
+
 ## 0.5.2
 
 - **Dragging files in from Explorer or the desktop** lights up the pane under the mouse and says where they will go ("Copy 3 items into prod · …/var/www"), and they go into that pane. Before, with several panes, nothing showed while dragging, and the files could go into the pane last clicked instead.

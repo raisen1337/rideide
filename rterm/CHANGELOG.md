@@ -3,6 +3,11 @@
 rkit shows the entries newer than the rterm you have before you update it. Each `## <version>`
 heading starts an entry; write for the people using rterm.
 
+## 0.5.4
+
+- **rterm no longer gets slow after a while.** It kept redrawing its window without pause, even with nothing happening, using a good part of a processor core all the time; now it draws only when something changes, and sits at almost nothing when idle.
+- **Moving and resizing the window is smooth with Glass on.** The blur behind the window is now one Windows draws without lag; the acrylic one before made the window crawl when dragged or resized.
+
 ## 0.5.3
 
 - **rterm opens at the size you left it**, or maximized if you left it maximized. The size it remembered shrank a little each time (more so when rterm was closed while minimized), until it opened at its smallest; it also forgot its normal size whenever it was closed maximized.

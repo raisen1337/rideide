@@ -789,6 +789,9 @@ struct App {
     /// Hash of the chat state last written to disk, and when to look again.
     saved_state: u64,
     next_save: f64,
+    /// The chats being written to disk, away from the window's thread: the file is large
+    /// enough that writing it (and the scan that follows) held up frames.
+    state_writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     themes: themes::Themes,
     palette: palette::Palette,
     settings_section: usize,
@@ -1243,6 +1246,9 @@ mod os {
     /// one is a pale, thin material that turns milky over anything bright, and goes flat
     /// whenever the window isn't the active one. This one keeps the theme's colour under
     /// the panes and stays blurred.
+    ///
+    /// It is the plain blur accent, not the acrylic one: with acrylic, Windows moved and
+    /// resized the window in slow motion, and the whole window lagged after a while.
     pub fn set_backdrop(
         window: &impl raw_window_handle::HasWindowHandle,
         tint: Option<[u8; 4]>,
@@ -1254,7 +1260,7 @@ mod os {
         const BACKDROP_ACRYLIC: i32 = 3;
         const WCA_ACCENT_POLICY: u32 = 19;
         const ACCENT_DISABLED: i32 = 0;
-        const ACCENT_ACRYLIC: i32 = 4;
+        const ACCENT_BLUR: i32 = 3;
         // Tells the accent to use the tint given.
         const ACCENT_TINTED: i32 = 2;
         let Some(window) = hwnd(window) else {
@@ -1267,7 +1273,7 @@ mod os {
         set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as i32);
         let mut accent = AccentPolicy {
             state: if tint.is_some() {
-                ACCENT_ACRYLIC
+                ACCENT_BLUR
             } else {
                 ACCENT_DISABLED
             },
@@ -1697,6 +1703,7 @@ impl App {
             ai: ai::Ai::default(),
             saved_state: 0,
             next_save: 0.0,
+            state_writer: None,
             themes: themes::Themes::default(),
             palette: palette::Palette::default(),
             settings_section: 0,
@@ -2042,23 +2049,38 @@ impl App {
         self.saved_state = hash_of(&text);
     }
 
-    /// Writes the chats to disk if they changed. Cheap enough to call often.
+    /// Writes the chats to disk if they changed, in the background. Cheap enough to call
+    /// often; while a write is still going, the next one waits for a later call.
     fn write_state(&mut self) {
+        if self.state_writer.as_ref().is_some_and(|w| !w.is_finished()) {
+            return;
+        }
+        self.finish_state_write();
         let text = self.state_json();
         let hash = hash_of(&text);
         let Some(path) = state_path().filter(|_| hash != self.saved_state) else {
             return;
         };
-        // Written beside the real file and renamed over it, so a crash can't leave half a file.
-        let temp = path.with_extension("json.tmp");
-        let written = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&temp, &text))
-            .and_then(|_| std::fs::rename(&temp, &path));
-        match written {
-            Ok(()) => self.saved_state = hash,
-            Err(error) => self.status = format!("Couldn't save chat history: {error}"),
+        self.saved_state = hash;
+        self.state_writer = Some(std::thread::spawn(move || {
+            // Written beside the real file and renamed over it, so a crash can't leave half a file.
+            let temp = path.with_extension("json.tmp");
+            path.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|_| std::fs::write(&temp, &text))
+                .and_then(|_| std::fs::rename(&temp, &path))
+        }));
+    }
+
+    /// Waits for the write in progress, if any, and reports how it went.
+    fn finish_state_write(&mut self) {
+        let Some(writer) = self.state_writer.take() else {
+            return;
+        };
+        if let Ok(Err(error)) = writer.join() {
+            // Not on disk, so the next call tries again.
+            self.saved_state = 0;
+            self.status = format!("Couldn't save chat history: {error}");
         }
     }
 
@@ -5706,6 +5728,10 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        // The last chats written must be on disk before the process ends.
+        self.finish_state_write();
+        self.write_state();
+        self.finish_state_write();
         // Tribib's window goes back to being its own before ride's goes away with it.
         self.designer_release();
         // A downloaded update goes in as ride closes; the setup waits for it to be gone.

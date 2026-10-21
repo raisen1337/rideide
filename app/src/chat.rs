@@ -349,6 +349,12 @@ pub struct Chat {
     /// Files were put back; the app should read them again.
     rewound: bool,
     paste_down: bool,
+    /// Each transcript item's height as last drawn, with what it was drawn from (see
+    /// `item_key`). Items scrolled out of sight take their height and aren't drawn: a
+    /// long conversation drew and parsed every message on every frame and slowed to a crawl.
+    heights: Vec<(u64, f32)>,
+    /// The width the heights were measured at.
+    heights_width: f32,
 }
 
 /// One edit Claude made to a file, as it described it to its editing tool.
@@ -501,6 +507,8 @@ impl Default for Chat {
             rewinding: false,
             rewound: false,
             paste_down: false,
+            heights: Vec::new(),
+            heights_width: 0.0,
         }
     }
 }
@@ -2015,7 +2023,31 @@ impl Chat {
         ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             let width = ui.available_width();
+            if width != self.heights_width {
+                self.heights.clear();
+                self.heights_width = width;
+            }
+            self.heights.resize(self.items.len(), (0, 0.0));
+            // A little beyond what shows, so scrolling doesn't reveal an empty edge.
+            let seen = ui.clip_rect().expand2(egui::vec2(0.0, 300.0));
+            // The item drawn last, its key and where it started: its height is known once
+            // the next one starts (an arm may `continue`, so it is taken there, not after).
+            let mut drawn: Option<(usize, u64, f32)> = None;
+            let last = self.items.len() - 1;
             for (index, item) in self.items.iter().enumerate() {
+                let top = ui.cursor().top();
+                if let Some((at, key, start)) = drawn.take() {
+                    self.heights[at] = (key, top - start);
+                }
+                let key = item_key(item, idle, confirm == Some(index), &self.subs);
+                let (known, height) = self.heights[index];
+                if index != last && known == key && height > 0.0 {
+                    if top + height < seen.top() || top > seen.bottom() {
+                        ui.add_space(height);
+                        continue;
+                    }
+                }
+                drawn = Some((index, key, top));
                 match item {
                     Item::User(text) => {
                         let checkpoint = match self.items.get(index + 1) {
@@ -2140,6 +2172,9 @@ impl Chat {
                         });
                     }
                 }
+            }
+            if let Some((at, key, start)) = drawn {
+                self.heights[at] = (key, ui.cursor().top() - start);
             }
             if self.needs_login {
                 ui.label(
@@ -2612,6 +2647,34 @@ fn icon_button(ui: &mut Ui, icon: char, hint: &str) -> bool {
 
 /// Renders the subset of Markdown Claude's answers mostly use: fenced code,
 /// headings, bullets, **bold** and `inline code`.
+/// What an item's height depends on, so a height measured for it is only reused while
+/// the item would still be drawn the same: its kind, how much text it has, and the state
+/// its buttons and pictures show.
+fn item_key(
+    item: &Item,
+    idle: bool,
+    confirming: bool,
+    subs: &std::collections::HashMap<String, Sub>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(item).hash(&mut h);
+    match item {
+        Item::User(text) => (text.len(), idle, confirming).hash(&mut h),
+        Item::From { who, text } => (who.len(), text.len()).hash(&mut h),
+        Item::Text(text) | Item::Error(text) | Item::Note(text) => text.len().hash(&mut h),
+        Item::Tool { name, detail } => (name.len(), detail.len()).hash(&mut h),
+        Item::Image { name, texture } => (name.len(), texture.is_some()).hash(&mut h),
+        Item::Seen { name, bytes } => (name.len(), bytes.is_some()).hash(&mut h),
+        Item::Checkpoint(_) => {}
+        Item::Agent { id, kind, task } => {
+            let sub = subs.get(id).map(|s| (s.items.len(), s.done));
+            (kind.len(), task.len(), sub).hash(&mut h)
+        }
+    }
+    h.finish()
+}
+
 pub(crate) fn markdown(ui: &mut Ui, text: &str, salt: usize) {
     // What an agent tells a teammate is shown in that teammate's chat; here a
     // one-line chip per directive is enough.

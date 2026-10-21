@@ -261,6 +261,9 @@ struct App {
     /// The backdrop last given to the window: its tint and whether it is dark.
     applied: Option<(Option<[u8; 4]>, bool)>,
     theme_shown: String,
+    /// The window's title as last given. Sending it asks for another frame, so it is only
+    /// sent when it changes; every frame, it kept the window redrawing without end.
+    title_shown: String,
     /// Console programs Windows hands to rterm as the default terminal.
     handoffs: Receiver<handoff::Handoff>,
     /// Why rterm couldn't be made the default terminal, shown in Settings.
@@ -315,6 +318,7 @@ impl App {
             adopted: false,
             applied: None,
             theme_shown: name,
+            title_shown: String::new(),
             handoffs: handoff::listen(ctx.clone()),
             default_error: None,
             place: saved_place(),
@@ -1370,7 +1374,10 @@ impl eframe::App for App {
             Some(p) => p.shown().title(),
             None => "rterm".into(),
         };
-        ctx.send_viewport_cmd(ViewportCommand::Title(title));
+        if title != self.title_shown {
+            self.title_shown = title.clone();
+            ctx.send_viewport_cmd(ViewportCommand::Title(title));
+        }
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
